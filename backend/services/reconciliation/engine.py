@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from models.db_models import (
     CDU, CashSnapshot, PortfolioPosition, PriceReconciliation,
-    ReconciliationResult, RepoLot, Trade,
+    ReconciliationResult, RepoLot, SourceDocument, Trade,
 )
 from services.calculator.constants import RECON_TOLERANCE_KZT, RECON_TOLERANCE_USD
 
@@ -99,6 +99,19 @@ def _recon_trade_vs_cert(
 def _recon_rr_vs_holdings(
     db: Session, result: ReconciliationResult, cdu_id: int, recon_date: date,
 ) -> None:
+    recon_doc = db.execute(select(SourceDocument).where(
+        SourceDocument.doc_type == "RECONCILIATION",
+        SourceDocument.cdu_id == cdu_id,
+        SourceDocument.doc_date == recon_date,
+        SourceDocument.parse_status == "OK",
+    ).order_by(SourceDocument.uploaded_at.desc())).scalars().first()
+    parsed_totals: Dict[str, float] = {}
+    if recon_doc and recon_doc.parse_meta_json:
+        try:
+            parsed_totals = json.loads(recon_doc.parse_meta_json).get("totals", {})
+        except Exception:
+            parsed_totals = {}
+
     # Cash from internal snapshot
     cash_rows = db.execute(select(CashSnapshot).where(
         CashSnapshot.cdu_id == cdu_id,
@@ -122,18 +135,73 @@ def _recon_rr_vs_holdings(
     internal_repo = sum(r.face_value or 0 for r in repo_rows)
 
     total_internal = internal_cash + internal_securities + internal_repo
-
-    result.expected_value = total_internal
-    result.actual_value = total_internal  # placeholder until holdings totals parsed
-    result.deviation = 0.0
-    result.status = "PENDING"
-    result.details_json = json.dumps({
+    internal = {
         "cash": internal_cash,
         "securities": internal_securities,
         "repo": internal_repo,
         "total": total_internal,
-        "note": "Holdings totals not yet parsed — manual check required",
-    })
+    }
+
+    if not parsed_totals:
+        result.expected_value = total_internal
+        result.actual_value = None
+        result.deviation = None
+        result.status = "PENDING"
+        result.details_json = json.dumps({
+            "internal": internal,
+            "note": "Файл сверки ЧДУ не загружен или не содержит итогов",
+        }, ensure_ascii=False)
+        return
+
+    items = []
+    max_abs_deviation = 0.0
+    all_ok = True
+    component_keys = ("cash", "securities", "repo", "ar")
+    derived_external_total = sum(float(parsed_totals.get(key) or 0.0) for key in component_keys)
+    total_rounded_from_components = False
+
+    for key, expected in internal.items():
+        actual = parsed_totals.get(key)
+        if actual is None:
+            items.append({"field": key, "expected": expected, "actual": None, "status": "MISSING"})
+            all_ok = False
+            continue
+        deviation = expected - float(actual)
+        ok = abs(deviation) <= RECON_TOLERANCE_KZT
+
+        if key == "total" and not ok:
+            derived_deviation = expected - derived_external_total
+            rounded_total_delta = float(actual) - derived_external_total
+            if abs(derived_deviation) <= RECON_TOLERANCE_KZT and abs(rounded_total_delta) <= 0.02:
+                ok = True
+                total_rounded_from_components = True
+                deviation = derived_deviation
+
+        max_abs_deviation = max(max_abs_deviation, abs(deviation))
+        all_ok = all_ok and ok
+        item = {
+            "field": key,
+            "expected": expected,
+            "actual": actual,
+            "deviation": deviation,
+            "status": "OK" if ok else "MISMATCH",
+        }
+        if key == "total" and total_rounded_from_components:
+            item["derived_actual"] = derived_external_total
+            item["note"] = "total row rounded, components used for match"
+        items.append(item)
+
+    result.expected_value = total_internal
+    result.actual_value = derived_external_total if total_rounded_from_components else parsed_totals.get("total")
+    result.deviation = (total_internal - float(result.actual_value)) if result.actual_value is not None else max_abs_deviation
+    result.tolerance = RECON_TOLERANCE_KZT
+    result.status = "OK" if all_ok else "MISMATCH"
+    result.source_doc_b_id = recon_doc.id
+    result.details_json = json.dumps({
+        "internal": internal,
+        "external": parsed_totals,
+        "items": items,
+    }, ensure_ascii=False)
 
 
 # ───────── 3. Cash ↔ PDF Statement ─────────

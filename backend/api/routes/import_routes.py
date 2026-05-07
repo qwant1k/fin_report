@@ -66,6 +66,8 @@ async def upload_single_rr(
             "repo_lots": result.repo_lots,
             "deposit_lots": result.deposit_lots,
             "accounts_receivable": result.ar_rows,
+            "report_summaries": result.report_summaries,
+            "report_positions": result.report_positions,
         },
     }
 

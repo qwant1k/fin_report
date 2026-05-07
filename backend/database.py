@@ -108,6 +108,15 @@ def _apply_dev_migrations() -> None:
                     f"ALTER TABLE accounts_receivable ADD COLUMN {col} {ddl}",
                 ))
 
+    # mbm_index — добавлен столбец mod_duration
+    if "mbm_index" in inspector.get_table_names():
+        mbm_cols = {c["name"] for c in inspector.get_columns("mbm_index")}
+        if "mod_duration" not in mbm_cols:
+            additions.append((
+                "mbm_index", "mod_duration",
+                "ALTER TABLE mbm_index ADD COLUMN mod_duration FLOAT",
+            ))
+
     # trades table — soft-delete columns
     if "trades" in inspector.get_table_names():
         trade_cols = {c["name"] for c in inspector.get_columns("trades")}

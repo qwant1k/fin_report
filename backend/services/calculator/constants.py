@@ -122,10 +122,13 @@ CDU_NAME_ALIASES: Dict[str, str] = {
     "centras": "Centras Securities",
     "centras securities": "Centras Securities",
     "centr": "Centras Securities",
+    "сентрас": "Centras Securities",  # русская транслитерация в Risk Report
     "tansar": "Tansar Capital",
     "tansar capital": "Tansar Capital",
+    "тансар": "Tansar Capital",
     "ud capital": "UD Capital",
     "udcap": "UD Capital",
+    "ud": "UD Capital",
     # Портфели НБ РК
     "собст": "НБ РК — Собственные активы",
     "соб": "НБ РК — Собственные активы",

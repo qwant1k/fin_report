@@ -11,7 +11,7 @@ Expected layout (no header row; data starts immediately):
   Col 7+: None
 """
 from __future__ import annotations
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import hashlib
@@ -54,10 +54,8 @@ def parse_holdings_xlsx(file_path: Path | str) -> Dict[str, Any]:
             continue
 
         # Extract date from first valid row if not yet set
-        if report_date is None and len(row) > 3 and isinstance(row[3], datetime):
-            report_date = row[3].date()
-        if report_date is None and len(row) > 3 and isinstance(row[3], date):
-            report_date = row[3]
+        if report_date is None and len(row) > 3:
+            report_date = _to_date(row[3])
 
         inst_type = str(row[4]).strip().lower() if len(row) > 4 and row[4] else None
         label = str(row[5]).strip() if len(row) > 5 and row[5] else None
@@ -119,6 +117,8 @@ def import_holdings_xlsx(
     parsed = parse_holdings_xlsx(file_path)
     cdu_name = parsed["cdu_name"]
     report_date = parsed["report_date"] or date.today()
+    cash_rows = _aggregate_cash_rows(parsed["cash"])
+    position_rows = _aggregate_position_rows(parsed["positions"])
 
     cdu_id: Optional[int] = None
     if cdu_name:
@@ -130,12 +130,19 @@ def import_holdings_xlsx(
 
     if cdu_id is None:
         logger.warning(f"Holdings import: CDU not resolved for {file_path}")
-        return {"cash_snapshots": 0, "portfolio_positions": 0, "skipped": 1}
+        return {
+            "cash_snapshots": 0,
+            "portfolio_positions": 0,
+            "skipped": 1,
+            "cdu_name": cdu_name,
+            "report_date": report_date,
+            "warnings": parsed.get("warnings", []),
+        }
 
     counters = {"cash_snapshots": 0, "portfolio_positions": 0, "skipped": 0}
 
     # Upsert cash snapshots
-    for cr in parsed["cash"]:
+    for cr in cash_rows:
         ccy = cr["currency"]
         amt = cr["amount"]
         existing = db.execute(select(CashSnapshot).where(
@@ -156,7 +163,7 @@ def import_holdings_xlsx(
         counters["cash_snapshots"] += 1
 
     # Upsert portfolio positions
-    for pos in parsed["positions"]:
+    for pos in position_rows:
         isin = pos["isin"]
         qty = pos["quantity"]
         existing = db.execute(select(PortfolioPosition).where(
@@ -179,7 +186,12 @@ def import_holdings_xlsx(
 
     db.commit()
     logger.info(f"Holdings import: {counters} cdu={cdu_id} date={report_date}")
-    return counters
+    return {
+        **counters,
+        "cdu_name": cdu_name,
+        "report_date": report_date,
+        "warnings": parsed.get("warnings", []),
+    }
 
 
 def _to_float(v: Any) -> Optional[float]:
@@ -195,7 +207,7 @@ def _to_float(v: Any) -> Optional[float]:
 
 
 def _guess_bond_category(isin: str) -> str:
-    if isin.startswith(("KFUS", "MFRK")):
+    if isin.startswith(("KFUS", "MFRK", "KZK", "KZKD")):
         return "GOV_BONDS"
     if isin.startswith(("EABR", "EAB")):
         return "AGENCY_BONDS"
@@ -204,3 +216,44 @@ def _guess_bond_category(isin: str) -> str:
     if isin.startswith(("XS", "US", "RU")):
         return "FOREIGN_BONDS"
     return "OTHER"
+
+
+def _aggregate_cash_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    aggregated: Dict[str, float] = {}
+    for row in rows:
+        currency = row["currency"]
+        aggregated[currency] = aggregated.get(currency, 0.0) + float(row.get("amount") or 0.0)
+    return [{"currency": currency, "amount": amount} for currency, amount in aggregated.items()]
+
+
+def _aggregate_position_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    aggregated: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            row["isin"],
+            row.get("instrument_type") or "",
+            row["category"],
+        )
+        existing = aggregated.get(key)
+        if existing is None:
+            aggregated[key] = dict(row)
+            continue
+        existing["quantity"] = float(existing.get("quantity") or 0.0) + float(row.get("quantity") or 0.0)
+        existing["row_idx"] = min(existing.get("row_idx", 0), row.get("row_idx", 0))
+    return list(aggregated.values())
+
+
+def _to_date(v: Any) -> Optional[date]:
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    if isinstance(v, (int, float)) and 1 <= float(v) <= 60000:
+        return (datetime(1899, 12, 30) + timedelta(days=float(v))).date()
+    if isinstance(v, str):
+        for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(v.strip(), fmt).date()
+            except ValueError:
+                continue
+    return None

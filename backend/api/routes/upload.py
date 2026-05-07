@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import get_db
-from models.db_models import CDU, RawTrade, TradeFile
+from models.db_models import CDU, RawTrade, SourceDocument, TradeFile
 from models.schemas import TradeFileBrief, UploadResponse
 from services.parser import TradeReportParser
 from services.parser.trade_importer import import_trades_from_parsed
@@ -77,6 +77,26 @@ async def upload_trade_report(
     db.add(tf)
     db.flush()
 
+    source_doc = SourceDocument(
+        doc_type="TRADE_REPORT",
+        cdu_id=cdu.id if cdu else None,
+        doc_date=parsed_date,
+        file_name=file.filename,
+        file_path=str(target_path),
+        sha256=parsed.sha256,
+        file_size=target_path.stat().st_size if target_path.exists() else None,
+        uploaded_by=None,
+        parsed_at=datetime.utcnow(),
+        parse_status="OK",
+        parse_meta_json=json.dumps(
+            {"trade_file_id": tf.id, "warnings": parsed.warnings, "skipped": parsed.skipped[:50]},
+            ensure_ascii=False,
+        ),
+        rows_imported=parsed.rows_parsed,
+    )
+    db.add(source_doc)
+    db.flush()
+
     for pr in parsed.rows:
         f = pr.fields
         db.add(RawTrade(
@@ -139,7 +159,7 @@ async def upload_trade_report(
     if not parsed.cdu_name and cdu:
         parsed.cdu_name = cdu.name
     import_counters = import_trades_from_parsed(
-        db, parsed, uploaded_by=None, source_doc_id=tf.id
+        db, parsed, uploaded_by=None, source_doc_id=source_doc.id
     )
     tf.status = "IMPORTED"
     db.commit()
@@ -175,6 +195,9 @@ def set_file_cdu(file_id: int, cdu_id: int, db: Session = Depends(get_db)):
     tf.cdu_id = cdu.id
     for tr in tf.trades:
         tr.cdu_id = cdu.id
+    if tf.sha256:
+        for doc in db.query(SourceDocument).filter_by(doc_type="TRADE_REPORT", sha256=tf.sha256).all():
+            doc.cdu_id = cdu.id
     db.commit()
     return {"ok": True, "cdu_id": cdu.id}
 
@@ -193,7 +216,27 @@ def import_file_to_trades(file_id: int, db: Session = Depends(get_db)):
         cdu = db.get(CDU, tf.cdu_id)
         if cdu:
             parsed.cdu_name = cdu.name
-    counters = import_trades_from_parsed(db, parsed, uploaded_by=None, source_doc_id=tf.id)
+    source_doc = db.query(SourceDocument).filter_by(
+        doc_type="TRADE_REPORT",
+        sha256=tf.sha256,
+    ).first()
+    if source_doc is None:
+        source_doc = SourceDocument(
+            doc_type="TRADE_REPORT",
+            cdu_id=tf.cdu_id,
+            doc_date=tf.trade_date,
+            file_name=tf.filename,
+            file_path=tf.raw_file_path,
+            sha256=tf.sha256,
+            file_size=path.stat().st_size if path.exists() else None,
+            parsed_at=datetime.utcnow(),
+            parse_status="OK",
+            parse_meta_json=json.dumps({"trade_file_id": tf.id}, ensure_ascii=False),
+        )
+        db.add(source_doc)
+        db.flush()
+    counters = import_trades_from_parsed(db, parsed, uploaded_by=None, source_doc_id=source_doc.id)
+    source_doc.rows_imported = counters.get("trades", 0)
     tf.status = "IMPORTED"
     db.commit()
     return {"ok": True, "trades": counters.get("trades", 0), "warnings": parsed.warnings}

@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     log_dir: str = "./data/logs"
 
     # KASE
-    kase_bonds_url: str = "https://kase.kz/ru/bonds/"
+    kase_bonds_url: str = "https://kase.kz/ru/markets/markets-valuation/market-prices"
     kase_repo_url: str = "https://kase.kz/ru/repo/"
     kase_indices_url: str = "https://kase.kz/ru/indices/"
     kase_cache_ttl_seconds: int = 1800
@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     # MBM
     nbrk_mbm_url: str = "https://nationalbank.kz/ru/page/mbm"
     nbrk_rates_url: str = "https://nationalbank.kz/ru/rates/"
+    kase_mbm_xlsx_url: str = "https://kase.kz/api/indicators/mbm-index/archive-xls"
+    kase_mbm_lookback_days: int = 14
 
     # Scheduler
     kase_fetch_cron_hour: int = 18

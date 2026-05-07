@@ -120,6 +120,7 @@ class KaseClient:
     async def _try_json(self, cli: httpx.AsyncClient) -> List[KaseQuote]:
         # KASE often serves data as a JSON endpoint — попытка нескольких известных
         candidates = [
+            "https://kase.kz/ru/markets/markets-valuation/market-prices?format=json",
             "https://kase.kz/api/v1/bonds/?format=json",
             "https://kase.kz/api/list/bonds/?format=json",
             "https://kase.kz/ru/bonds/data/",
@@ -193,12 +194,18 @@ class KaseClient:
                 code = row.get("код") or row.get("тикер") or cells[0]
                 if not code or len(code) > 30:
                     continue
+                close_price = (
+                    row.get("рыночная цена")
+                    or row.get("закрытие")
+                    or row.get("цена")
+                    or row.get("last")
+                )
                 out.append(KaseQuote(
                     instrument_code=str(code).strip(),
                     isin=row.get("isin"),
-                    instrument_name=row.get("наименование") or row.get("название"),
-                    close_price=_to_float(row.get("закрытие") or row.get("цена") or row.get("last")),
-                    ytm=_to_float(row.get("ytm") or row.get("доходность")),
+                    instrument_name=row.get("компания") or row.get("наименование") or row.get("название"),
+                    close_price=_to_float(close_price),
+                    ytm=_to_float(row.get("доходность до погашения, %") or row.get("ytm") or row.get("доходность")),
                     accrued_interest=_to_float(row.get("нкд")),
                     duration=_to_float(row.get("дюрация")),
                     source="html",

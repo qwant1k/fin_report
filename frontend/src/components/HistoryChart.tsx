@@ -21,12 +21,23 @@ interface HistoryRow {
   duration: number
 }
 
+interface Props {
+  from?: string
+  to?: string
+}
+
 const colors = ['#1F6B38', '#70AD47', '#FFA000', '#1565C0', '#7E57C2']
 
-export default function HistoryChart() {
+export default function HistoryChart({ from, to }: Props = {}) {
   const { data } = useQuery<HistoryRow[]>({
-    queryKey: ['history-chart'],
-    queryFn: async () => (await api.get('/dashboard/history', { params: { days: 90 } })).data,
+    queryKey: ['history-chart', from, to],
+    queryFn: async () => {
+      const params: Record<string, string | number> = {}
+      if (from) params.from = from
+      if (to) params.to = to
+      if (!from) params.days = 90
+      return (await api.get('/dashboard/history', { params })).data
+    },
   })
 
   // pivot to date → cdu → mv

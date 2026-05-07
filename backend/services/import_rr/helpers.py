@@ -9,6 +9,68 @@ from typing import Any, Iterable, Optional
 
 from openpyxl.worksheet.worksheet import Worksheet
 
+
+class _MatCell:
+    """Лёгкая ячейка: имеет только атрибут ``.value`` (как у openpyxl Cell)."""
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any):
+        self.value = value
+
+
+class MaterializedSheet:
+    """Снимок листа в виде 2D-списка значений.
+
+    Полностью совместим с подмножеством API ``openpyxl.Worksheet``, которое
+    используют наши парсеры: ``cell(row, col).value``, ``max_row``,
+    ``max_column``, ``title``, итерация по строкам.
+
+    Зачем: в режиме ``read_only=True`` openpyxl возвращает «съехавшие» данные
+    при многократных вызовах ``ws.cell(r, c)`` поверх нескольких листов одной
+    книги (внутренний потоковый парсер делит общее состояние). Один проход
+    ``iter_rows(values_only=True)`` возвращает корректные значения, после
+    чего мы работаем уже с in-memory снимком.
+    """
+    __slots__ = ("title", "_data", "max_row", "max_column")
+
+    def __init__(self, title: str, rows: list[tuple]):
+        self.title = title
+        self._data = rows  # list[tuple] — индекс 0 = excel row 1
+        self.max_row = len(rows)
+        self.max_column = max((len(r) for r in rows), default=0)
+
+    def cell(self, row: int, col: int) -> _MatCell:
+        """1-индексный доступ к ячейке. Возвращает заглушку с ``.value``."""
+        if row < 1 or col < 1 or row > self.max_row:
+            return _MatCell(None)
+        rec = self._data[row - 1]
+        if col > len(rec):
+            return _MatCell(None)
+        return _MatCell(rec[col - 1])
+
+    def iter_rows(self, *, min_row: int = 1, max_row: Optional[int] = None,
+                  values_only: bool = True, **_kwargs):
+        """Совместимая итерация (только values_only=True)."""
+        end = max_row or self.max_row
+        for r in range(min_row, end + 1):
+            rec = self._data[r - 1] if r - 1 < len(self._data) else ()
+            if values_only:
+                yield tuple(rec)
+            else:
+                yield tuple(_MatCell(v) for v in rec)
+
+
+def materialize_sheet(ws: Worksheet) -> MaterializedSheet:
+    """Снять снимок листа openpyxl в ``MaterializedSheet`` за один проход.
+
+    Безопасно использовать в read_only-режиме: ``iter_rows(values_only=True)``
+    идемпотентен и не страдает от стейт-блида между листами.
+    """
+    rows: list[tuple] = []
+    for row in ws.iter_rows(values_only=True):
+        rows.append(row if isinstance(row, tuple) else tuple(row))
+    return MaterializedSheet(getattr(ws, "title", ""), rows)
+
 # Шаблон имени файла: risk report_DDMMYYYY_.xlsm  (с подчёркиванием в конце или без)
 RR_FILENAME_RE = re.compile(
     r"risk[\s_]*report[\s_]*[-_]?(\d{2})\.?(\d{2})\.?(\d{4})_?",
@@ -147,13 +209,24 @@ def find_col(headers: dict[str, int], *aliases: str) -> Optional[int]:
     return None
 
 
-def iter_data_rows(ws: Worksheet, start_row: int, *, stop_on_empty_a: bool = True):
-    """Итератор по строкам данных начиная со start_row.
-    Останавливается если в первой колонке N пустых строк подряд."""
+def iter_data_rows(
+    ws: Worksheet,
+    start_row: int,
+    *,
+    stop_on_empty_a: bool = True,
+    key_col: int = 1,
+    max_empty: int = 5,
+):
+    """Итератор по строкам данных начиная со ``start_row``.
+
+    По умолчанию проверяет колонку A (исторический контракт), но в Risk Report
+    некоторые листы имеют пустую колонку A (например, ГЦБ/Агентские/МФО — данные
+    начинаются с колонки B, ISIN). В таких случаях передайте ``key_col``,
+    указывающий на колонку, по которой определяется наличие данных.
+    """
     empty_streak = 0
-    max_empty = 5
     for r in range(start_row, (ws.max_row or 0) + 1):
-        first = ws.cell(r, 1).value
+        first = ws.cell(r, key_col).value
         if first is None or (isinstance(first, str) and not first.strip()):
             empty_streak += 1
             if stop_on_empty_a and empty_streak >= max_empty:
@@ -171,13 +244,40 @@ def normalize_subfund_name(s: Any) -> Optional[str]:
 
 def safe_sheet(wb, *names: str):
     """Получить лист по любому из имён или None.
-    Поиск нечёткий (case-insensitive, без пробелов/двоеточий)."""
+
+    Алгоритм (приоритет от точного к нечёткому, чтобы избежать ложных срабатываний
+    типа ``Repo`` ⊂ ``Report``):
+
+    1. Точное совпадение нормализованных имён (без пробелов/`_-:.()`).
+    2. Целевое имя — префикс имени листа (``repo`` → ``repo_lots``).
+    3. Имя листа — префикс целевого (``mbm index`` → ``mbm index - с 1 апр…``).
+    4. Двусторонняя подстрока — последний фоллбэк.
+    """
     if not wb:
         return None
-    targets = [re.sub(r"[\s_:.()-]+", "", n.lower()) for n in names]
-    for sheet_name in wb.sheetnames:
-        normed = re.sub(r"[\s_:.()-]+", "", sheet_name.lower())
-        for t in targets:
-            if t and (t == normed or t in normed or normed in t):
+    targets = [re.sub(r"[\s_:.()-]+", "", n.lower()) for n in names if n]
+    if not targets:
+        return None
+    sheets = [(s, re.sub(r"[\s_:.()-]+", "", s.lower())) for s in wb.sheetnames]
+
+    # Pass 1 — exact
+    for t in targets:
+        for sheet_name, normed in sheets:
+            if t == normed:
+                return wb[sheet_name]
+    # Pass 2 — target — префикс имени листа
+    for t in targets:
+        for sheet_name, normed in sheets:
+            if normed.startswith(t):
+                return wb[sheet_name]
+    # Pass 3 — имя листа — префикс target
+    for t in targets:
+        for sheet_name, normed in sheets:
+            if t.startswith(normed) and normed:
+                return wb[sheet_name]
+    # Pass 4 — двусторонний substring (старое поведение)
+    for t in targets:
+        for sheet_name, normed in sheets:
+            if t in normed or normed in t:
                 return wb[sheet_name]
     return None

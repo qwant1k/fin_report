@@ -6,7 +6,12 @@ import pytest
 
 from services.parser import TradeReportParser
 
-REAL_FILE = Path(__file__).resolve().parents[3] / "Trade report 1009 2025.xlsx"
+REAL_FILE = (
+    Path(__file__).resolve().parents[2]
+    / "Примеры"
+    / "Пример 1 Первичка ЧДУ"
+    / "Trade report 1009 2025.xlsx"
+)
 
 
 @pytest.mark.skipif(not REAL_FILE.exists(), reason="Real trade report file not present")
@@ -20,7 +25,7 @@ def test_real_trade_report_parses():
     assert parsed.rows_parsed == 6, "В файле 6 исполненных сделок"
     # 3 ноги REPO: HEADER, BUY, SELL
     op_types = {r.fields["operation_type"] for r in parsed.rows}
-    assert {"REPO_HEADER", "REPO_BUY", "REPO_SELL"}.issubset(op_types)
+    assert {"REPO_HEADER", "REPO_OPEN", "REPO_CLOSE"}.issubset(op_types)
     # Все 6 строк — обратное РЕПО
     cats = {r.fields["instrument_category"] for r in parsed.rows}
     assert cats == {"REVERSE_REPO"}

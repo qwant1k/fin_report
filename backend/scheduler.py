@@ -64,15 +64,20 @@ async def fetch_mbm_job():
         if existing:
             existing.ytm_value = val.ytm_value
             existing.duration = val.duration
+            existing.mod_duration = val.mod_duration
             existing.source = val.source
         else:
             db.add(MBMIndex(
                 index_date=val.index_date,
                 ytm_value=val.ytm_value,
                 duration=val.duration,
+                mod_duration=val.mod_duration,
                 source=val.source,
             ))
-    logger.info(f"MBM fetched: ytm={val.ytm_value} dur={val.duration}")
+    logger.info(
+        f"MBM fetched: idx={val.ytm_value} dur={val.duration} "
+        f"moddur={val.mod_duration} src={val.source}"
+    )
 
 
 async def daily_automation_job():

@@ -11,11 +11,15 @@ from sqlalchemy.orm import Session
 from database import get_db
 from models.db_models import (
     Alert,
+    BondLot,
     CDU,
     CDULimit,
     MBMIndex,
+    MVSnapshot,
     PortfolioPosition,
     PortfolioSummary,
+    RepoLot,
+    Trade,
 )
 from models.schemas import (
     AlertOut,
@@ -37,16 +41,45 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 @router.get("/summary", response_model=DashboardResponse)
 def dashboard_summary(
     report_date: Optional[date] = Query(None),
+    from_: Optional[date] = Query(None, alias="from"),
+    to_: Optional[date] = Query(None, alias="to"),
     db: Session = Depends(get_db),
 ):
+    if to_ is not None:
+        report_date = to_
     if report_date is None:
-        last = db.execute(select(PortfolioSummary).order_by(PortfolioSummary.summary_date.desc())
-                          ).scalars().first()
-        report_date = last.summary_date if last else date.today()
+        report_date = date.today()
 
-    summaries = db.execute(select(PortfolioSummary).where(
-        PortfolioSummary.summary_date == report_date,
-    )).scalars().all()
+    # As-of dashboard: each CDU can have its own latest available calculated
+    # slice. If Halyk was calculated on 10.09 and BCC on 11.09, the main report
+    # should show all three blocks instead of only the global latest date.
+    # When `from_` is provided, we restrict to the latest slice that falls
+    # within [from_, to_] so the dashboard shows only data inside the period.
+    def _query_summaries(upper: date, lower: Optional[date]):
+        stmt = select(PortfolioSummary).where(PortfolioSummary.summary_date <= upper)
+        if lower is not None:
+            stmt = stmt.where(PortfolioSummary.summary_date >= lower)
+        stmt = stmt.order_by(
+            PortfolioSummary.cdu_id.asc(),
+            PortfolioSummary.summary_date.desc(),
+        )
+        return db.execute(stmt).scalars().all()
+
+    all_summaries = _query_summaries(report_date, from_)
+    if not all_summaries and from_ is None:
+        latest = db.execute(
+            select(PortfolioSummary).order_by(PortfolioSummary.summary_date.desc())
+        ).scalars().first()
+        if latest:
+            report_date = latest.summary_date
+            all_summaries = _query_summaries(report_date, None)
+
+    summaries_by_cdu: dict[int, PortfolioSummary] = {}
+    for summary in all_summaries:
+        summaries_by_cdu.setdefault(summary.cdu_id, summary)
+    summaries = list(summaries_by_cdu.values())
+    if summaries:
+        report_date = max(s.summary_date for s in summaries)
     blocks: List[CDUBlock] = []
     fund_total = 0.0
     fund_total_prev = 0.0
@@ -63,16 +96,25 @@ def dashboard_summary(
         cdu = db.get(CDU, s.cdu_id)
         if not cdu:
             continue
+        position_date = s.summary_date
         positions = db.execute(select(PortfolioPosition).where(
             PortfolioPosition.cdu_id == s.cdu_id,
-            PortfolioPosition.position_date == report_date,
+            PortfolioPosition.position_date == position_date,
         )).scalars().all()
         pos_by_cat = {p.instrument_category: p for p in positions}
         limits_q = db.execute(select(CDULimit).where(CDULimit.cdu_id == cdu.id)).scalars().all()
         limits_map = {l.instrument_category: (l.min_limit_pct, l.max_limit_pct) for l in limits_q}
 
+        report_imported = bool(positions) and all(
+            (p.notes == "rr_report_import") for p in positions
+        )
+        category_order = (
+            [cat for cat in CATEGORY_ORDER if cat in pos_by_cat]
+            if report_imported else CATEGORY_ORDER
+        )
+
         rows: List[CategoryRow] = []
-        for cat in CATEGORY_ORDER:
+        for cat in category_order:
             p = pos_by_cat.get(cat)
             mn, mx = limits_map.get(cat, DEFAULT_LIMITS.get(cat, (0.0, 1.0)))
             rows.append(CategoryRow(
@@ -120,6 +162,8 @@ def dashboard_summary(
         fund_dur_w += s.duration_weighted * s.total_mv_current
         weight_total += s.total_mv_current
 
+    blocks.sort(key=lambda block: block.total_mv_current, reverse=True)
+
     return DashboardResponse(
         report_date=report_date,
         fund_total_mv=fund_total,
@@ -133,6 +177,180 @@ def dashboard_summary(
         breaches_count=breaches,
         blocks=blocks,
     )
+
+
+@router.get("/instrument-details")
+def instrument_details(
+    cdu_id: int = Query(...),
+    category: str = Query(...),
+    from_: Optional[date] = Query(None, alias="from"),
+    to_: Optional[date] = Query(None, alias="to"),
+    db: Session = Depends(get_db),
+):
+    """Instrument-level drill-down for dashboard category rows.
+
+    Returns one row per instrument for the selected CDU/category/period. The
+    dashboard prefers position lots/snapshots and falls back to Trade Report
+    cash movements when no position rows exist for the category.
+    """
+    if to_ is None:
+        to_ = date.today()
+    if from_ is None:
+        from_ = _earliest_data_date(db) or to_
+
+    details: dict[str, dict] = {}
+
+    def acc(
+        code: str,
+        *,
+        isin: Optional[str] = None,
+        name: Optional[str] = None,
+        quantity: Optional[float] = None,
+        face_value: Optional[float] = None,
+        amount: Optional[float] = None,
+        ytm: Optional[float] = None,
+        duration: Optional[float] = None,
+        first_date: Optional[date] = None,
+        last_date: Optional[date] = None,
+        operations: int = 1,
+    ) -> None:
+        key = code or isin or "—"
+        row = details.setdefault(key, {
+            "instrument_code": code or isin or "—",
+            "isin": isin,
+            "instrument_name": name,
+            "category": category,
+            "quantity": 0.0,
+            "face_value": 0.0,
+            "amount": 0.0,
+            "ytm_weighted_sum": 0.0,
+            "duration_weighted_sum": 0.0,
+            "ytm_weight": 0.0,
+            "duration_weight": 0.0,
+            "first_date": first_date,
+            "last_date": last_date,
+            "operations": 0,
+        })
+        row["isin"] = row["isin"] or isin
+        row["instrument_name"] = row["instrument_name"] or name
+        row["quantity"] += float(quantity or 0.0)
+        row["face_value"] += float(face_value or 0.0)
+        row["amount"] += float(amount or 0.0)
+        weight = abs(float(amount if amount is not None else face_value or 0.0))
+        if ytm is not None and weight:
+            row["ytm_weighted_sum"] += float(ytm) * weight
+            row["ytm_weight"] += weight
+        if duration is not None and weight:
+            row["duration_weighted_sum"] += float(duration) * weight
+            row["duration_weight"] += weight
+        if first_date and (row["first_date"] is None or first_date < row["first_date"]):
+            row["first_date"] = first_date
+        if last_date and (row["last_date"] is None or last_date > row["last_date"]):
+            row["last_date"] = last_date
+        row["operations"] += operations
+
+    position_rows_found = False
+
+    trade_q = select(Trade).where(
+        Trade.cdu_id == cdu_id,
+        Trade.instrument_category == category,
+        Trade.is_active == True,
+        Trade.value_date >= from_,
+        Trade.value_date <= to_,
+    )
+    for t in db.execute(trade_q).scalars().all():
+        signed_amount = t.amount_kzt or t.amount_ccy or t.face_value or 0.0
+        acc(
+            t.instrument_code or t.isin or t.deal_id or "—",
+            isin=t.isin,
+            name=t.description,
+            quantity=t.quantity,
+            face_value=t.face_value,
+            amount=abs(signed_amount),
+            ytm=t.ytm or t.repo_rate_pct,
+            duration=(t.repo_term_days / 365.0) if t.repo_term_days else None,
+            first_date=t.trade_date,
+            last_date=t.value_date,
+        )
+
+    if category == "REVERSE_REPO":
+        repo_q = select(RepoLot).where(
+            RepoLot.cdu_id == cdu_id,
+            RepoLot.trade_date <= to_,
+            (RepoLot.close_date.is_(None) | (RepoLot.close_date >= from_)),
+        )
+        for lot in db.execute(repo_q).scalars().all():
+            if not position_rows_found:
+                details.clear()
+                position_rows_found = True
+            acc(
+                lot.instrument_code or lot.isin or lot.deal_id or "REPO",
+                isin=lot.isin,
+                name="Открытое обратное REPO",
+                quantity=lot.face_value,
+                face_value=lot.face_value,
+                amount=lot.close_value or lot.face_value,
+                ytm=lot.ytm or lot.repo_rate_pct,
+                duration=lot.duration or ((lot.term_days / 365.0) if lot.term_days else None),
+                first_date=lot.trade_date,
+                last_date=lot.close_date or lot.valuation_date,
+                operations=0,
+            )
+
+    if category not in ("REVERSE_REPO", "CASH", "RECEIVABLES"):
+        bond_q = select(BondLot).where(
+            BondLot.cdu_id == cdu_id,
+            BondLot.category == category,
+            BondLot.valuation_date >= from_,
+            BondLot.valuation_date <= to_,
+        )
+        for lot in db.execute(bond_q).scalars().all():
+            if not position_rows_found:
+                details.clear()
+                position_rows_found = True
+            acc(
+                lot.instrument_code or lot.isin,
+                isin=lot.isin,
+                name=lot.notes,
+                quantity=lot.quantity_current,
+                face_value=lot.face_value_current,
+                amount=lot.market_value or lot.total_value or lot.face_value_current,
+                ytm=lot.ytm,
+                duration=lot.duration,
+                first_date=lot.trade_date,
+                last_date=lot.valuation_date,
+                operations=0,
+            )
+
+    out = []
+    for row in details.values():
+        ytm_weight = row.pop("ytm_weight") or 0.0
+        duration_weight = row.pop("duration_weight") or 0.0
+        ytm_sum = row.pop("ytm_weighted_sum")
+        dur_sum = row.pop("duration_weighted_sum")
+        row["ytm"] = (ytm_sum / ytm_weight) if ytm_weight else None
+        row["duration"] = (dur_sum / duration_weight) if duration_weight else None
+        row["first_date"] = row["first_date"].isoformat() if row["first_date"] else None
+        row["last_date"] = row["last_date"].isoformat() if row["last_date"] else None
+        out.append(row)
+
+    return {
+        "cdu_id": cdu_id,
+        "category": category,
+        "from": from_.isoformat(),
+        "to": to_.isoformat(),
+        "rows": sorted(out, key=lambda x: -abs(x["amount"])),
+    }
+
+
+def _earliest_data_date(db: Session) -> Optional[date]:
+    dates = [
+        db.execute(select(PortfolioSummary.summary_date).order_by(PortfolioSummary.summary_date.asc())).scalar(),
+        db.execute(select(Trade.value_date).where(Trade.value_date.is_not(None)).order_by(Trade.value_date.asc())).scalar(),
+        db.execute(select(RepoLot.trade_date).order_by(RepoLot.trade_date.asc())).scalar(),
+        db.execute(select(BondLot.valuation_date).order_by(BondLot.valuation_date.asc())).scalar(),
+    ]
+    return min([d for d in dates if d is not None], default=None)
 
 
 @router.get("/alerts", response_model=List[AlertOut])
@@ -162,14 +380,23 @@ def resolve_alert(alert_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/history")
-def dashboard_history(days: int = Query(90), db: Session = Depends(get_db)):
-    since = date.today() - timedelta(days=days)
+def dashboard_history(
+    days: int = Query(90),
+    from_: Optional[date] = Query(None, alias="from"),
+    to_: Optional[date] = Query(None, alias="to"),
+    db: Session = Depends(get_db),
+):
+    upper = to_ or date.today()
+    lower = from_ if from_ is not None else (upper - timedelta(days=days))
     rows = db.execute(select(PortfolioSummary).where(
-        PortfolioSummary.summary_date >= since,
+        PortfolioSummary.summary_date >= lower,
+        PortfolioSummary.summary_date <= upper,
     ).order_by(PortfolioSummary.summary_date.asc())).scalars().all()
     out = []
+    summary_keys: set[tuple[int, date]] = set()
     for s in rows:
         cdu = db.get(CDU, s.cdu_id)
+        summary_keys.add((s.cdu_id, s.summary_date))
         out.append({
             "date": s.summary_date.isoformat(),
             "cdu_id": s.cdu_id,
@@ -179,4 +406,21 @@ def dashboard_history(days: int = Query(90), db: Session = Depends(get_db)):
             "duration": s.duration_weighted,
             "benchmark_duration": s.benchmark_duration,
         })
-    return out
+    mv_rows = db.execute(select(MVSnapshot).where(
+        MVSnapshot.snapshot_date >= lower,
+        MVSnapshot.snapshot_date <= upper,
+    ).order_by(MVSnapshot.snapshot_date.asc())).scalars().all()
+    for s in mv_rows:
+        if (s.cdu_id, s.snapshot_date) in summary_keys:
+            continue
+        cdu = db.get(CDU, s.cdu_id)
+        out.append({
+            "date": s.snapshot_date.isoformat(),
+            "cdu_id": s.cdu_id,
+            "cdu_short": cdu.short_name if cdu else "",
+            "total_mv": s.market_value_total,
+            "ytm": s.ytm_weighted,
+            "duration": s.duration_weighted,
+            "benchmark_duration": None,
+        })
+    return sorted(out, key=lambda x: (x["date"], x["cdu_id"]))

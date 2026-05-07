@@ -110,7 +110,9 @@ export default function ImportPage() {
         Number(r.rows.bond_lots) +
         Number(r.rows.repo_lots) +
         Number(r.rows.deposit_lots) +
-        Number(r.rows.accounts_receivable)
+        Number(r.rows.accounts_receivable) +
+        Number(r.rows.report_summaries ?? 0) +
+        Number(r.rows.report_positions ?? 0)
       if (r.skipped) {
         toast.success(`Файл уже импортирован (${r.warnings?.[0] ?? 'дубликат'})`)
       } else {

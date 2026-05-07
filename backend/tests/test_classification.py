@@ -8,11 +8,14 @@ from services.parser.classification import (
 
 def test_repo_classification():
     assert classify_operation("EBRP", "Разм") == "REPO_HEADER"
-    assert classify_operation("EBRP", "К") == "REPO_BUY"
-    assert classify_operation("EBRP", "П") == "REPO_SELL"
+    assert classify_operation("EBRP", "К") == "REPO_OPEN"
+    assert classify_operation("EBRP", "П") == "REPO_CLOSE"
     assert classify_operation("REPO", "Разм") == "REPO_HEADER"
-    assert classify_operation("REPO", "К") == "REPO_BUY"
-    assert classify_operation("REPO", "П") == "REPO_SELL"
+    assert classify_operation("REPO", "К") == "REPO_OPEN"
+    assert classify_operation("REPO", "П") == "REPO_CLOSE"
+    assert classify_operation("EBWP", "S", type_code="G") == "REPO_HEADER"
+    assert classify_operation("EBWP", "B", type_code="H") == "REPO_OPEN"
+    assert classify_operation("EBWP", "S", type_code="h") == "REPO_CLOSE"
 
 
 def test_outright_classification():
@@ -23,6 +26,7 @@ def test_outright_classification():
 
 def test_category_resolution():
     assert classify_instrument("EBRP", "KFUSb47") == "REVERSE_REPO"
+    assert classify_instrument("EBWP", "MUM180_0013") == "REVERSE_REPO"
     assert classify_instrument("DEFAULT", "KFUSb47") == "GOV_BONDS"
     assert classify_instrument("DEFAULT", "EABRb40") == "AGENCY_BONDS"
     assert classify_instrument("DEFAULT", "MFOXX") == "MFO_BONDS"

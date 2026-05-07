@@ -46,6 +46,29 @@ export interface DashboardResponse {
   blocks: CDUBlock[]
 }
 
+export interface InstrumentDetailRow {
+  instrument_code: string
+  isin: string | null
+  instrument_name: string | null
+  category: string
+  quantity: number
+  face_value: number
+  amount: number
+  ytm: number | null
+  duration: number | null
+  first_date: string | null
+  last_date: string | null
+  operations: number
+}
+
+export interface InstrumentDetailsResponse {
+  cdu_id: number
+  category: string
+  from: string
+  to: string
+  rows: InstrumentDetailRow[]
+}
+
 export interface AlertItem {
   id: number
   alert_date: string

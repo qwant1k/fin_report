@@ -24,20 +24,25 @@ def classify_operation(
     instrument_code: Optional[str] = None,
     currency_code: Optional[str] = None,
     clearing_account: Optional[str] = None,
+    type_code: Optional[str] = None,
 ) -> str:
     """Map raw row attributes to canonical operation type used internally."""
     r = (regime or "").strip().upper()
-    k = (kp or "").strip()
+    k = (kp or "").strip().upper()
     ccy = (currency_code or "").strip().upper()
     code = (instrument_code or "").strip().upper()
+    t = (type_code or "").strip()
 
-    # 1. REPO / EBRP
-    if r in ("EBRP", "REPO"):
-        if k in ("К", "B"):
+    # 1. REPO. KASE exports use two variants:
+    #    Halyk: Разм / К / П
+    #    BCC/Centras: S(G) / B(H) / S(h), where the first S is a header.
+    if r in ("EBRP", "EBWP", "REPO"):
+        if t == "G" or k in ("РАЗМ", "РАЗМ.", "PLACEMENT"):
+            return "REPO_HEADER"
+        if t == "H" or k in ("К", "B"):
             return "REPO_OPEN"
-        if k in ("П", "S"):
+        if t == "h" or k in ("П", "S"):
             return "REPO_CLOSE"
-        # Разм — анкер без движения, будет отфильтрован при записи в Trade
         return "REPO_HEADER"
 
     # 2. FX (валютные сделки)
@@ -48,9 +53,12 @@ def classify_operation(
             return "FX_SELL"
 
     # 3. Депозиты (T-Bill, DEP, MMKT и т.п.)
-    if r in ("T-BILL", "DEP", "MMKT", "DEPOSIT", "TREASURY", "NOTES") or \
-       "DEP" in clearing_account.upper() if clearing_account else False or \
-       (code and code.startswith(("DEP", "TB"))):
+    is_deposit_account = "DEP" in clearing_account.upper() if clearing_account else False
+    if (
+        r in ("T-BILL", "DEP", "MMKT", "DEPOSIT", "TREASURY", "NOTES")
+        or is_deposit_account
+        or (code and code.startswith(("DEP", "TB")))
+    ):
         if k in ("К", "B"):
             return "DEPOSIT_OPEN"
         if k in ("П", "S"):
@@ -88,7 +96,7 @@ class CategoryRule:
 
 
 DEFAULT_RULES: List[CategoryRule] = [
-    CategoryRule(10, "Reverse REPO (биржевое)", "REVERSE_REPO", regimes=("EBRP", "REPO")),
+    CategoryRule(10, "Reverse REPO (биржевое)", "REVERSE_REPO", regimes=("EBRP", "EBWP", "REPO")),
     CategoryRule(15, "Foreign bonds / Eurobonds", "FOREIGN_BONDS",
                  code_prefixes=("XS", "US", "RU", "XS2", "XS3", "XS4", "XS5", "XS6", "XS7", "XS8", "XS9")),
     CategoryRule(17, "Deposits / T-Bills", "DEPOSIT",

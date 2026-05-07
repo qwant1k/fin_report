@@ -16,14 +16,18 @@ from sqlalchemy.orm import Session
 from models.db_models import (
     AccountReceivable,
     Alert,
+    BondLot,
     CashBalance,
+    CashSnapshot,
     CDU,
     CDULimit,
     KasePrice,
     MBMIndex,
+    MVSnapshot,
     PortfolioPosition,
     PortfolioSummary,
     RawTrade,
+    RepoLot,
 )
 
 from .constants import (
@@ -78,6 +82,79 @@ def _duration_for_position(p: PositionAggregate, kase_prices: Dict[str, KasePric
     return p.duration
 
 
+def _load_rr_snapshot_categories(
+    db: Session, cdu_id: int, report_date: date
+) -> Dict[str, dict]:
+    """Считать категориальные агрегаты из RR-снимков (BondLot + RepoLot) на дату.
+
+    Возвращает ``{category: {"mv": float, "ytm": float|None, "duration": float|None,
+    "lots": int}}`` — значения уже усреднены (взвешены по market_value).
+
+    Используется в ``_calculate_cdu`` как авторитетный источник позиций когда
+    Risk Report импортирован, но Trade Report (RawTrade) на эту дату нет.
+    """
+    out: Dict[str, dict] = {}
+
+    # ── BondLot per category (GOV_BONDS, AGENCY_BONDS, MFO_BONDS, FOREIGN_BONDS) ──
+    bond_rows = db.execute(select(BondLot).where(
+        BondLot.cdu_id == cdu_id,
+        BondLot.valuation_date == report_date,
+    )).scalars().all()
+    for lot in bond_rows:
+        cat = lot.category
+        if not cat:
+            continue
+        mv = lot.market_value or lot.total_value or lot.face_value_current or 0.0
+        if not mv:
+            continue
+        bucket = out.setdefault(cat, {"mv": 0.0, "ytm_w": 0.0, "ytm_weight": 0.0,
+                                     "dur_w": 0.0, "dur_weight": 0.0, "lots": 0})
+        bucket["mv"] += mv
+        bucket["lots"] += 1
+        if lot.ytm is not None:
+            bucket["ytm_w"] += lot.ytm * mv
+            bucket["ytm_weight"] += mv
+        if lot.duration is not None:
+            bucket["dur_w"] += lot.duration * mv
+            bucket["dur_weight"] += mv
+
+    # ── RepoLot → REVERSE_REPO (только открытые на report_date) ──
+    repo_rows = db.execute(select(RepoLot).where(
+        RepoLot.cdu_id == cdu_id,
+        RepoLot.valuation_date == report_date,
+    )).scalars().all()
+    for lot in repo_rows:
+        # Открытое РЕПО: ещё не закрылось к report_date
+        if lot.close_date and lot.close_date <= report_date:
+            continue
+        mv = lot.market_value or lot.close_value or lot.face_value or 0.0
+        if not mv:
+            continue
+        bucket = out.setdefault("REVERSE_REPO", {"mv": 0.0, "ytm_w": 0.0, "ytm_weight": 0.0,
+                                                  "dur_w": 0.0, "dur_weight": 0.0, "lots": 0})
+        bucket["mv"] += mv
+        bucket["lots"] += 1
+        rate = lot.repo_rate_pct
+        if rate is not None:
+            bucket["ytm_w"] += rate * mv
+            bucket["ytm_weight"] += mv
+        if lot.term_days:
+            dur = lot.term_days / 365.0
+            bucket["dur_w"] += dur * mv
+            bucket["dur_weight"] += mv
+
+    # ── Усредняем ──
+    result: Dict[str, dict] = {}
+    for cat, b in out.items():
+        result[cat] = {
+            "mv": b["mv"],
+            "ytm": (b["ytm_w"] / b["ytm_weight"]) if b["ytm_weight"] else None,
+            "duration": (b["dur_w"] / b["dur_weight"]) if b["dur_weight"] else None,
+            "lots": b["lots"],
+        }
+    return result
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────
@@ -87,6 +164,21 @@ def calculate_for_date(db: Session, report_date: date, *, recalculate: bool = Fa
 
     Returns counters: {"cdus_processed": int, "breaches": int}.
     """
+    report_summaries = db.execute(select(PortfolioSummary).where(
+        PortfolioSummary.summary_date == report_date,
+    )).scalars().all()
+    report_positions = db.execute(select(PortfolioPosition).where(
+        PortfolioPosition.position_date == report_date,
+        PortfolioPosition.notes == "rr_report_import",
+    )).scalars().all()
+    if recalculate and report_summaries and report_positions:
+        # The first Risk Report sheet is the authoritative dashboard view.
+        # Keep it intact when a user presses "Recalculate" after import.
+        return {
+            "cdus_processed": len({s.cdu_id for s in report_summaries}),
+            "breaches": 0,
+        }
+
     if recalculate:
         db.query(PortfolioPosition).filter_by(position_date=report_date).delete()
         db.query(PortfolioSummary).filter_by(summary_date=report_date).delete()
@@ -230,13 +322,17 @@ def _calculate_cdu(
         select(RawTrade).where(
             RawTrade.cdu_id == cdu.id,
             RawTrade.trade_date <= report_date,
-            RawTrade.status == "+",
+            RawTrade.status.in_(("+", "M")),
         )
     ).scalars().all()
 
     aggregates = build_positions(raw_rows, cdu_id=cdu.id, report_date=report_date)
 
-    # Cash balance — берётся из таблицы cash_balances (если есть) на report_date
+    # Cash balance — prefer imported daily snapshots, fallback to legacy balances.
+    cash_snapshot = db.execute(select(CashSnapshot).where(
+        CashSnapshot.cdu_id == cdu.id,
+        CashSnapshot.snapshot_date <= report_date,
+    ).order_by(CashSnapshot.snapshot_date.desc())).scalars().first()
     cash = db.execute(select(CashBalance).where(
         CashBalance.cdu_id == cdu.id,
         CashBalance.balance_date <= report_date,
@@ -271,17 +367,33 @@ def _calculate_cdu(
         )
 
     # cash
-    if cash:
+    if cash_snapshot:
+        category_rows["CASH"].market_value_current = cash_snapshot.amount_kzt or cash_snapshot.amount or 0.0
+    elif cash:
         category_rows["CASH"].market_value_current = cash.amount or 0.0
 
     # receivables
     category_rows["RECEIVABLES"].market_value_current = receivable_total
 
-    # bonds & repo from aggregates
+    # ── RR-snapshot (BondLot + RepoLot) — авторитет на report_date ──
+    # Если за дату есть импортированные лоты, ИХ категории (GOV_BONDS,
+    # AGENCY_BONDS, MFO_BONDS, FOREIGN_BONDS, REVERSE_REPO) считаются
+    # достоверным срезом портфеля и перекрывают агрегаты из RawTrade.
+    rr_snap = _load_rr_snapshot_categories(db, cdu.id, report_date)
+    rr_filled: set[str] = set()
+    for cat, agg in rr_snap.items():
+        if cat not in category_rows:
+            continue
+        category_rows[cat].market_value_current = agg["mv"]
+        category_rows[cat].ytm = agg["ytm"]
+        category_rows[cat].duration = agg["duration"]
+        rr_filled.add(cat)
+
+    # bonds & repo from RawTrade aggregates (только для категорий не покрытых RR)
     cmv_per_inst: List[Tuple[str, float, Optional[float], Optional[float]]] = []
     for a in aggregates:
         cat = a.instrument_category if a.instrument_category in category_rows else "OTHER"
-        if cat == "OTHER":
+        if cat == "OTHER" or cat in rr_filled:
             continue
         cmv = _cmv_for_position(a, kase_prices)
         ytm = _ytm_for_position(a, kase_prices)
@@ -293,8 +405,11 @@ def _calculate_cdu(
             category_rows[cat].duration = (category_rows[cat].duration or 0.0) + dur * cmv
         cmv_per_inst.append((cat, cmv, ytm, dur))
 
-    # Normalise YTM/Duration (we accumulated weighted sums above; divide by category CMV)
+    # Normalise YTM/Duration (we accumulated weighted sums above; divide by category CMV).
+    # Категории, заполненные RR-снимком, уже усреднены — не пересчитываем их.
     for cat, row in category_rows.items():
+        if cat in rr_filled:
+            continue
         if row.market_value_current and row.ytm is not None:
             row.ytm = row.ytm / row.market_value_current
         if row.market_value_current and row.duration is not None:

@@ -169,8 +169,13 @@ class TradeReportParser:
             instrument_code = s(data.get("instrument_code"))
             currency_code = s(data.get("currency_code"))
             clearing_account = s(data.get("clearing_account"))
+            type_marker = s(data.get("type_code"))
+            ext_user_code = s(data.get("ext_user_code"))
+            if type_marker not in ("G", "H", "h") and ext_user_code in ("G", "H", "h"):
+                type_marker = ext_user_code
             data["operation_type"] = classify_operation(
-                regime, kp, instrument_code, currency_code, clearing_account
+                regime, kp, instrument_code, currency_code, clearing_account,
+                type_marker,
             )
             data["instrument_category"] = classify_instrument(regime, instrument_code)
 
@@ -244,11 +249,26 @@ class TradeReportParser:
             if val is None:
                 continue
             normalised = re.sub(r"\s+", " ", str(val).strip().lower())
+            matched = False
             for key, aliases in HEADER_ALIASES.items():
-                if normalised in aliases or any(a in normalised for a in aliases):
+                if normalised in aliases:
                     if key not in index:
                         index[key] = i
+                    matched = True
                     break
+            if matched:
+                continue
+            candidates = []
+            for key, aliases in HEADER_ALIASES.items():
+                for alias in aliases:
+                    if alias in {"цена", "сумма", "объем", "тип"}:
+                        continue
+                    if len(alias) >= 6 and alias in normalised:
+                        candidates.append((len(alias), key))
+            if candidates:
+                _, key = max(candidates)
+                if key not in index:
+                    index[key] = i
         return index
 
     def _row_to_dict(self, raw_row: Tuple[Any, ...], col_index: Dict[str, int]) -> Dict[str, Any]:

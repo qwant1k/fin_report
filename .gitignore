@@ -8,6 +8,7 @@ venv/
 env/
 .python-version
 .pytest_cache/
+pytest-cache-files-*/
 .mypy_cache/
 .ruff_cache/
 htmlcov/
@@ -53,4 +54,5 @@ Thumbs.db
 
 # ─── Reports / generated files ──────
 *.tmp
+tmp/
 ~$*

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Dict, Optional
 from loguru import logger
-from sqlalchemy import select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import Session
 from models.db_models import BondLot, CDU, DepositLot, RepoLot, Trade
 from services.calculator.constants import normalize_cdu_name
@@ -29,7 +29,24 @@ def import_trades_from_parsed(
 
     trade_date = parsed.trade_date or date.today()
 
-    # ── soft-delete previous file upload for same CDU+date ──
+    # ── replace previous import for same CDU+date idempotently ──
+    old_trade_ids = db.execute(
+        select(Trade.id).where(
+            Trade.cdu_id == cdu_id,
+            Trade.trade_date == trade_date,
+            Trade.is_active == True,
+        )
+    ).scalars().all()
+    if old_trade_ids:
+        db.execute(delete(BondLot).where(BondLot.open_trade_id.in_(old_trade_ids)))
+        db.execute(delete(RepoLot).where(or_(
+            RepoLot.open_trade_id.in_(old_trade_ids),
+            RepoLot.close_trade_id.in_(old_trade_ids),
+        )))
+        db.execute(delete(DepositLot).where(or_(
+            DepositLot.open_trade_id.in_(old_trade_ids),
+            DepositLot.close_trade_id.in_(old_trade_ids),
+        )))
     db.execute(
         update(Trade)
         .where(Trade.cdu_id == cdu_id, Trade.trade_date == trade_date, Trade.is_active == True)
@@ -56,17 +73,27 @@ def import_trades_from_parsed(
         qty = _f(f.get("lots")) or nominal
         isin = str(f.get("instrument_code") or "").strip()
         currency = str(f.get("currency_code") or "KZT").strip().upper()[:8]
+        repo_sum = _f(f.get("repo_sum"))
+        repo_buyback_sum = _f(f.get("repo_buyback_sum"))
+        amount = volume or 0.0
+        if op in ("BUY", "REPO_OPEN", "FX_BUY", "DEPOSIT_OPEN"):
+            amount = -abs(amount)
+        elif op in ("SELL", "REPO_CLOSE", "FX_SELL", "DEPOSIT_CLOSE"):
+            amount = abs(repo_buyback_sum or amount)
         kw = dict(
             cdu_id=cdu_id, deal_id=deal,
             trade_date=trade_date, value_date=_d(f.get("settlement_date")),
             operation_type=op, instrument_code=isin or None,
             instrument_category=f.get("instrument_category") or "OTHER",
             direction="Покупка" if "BUY" in op or "OPEN" in op else ("Продажа" if "SELL" in op or "CLOSE" in op else None),
+            amount_kzt=amount,
+            amount_ccy=amount,
             quantity=qty, face_value=nominal,
             market_price=price, accrued_interest=_f(f.get("accrued_interest_volume")),
             ytm=_f(f.get("yield_pct")),
             currency=currency, repo_rate_pct=_f(f.get("repo_rate_pct")),
             repo_term_days=f.get("repo_term_days"),
+            repo_buyback_sum=repo_buyback_sum,
             commission_total=_f(f.get("commission_total")),
             source_doc_id=source_doc_id,
             is_active=True,
@@ -94,7 +121,8 @@ def import_trades_from_parsed(
             ))
             counters["bond_lots"] += 1
         if op in ("REPO_OPEN", "REPO_CLOSE"):
-            _repo(db, trade_obj, cdu_id, isin, op, nominal,
+            repo_face = repo_sum if op == "REPO_OPEN" else (repo_buyback_sum or volume or nominal)
+            _repo(db, trade_obj, cdu_id, isin, op, repo_face,
                   _f(f.get("repo_rate_pct")), f.get("repo_term_days"),
                   trade_date, source_doc_id)
             counters["repo_lots"] += 1
@@ -147,12 +175,13 @@ def _repo(db, trade, cdu_id, isin, op, face, rate, term, td, doc_id):
             RepoLot.cdu_id == cdu_id, RepoLot.instrument_code == code,
             RepoLot.close_date.is_(None),
         ).order_by(RepoLot.trade_date.asc())).scalars().first()
+        close_dt = trade.value_date or td
         if ex:
-            ex.close_date = td; ex.close_value = face or ex.face_value; ex.close_trade_id = trade.id; ex.is_closed = True
+            ex.close_date = close_dt; ex.close_value = face or ex.face_value; ex.close_trade_id = trade.id; ex.is_closed = True
         else:
             db.add(RepoLot(
                 cdu_id=cdu_id, instrument_code=code, isin=isin,
-                trade_date=td, valuation_date=td, close_date=td,
+                trade_date=td, valuation_date=td, close_date=close_dt,
                 face_value=face or 0.0, close_value=face or 0.0,
                 repo_rate_pct=rate, close_trade_id=trade.id, source_doc_id=doc_id,
             ))

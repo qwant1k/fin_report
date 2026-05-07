@@ -286,6 +286,7 @@ class MBMOut(ORMModel):
     index_date: date
     ytm_value: Optional[float]
     duration: Optional[float]
+    mod_duration: Optional[float] = None
     source: str
     fetched_at: datetime
 

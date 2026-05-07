@@ -285,6 +285,7 @@ class MBMIndex(Base):
     index_date: Mapped[date] = mapped_column(Date, unique=True, index=True)
     ytm_value: Mapped[Optional[float]] = mapped_column(Float)
     duration: Mapped[Optional[float]] = mapped_column(Float)
+    mod_duration: Mapped[Optional[float]] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(40), default="manual")
     fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

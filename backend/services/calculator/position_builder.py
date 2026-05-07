@@ -4,8 +4,8 @@ REPO model
 ----------
 Каждая EBRP/REPO заявка состоит из трёх строк, относящихся к одной «Заявке №»:
   - "Разм"  (REPO_HEADER) — анкер заявки, описывает условия;
-  - "К"     (REPO_BUY)    — нога принятия бумаг (открытие позиции на trading_date);
-  - "П"     (REPO_SELL)   — нога возврата       (закрытие на settlement_date_П).
+  - "К"/B   (REPO_OPEN)   — нога принятия бумаг (открытие позиции на trading_date);
+  - "П"/S   (REPO_CLOSE)  — нога возврата       (закрытие на settlement_date_П).
 
 Позиция считается **открытой**, если report_date < settlement_date "П"-ноги
 (или если "П"-нога вовсе не зафиксирована).
@@ -66,7 +66,7 @@ def build_positions(
     rows_list = list(rows)
 
     # ── 1. REPO matching by order_number ──
-    # «Разм» (REPO_HEADER) — анкер. «П» (REPO_SELL) — определяет дату закрытия.
+    # «Разм»/G (REPO_HEADER) — анкер. REPO_CLOSE определяет дату закрытия.
     # Позиция открыта, пока report_date < settlement_date_П.
     repo_orders: Dict[str, Dict[str, Any]] = {}
     repo_closed: set[str] = set()
@@ -89,7 +89,7 @@ def build_positions(
                 "yield_pct": _get(r, "yield_pct"),
                 "open_date": _get(r, "trading_date") or _get(r, "trade_date"),
             })
-        elif op == "REPO_BUY":
+        elif op == "REPO_OPEN":
             repo_orders.setdefault(order_key, {})
             repo_orders[order_key].update({
                 "instrument_code": _get(r, "instrument_code"),
@@ -99,7 +99,7 @@ def build_positions(
                             or repo_orders[order_key].get("repo_sum", 0.0),
                 "yield_pct": _get(r, "yield_pct") or repo_orders[order_key].get("yield_pct"),
             })
-        elif op == "REPO_SELL":
+        elif op == "REPO_CLOSE":
             repo_orders.setdefault(order_key, {})
             close_date = _get(r, "settlement_date")
             repo_orders[order_key]["close_date"] = close_date
@@ -132,7 +132,7 @@ def build_positions(
     for order, ro in repo_orders.items():
         if order in repo_closed:
             continue
-        # требуем хотя бы одну из ног (REPO_BUY): если есть только Разм без К — нет открытой позиции
+        # требуем хотя бы одну из ног (REPO_OPEN): если есть только заголовок без открытия — нет позиции
         if "repo_sum" not in ro or not ro["repo_sum"]:
             continue
         a = _agg(ro.get("instrument_category") or "REVERSE_REPO", ro.get("instrument_code"))

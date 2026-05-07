@@ -28,6 +28,8 @@ from models.db_models import (
     InstrumentReference,
     MBMIndex,
     MVSnapshot,
+    PortfolioPosition,
+    PortfolioSummary,
     RepoLot,
     SourceDocument,
 )
@@ -35,8 +37,19 @@ from models.db_models import (
 from .helpers import (
     extract_date_from_filename,
     file_sha256,
+    materialize_sheet,
     safe_sheet,
 )
+
+
+def _mat(wb, *names):
+    """Найти лист в книге и сразу материализовать его в in-memory снимок.
+
+    Решает проблему стейт-блида openpyxl read_only при многократном
+    ``ws.cell()`` поверх нескольких листов одной книги.
+    """
+    ws = safe_sheet(wb, *names)
+    return materialize_sheet(ws) if ws is not None else None
 from .sheet_parsers import (
     get_report_date,
     parse_ar_sheet,
@@ -46,6 +59,7 @@ from .sheet_parsers import (
     parse_fx_sheet,
     parse_mbm_sheet,
     parse_mv_sheet,
+    parse_report_sheet,
     parse_reference_sheet,
     parse_repo_sheet,
 )
@@ -66,6 +80,8 @@ class ImportResult:
     repo_lots: int = 0
     deposit_lots: int = 0
     ar_rows: int = 0
+    report_summaries: int = 0
+    report_positions: int = 0
     skipped: bool = False
     error: Optional[str] = None
     warnings: list[str] = field(default_factory=list)
@@ -73,7 +89,8 @@ class ImportResult:
     def total_rows(self) -> int:
         return (self.cash_rows + self.mv_rows + self.reference_rows + self.fx_rows
                 + self.mbm_rows + self.bond_lots + self.repo_lots
-                + self.deposit_lots + self.ar_rows)
+                + self.deposit_lots + self.ar_rows
+                + self.report_summaries + self.report_positions)
 
     def to_log_line(self) -> str:
         if self.error:
@@ -83,7 +100,8 @@ class ImportResult:
         return (f"[OK  ] {self.file_path.name} ({self.file_date}): "
                 f"cash={self.cash_rows} mv={self.mv_rows} ref={self.reference_rows} "
                 f"fx={self.fx_rows} mbm={self.mbm_rows} bonds={self.bond_lots} "
-                f"repo={self.repo_lots} dep={self.deposit_lots} ar={self.ar_rows}")
+                f"repo={self.repo_lots} dep={self.deposit_lots} ar={self.ar_rows} "
+                f"report={self.report_summaries}/{self.report_positions}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -140,13 +158,15 @@ def import_risk_report(
         # 4. Открыть книгу (read_only + data_only — формулы как значения)
         wb = load_workbook(fp, read_only=True, data_only=True, keep_vba=False)
 
-        # 5. Уточнить дату через Report!B2
-        report_ws = safe_sheet(wb, "Report")
+        # 5. Дата отчёта: Report!B2 — авторитетный источник (это «дата снимка»),
+        # имя файла часто содержит дату генерации, а не отчёта (например,
+        # risk_report_09112025_.xlsm может содержать снимок на 20.10.2025).
+        report_ws = _mat(wb, "Report")
         report_b2 = get_report_date(report_ws) if report_ws else None
-        if report_b2 and not file_date:
+        if report_b2:
             file_date = report_b2
-        if file_date is None:
-            file_date = report_b2 or date.today()
+        elif file_date is None:
+            file_date = date.today()
         res.file_date = file_date
         sd.doc_date = file_date
 
@@ -154,48 +174,55 @@ def import_risk_report(
         cdu_map = {c.name: c.id for c in db.execute(select(CDU)).scalars().all()}
 
         # 7. Парсеры по листам
+        if report_ws is not None:
+            rows = parse_report_sheet(report_ws, fallback_date=file_date)
+            res.report_summaries, res.report_positions = _upsert_report_dashboard(
+                db, rows, cdu_map,
+            )
+
         # 7.1 Cash
-        cash_ws = safe_sheet(wb, "Cash")
+        cash_ws = _mat(wb, "Cash")
         if cash_ws is not None:
             rows = parse_cash_sheet(cash_ws, fallback_date=file_date)
             res.cash_rows = _upsert_cash(db, rows, cdu_map, sd.id)
 
         # 7.2 MV
-        mv_ws = safe_sheet(wb, "MV")
+        mv_ws = _mat(wb, "MV")
         if mv_ws is not None:
             rows = parse_mv_sheet(mv_ws, fallback_date=file_date)
             res.mv_rows = _upsert_mv(db, rows, cdu_map, sd.id)
 
         # 7.3 Справочник
-        ref_ws = safe_sheet(wb, "Справочник", "Spravochnik", "Reference")
+        ref_ws = _mat(wb, "Справочник", "Spravochnik", "Reference")
         if ref_ws is not None:
             rows = parse_reference_sheet(ref_ws)
             res.reference_rows = _upsert_reference(db, rows)
 
         # 7.4 FX
-        fx_ws = safe_sheet(wb, "Нацбанк Казахстана, Доллар США_",
-                           "Нацбанк", "Доллар США", "USD KZT")
+        fx_ws = _mat(wb, "Нацбанк Казахстана, Доллар США_",
+                     "Нацбанк", "Доллар США", "USD KZT")
         if fx_ws is not None:
             rows = parse_fx_sheet(fx_ws)
             res.fx_rows = _upsert_fx(db, rows)
 
         # 7.5 MBM (история)
-        mbm_ws = safe_sheet(wb, "MBM index - с 1 апреля 2024 г",
-                            "MBM index", "MBM Index")
+        mbm_ws = _mat(wb, "MBM index - с 1 апреля 2024 г",
+                      "MBM index", "MBM Index")
         if mbm_ws is not None:
             rows = parse_mbm_sheet(mbm_ws)
             res.mbm_rows = _upsert_mbm(db, rows)
 
         # 7.6 Bond lots
         for sheet_name, category in [
-            ("ГЦБ",       "GOV_BONDS"),
-            ("Агентские", "AGENCY_BONDS"),
-            ("МФО",       "MFO_BONDS"),
-            ("Ин. ЦБ",    "FOREIGN_BONDS"),
-            ("Ин.ЦБ",     "FOREIGN_BONDS"),
-            ("In CB",     "FOREIGN_BONDS"),
+            ("ГЦБ",        "GOV_BONDS"),
+            ("Агентские",  "AGENCY_BONDS"),
+            ("Агентсткие", "AGENCY_BONDS"),  # частая опечатка в реальных файлах
+            ("МФО",        "MFO_BONDS"),
+            ("Ин. ЦБ",     "FOREIGN_BONDS"),
+            ("Ин.ЦБ",      "FOREIGN_BONDS"),
+            ("In CB",      "FOREIGN_BONDS"),
         ]:
-            ws = safe_sheet(wb, sheet_name)
+            ws = _mat(wb, sheet_name)
             if ws is None:
                 continue
             rows = parse_bond_lots_sheet(ws, category=category, fallback_date=file_date)
@@ -203,20 +230,20 @@ def import_risk_report(
                 res.bond_lots += _upsert_bond_lots(db, rows, cdu_map, sd.id, file_date)
 
         # 7.7 REPO lots
-        repo_ws = safe_sheet(wb, "Repo")
+        repo_ws = _mat(wb, "Repo")
         if repo_ws is not None:
             rows = parse_repo_sheet(repo_ws, fallback_date=file_date)
             res.repo_lots = _upsert_repo_lots(db, rows, cdu_map, sd.id, file_date)
 
         # 7.8 Deposit lots
-        dep_ws = safe_sheet(wb, "Dep", "Депозит")
+        dep_ws = _mat(wb, "Dep", "Депозит")
         if dep_ws is not None:
             rows = parse_dep_sheet(dep_ws, fallback_date=file_date)
             res.deposit_lots = _upsert_deposit_lots(db, rows, cdu_map, sd.id, file_date)
 
         # 7.9 AR
-        ar_ws = safe_sheet(wb, "Accounts receivable", "Дебиторская задолженность",
-                           "Дебиторка")
+        ar_ws = _mat(wb, "Accounts receivable", "Дебиторская задолженность",
+                     "Дебиторка")
         if ar_ws is not None:
             rows = parse_ar_sheet(ar_ws, fallback_date=file_date)
             res.ar_rows = _upsert_ar(db, rows, cdu_map, sd.id)
@@ -230,6 +257,8 @@ def import_risk_report(
             "cash": res.cash_rows, "mv": res.mv_rows, "ref": res.reference_rows,
             "fx": res.fx_rows, "mbm": res.mbm_rows, "bonds": res.bond_lots,
             "repo": res.repo_lots, "dep": res.deposit_lots, "ar": res.ar_rows,
+            "report_summaries": res.report_summaries,
+            "report_positions": res.report_positions,
         }, ensure_ascii=False)
         db.commit()
 
@@ -321,6 +350,110 @@ def import_folder(
 # ═══════════════════════════════════════════════════════════════════════════
 # Internal upsert helpers
 # ═══════════════════════════════════════════════════════════════════════════
+def _upsert_report_dashboard(
+    db: Session, rows: list[dict], cdu_map: dict[str, int],
+) -> tuple[int, int]:
+    summary_rows = [r for r in rows if r.get("kind") == "summary"]
+    position_rows = [r for r in rows if r.get("kind") == "position"]
+
+    summaries_by_key: dict[tuple[int, date], PortfolioSummary] = {}
+    fund_totals_by_date: dict[date, float] = {}
+    summary_count = 0
+    position_count = 0
+    affected_keys = {
+        (_resolve_cdu_id(cdu_map, r.get("cdu_name")), r["snapshot_date"])
+        for r in rows
+        if r.get("cdu_name") and r.get("snapshot_date")
+    }
+    for cdu_id, snapshot_date in affected_keys:
+        if cdu_id:
+            db.query(PortfolioPosition).filter_by(
+                cdu_id=cdu_id,
+                position_date=snapshot_date,
+            ).delete()
+
+    for r in summary_rows:
+        cdu_id = _resolve_cdu_id(cdu_map, r.get("cdu_name"))
+        if not cdu_id:
+            continue
+        summary_date = r["snapshot_date"]
+        fund_totals_by_date[summary_date] = (
+            fund_totals_by_date.get(summary_date, 0.0) + (r.get("total_mv_current") or 0.0)
+        )
+        existing = db.execute(select(PortfolioSummary).where(
+            PortfolioSummary.cdu_id == cdu_id,
+            PortfolioSummary.summary_date == summary_date,
+        )).scalars().first()
+        kwargs = dict(
+            total_mv_prev=r.get("total_mv_prev") or 0.0,
+            total_daily_change=r.get("total_daily_change") or 0.0,
+            total_mv_current=r.get("total_mv_current") or 0.0,
+            ytm_weighted=r.get("ytm_weighted") or 0.0,
+            duration_weighted=r.get("duration_weighted") or 0.0,
+            benchmark_duration=r.get("benchmark_duration"),
+            duration_status=r.get("duration_status"),
+        )
+        if existing:
+            for k, v in kwargs.items():
+                setattr(existing, k, v)
+            summary = existing
+        else:
+            summary = PortfolioSummary(cdu_id=cdu_id, summary_date=summary_date, **kwargs)
+            db.add(summary)
+        summaries_by_key[(cdu_id, summary_date)] = summary
+        summary_count += 1
+
+    for (cdu_id, summary_date), summary in summaries_by_key.items():
+        fund_total = fund_totals_by_date.get(summary_date) or 0.0
+        summary.cdu_share_pct = summary.total_mv_current / fund_total if fund_total else 0.0
+
+    for r in position_rows:
+        cdu_id = _resolve_cdu_id(cdu_map, r.get("cdu_name"))
+        if not cdu_id:
+            continue
+        position_date = r["snapshot_date"]
+        category = r["category"]
+        existing_rows = db.execute(select(PortfolioPosition).where(
+            PortfolioPosition.cdu_id == cdu_id,
+            PortfolioPosition.position_date == position_date,
+            PortfolioPosition.instrument_category == category,
+            PortfolioPosition.instrument_code.is_(None),
+        )).scalars().all()
+        kwargs = dict(
+            instrument_name=r.get("instrument_name"),
+            nominal_volume=0.0,
+            current_price=None,
+            accrued_interest=0.0,
+            market_value_current=r.get("market_value_current") or 0.0,
+            market_value_prev=r.get("market_value_prev") or 0.0,
+            daily_change=r.get("daily_change") or 0.0,
+            pct_of_total=r.get("pct_of_total") or 0.0,
+            ytm=r.get("ytm"),
+            duration=r.get("duration"),
+            hard_limit_status=r.get("hard_limit") or "ok",
+            soft_limit_status=r.get("soft_limit") or "ok",
+            free_limit_mln=r.get("free_limit_mln"),
+            notes="rr_report_import",
+        )
+        if existing_rows:
+            target = existing_rows[0]
+            for extra in existing_rows[1:]:
+                db.delete(extra)
+            for k, v in kwargs.items():
+                setattr(target, k, v)
+        else:
+            db.add(PortfolioPosition(
+                cdu_id=cdu_id,
+                position_date=position_date,
+                instrument_code=None,
+                instrument_category=category,
+                **kwargs,
+            ))
+        position_count += 1
+
+    return summary_count, position_count
+
+
 def _resolve_cdu_id(cdu_map: dict[str, int], name: Optional[str]) -> Optional[int]:
     if not name:
         return None
@@ -390,64 +523,94 @@ def _upsert_mv(db: Session, rows: list[dict], cdu_map: dict[str, int],
 
 
 def _upsert_reference(db: Session, rows: list[dict]) -> int:
+    """Upsert Справочника выпусков по ISIN.
+
+    Примечание по идемпотентности: в Risk Report один и тот же ISIN может
+    встречаться несколько раз (разные строки НБРК/КФГД, исторические дубли).
+    С ``autoflush=False`` SELECT не видит pending insert’ы — поэтому держим
+    локальный кэш в рамках одного вызова.
+    """
+    pending: dict[str, InstrumentReference] = {}
     cnt = 0
+    UPDATABLE = (
+        "ticker_kase", "instrument_name", "issuer", "bond_type",
+        "coupon_rate_pct", "frequency", "base", "nominal",
+        "start_date", "maturity_date", "currency",
+    )
     for r in rows:
-        existing = db.execute(select(InstrumentReference).where(
-            InstrumentReference.isin == r["isin"],
-        )).scalars().first()
-        if existing:
-            for k in ("ticker_kase", "instrument_name", "issuer", "bond_type",
-                     "coupon_rate_pct", "frequency", "base", "nominal",
-                     "start_date", "maturity_date", "currency"):
+        isin = r.get("isin")
+        if not isin:
+            continue
+        target = pending.get(isin)
+        if target is None:
+            target = db.execute(select(InstrumentReference).where(
+                InstrumentReference.isin == isin,
+            )).scalars().first()
+        if target is not None:
+            for k in UPDATABLE:
                 v = r.get(k)
                 if v is not None:
-                    setattr(existing, k, v)
+                    setattr(target, k, v)
         else:
-            db.add(InstrumentReference(**{k: v for k, v in r.items() if k != "src_row"}))
+            target = InstrumentReference(**{k: v for k, v in r.items() if k != "src_row"})
+            db.add(target)
+        pending[isin] = target
         cnt += 1
     return cnt
 
 
 def _upsert_fx(db: Session, rows: list[dict]) -> int:
+    pending: dict[tuple, FXRate] = {}
     cnt = 0
     for r in rows:
-        existing = db.execute(select(FXRate).where(
-            FXRate.rate_date == r["rate_date"],
-            FXRate.currency == r["currency"],
-        )).scalars().first()
-        if existing:
-            existing.rate = r["rate"]
-            existing.source = "nbrk_rr"
+        key = (r["rate_date"], r["currency"])
+        target = pending.get(key)
+        if target is None:
+            target = db.execute(select(FXRate).where(
+                FXRate.rate_date == r["rate_date"],
+                FXRate.currency == r["currency"],
+            )).scalars().first()
+        if target is not None:
+            target.rate = r["rate"]
+            target.source = "nbrk_rr"
         else:
-            db.add(FXRate(
+            target = FXRate(
                 rate_date=r["rate_date"],
                 currency=r["currency"],
                 rate=r["rate"],
                 source="nbrk_rr",
-            ))
+            )
+            db.add(target)
+        pending[key] = target
         cnt += 1
     return cnt
 
 
 def _upsert_mbm(db: Session, rows: list[dict]) -> int:
+    pending: dict = {}
     cnt = 0
     for r in rows:
-        existing = db.execute(select(MBMIndex).where(
-            MBMIndex.index_date == r["index_date"],
-        )).scalars().first()
-        if existing:
+        key = r["index_date"]
+        target = pending.get(key)
+        if target is None:
+            target = db.execute(select(MBMIndex).where(
+                MBMIndex.index_date == key,
+            )).scalars().first()
+        if target is not None:
             if r.get("ytm_value") is not None:
-                existing.ytm_value = r["ytm_value"]
+                target.ytm_value = r["ytm_value"]
             if r.get("duration") is not None:
-                existing.duration = r["duration"]
-            existing.source = "rr_import"
+                target.duration = r["duration"]
+            target.source = "rr_import"
         else:
-            db.add(MBMIndex(
-                index_date=r["index_date"],
+            target = MBMIndex(
+                index_date=key,
                 ytm_value=r.get("ytm_value"),
                 duration=r.get("duration"),
                 source="rr_import",
-            ))
+            )
+            db.add(target)
+        pending[key] = target
         cnt += 1
     return cnt
 

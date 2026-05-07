@@ -1,35 +1,28 @@
-"""API endpoints for primary data import from custodians (ЧДУ / НБ РК).
-
-Supported files (auto-detected by filename):
-  - Trade Report XLSX       (trade_report_* / *сделки*.xlsx / *trade*report*.xlsx)
-  - Holdings report XLSX    (*holdings* / *позиции*)
-  - Exchange certificate    (*биржев* / *certificate* / *.pdf/.png/.docx)
-  - Reconciliation XLSX     (*сверка* / *recon*)
-  - PDF statement           (*выписка* / *statement* / *.pdf)
-  - Risk Report XLSM        (handled by existing import_routes — kept separate)
-"""
+"""API endpoints for primary-data import from custodians (ЧДУ / НБ РК)."""
 from __future__ import annotations
 
-import os
-import tempfile
+import hashlib
+import json
+import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from database import get_db
 from auth import require_admin
-from database import SessionLocal
-from models.db_models import ImportJob, SourceDocument
-from services.parser.trade_importer import import_single_trade_report_xlsx
-from services.import_primary.holdings_parser import import_holdings_xlsx
+from config import settings
+from database import SessionLocal, get_db
+from models.db_models import CDU, ImportJob, SourceDocument, User
+from services.calculator.constants import normalize_cdu_name
 from services.import_primary.cert_parser import parse_certificate
+from services.import_primary.holdings_parser import import_holdings_xlsx
 from services.import_primary.recon_parser import parse_reconciliation_xlsx
 from services.import_primary.statement_parser import parse_pdf_statement
+from services.parser.trade_importer import import_single_trade_report_xlsx
 
 router = APIRouter(prefix="/api/primary-data", tags=["primary-data"])
 
@@ -38,196 +31,252 @@ class ImportResponse(BaseModel):
     job_id: int
     status: str
     message: str
-    counters: dict = {}
+    counters: dict = Field(default_factory=dict)
 
 
 @router.post("/upload", response_model=ImportResponse)
 async def upload_primary_data(
     file: UploadFile = File(...),
-    db=Depends(get_db),
-    user: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
 ):
-    """Upload a single primary-data file and import immediately."""
+    """Upload one primary-data file, save it for audit, and import immediately."""
     original_name = file.filename or "unnamed"
     file_type = _detect_file_type(original_name)
-
     if file_type == "unknown":
         raise HTTPException(400, f"Cannot detect file type for '{original_name}'")
 
-    # Save to temp
-    suffix = Path(original_name).suffix
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        tmp.write(content)
-        tmp_path = tmp.name
+    target_dir = settings.upload_path / "primary_data" / file_type
+    target_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = original_name.replace("/", "_").replace("\\", "_")
+    target = target_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{safe_name}"
+    with target.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
 
-    # SHA256 + dedup
-    import hashlib
+    content = target.read_bytes()
     sha = hashlib.sha256(content).hexdigest()
-    dup = db.query(SourceDocument).filter_by(file_sha256=sha).first()
-    if dup:
-        os.unlink(tmp_path)
+    duplicate = db.execute(
+        select(SourceDocument).where(
+            SourceDocument.sha256 == sha,
+            SourceDocument.parse_status == "OK",
+        )
+    ).scalars().first()
+    if duplicate:
         return ImportResponse(
-            job_id=-1, status="skipped",
-            message=f"Duplicate of already imported document id={dup.id} ({dup.filename})",
+            job_id=-1,
+            status="SKIPPED",
+            message=f"Duplicate of already imported document id={duplicate.id} ({duplicate.file_name})",
         )
 
-    # Record SourceDocument
-    src = SourceDocument(
-        filename=original_name, file_type=file_type,
-        file_sha256=sha, file_size=len(content),
-        source_cdu=None,  # resolved by parser
-        import_status="importing", imported_by=user,
-        imported_at=datetime.utcnow(),
+    source_doc = SourceDocument(
+        doc_type=_to_doc_type(file_type),
+        cdu_id=None,
+        doc_date=None,
+        file_name=original_name,
+        file_path=str(target),
+        sha256=sha,
+        file_size=len(content),
+        uploaded_by=user.username,
+        parse_status="PENDING",
     )
-    db.add(src); db.flush()
+    db.add(source_doc)
+    db.flush()
 
-    # ImportJob
     job = ImportJob(
-        job_type="primary_data", source_doc_id=src.id,
-        status="running", started_at=datetime.utcnow(),
-        filename=original_name, uploaded_by=user,
+        job_type="FOLDER_PRIMARY",
+        status="RUNNING",
+        triggered_by=user.username,
+        files_total=1,
+        params_json=json.dumps({"source_doc_id": source_doc.id, "file_name": original_name}, ensure_ascii=False),
     )
-    db.add(job); db.flush()
+    db.add(job)
+    db.flush()
 
     try:
-        counters = _run_import(db, tmp_path, file_type, src.id, user)
-        src.import_status = "completed"
-        job.status = "completed"
+        counters = _run_import(db, str(target), file_type, source_doc.id, user.username)
+        _finalize_source_doc(db, source_doc, counters)
+        job.status = "DONE"
         job.finished_at = datetime.utcnow()
-        job.records_inserted = counters.get("trades", 0) + counters.get("positions", 0)
-        msg = f"Imported {file_type}: {counters}"
+        job.files_done = 1
+        job.rows_imported = source_doc.rows_imported
+        message = f"Imported {file_type}: {counters}"
     except Exception as exc:
         logger.exception("Primary data import failed")
-        src.import_status = "error"
-        job.status = "failed"
+        source_doc.parse_status = "ERROR"
+        source_doc.parsed_at = datetime.utcnow()
+        source_doc.parse_errors = str(exc)[:4000]
+        job.status = "FAILED"
         job.finished_at = datetime.utcnow()
-        job.error_message = str(exc)[:4000]
-        msg = f"Import failed: {exc}"
+        job.files_failed = 1
+        job.log = str(exc)[:4000]
         counters = {}
+        message = f"Import failed: {exc}"
     finally:
         db.commit()
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
 
-    return ImportResponse(job_id=job.id, status=job.status, message=msg, counters=counters)
+    return ImportResponse(job_id=job.id, status=job.status, message=message, counters=counters)
 
 
 @router.post("/bulk-folder")
 async def bulk_import_primary_folder(
-    folder_path: str,
+    payload: dict,
     background_tasks: BackgroundTasks,
-    user: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
 ):
-    """Queue a folder for background import (admin only)."""
-    from api.routes.import_routes import _bulk_import_job  # reuse helper
+    """Queue recursive folder import for primary-data packages."""
+    folder_path = payload.get("folder_path")
+    if not folder_path:
+        raise HTTPException(400, "folder_path обязателен")
+    folder = Path(folder_path)
+    if not folder.exists() or not folder.is_dir():
+        raise HTTPException(400, f"Папка не найдена или не является директорией: {folder}")
+
     job = ImportJob(
-        job_type="primary_bulk", status="queued",
-        started_at=datetime.utcnow(), folder_path=folder_path,
-        uploaded_by=user,
+        job_type="FOLDER_PRIMARY",
+        status="RUNNING",
+        triggered_by=user.username,
+        params_json=json.dumps({"folder_path": str(folder)}, ensure_ascii=False),
     )
-    db = next(get_db())
-    db.add(job); db.commit(); db.refresh(job)
-    background_tasks.add_task(_bulk_primary_job, job.id, folder_path, user)
-    return {"job_id": job.id, "status": "queued"}
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(_bulk_primary_job, job.id, str(folder), user.username)
+    return {"job_id": job.id, "status": job.status}
 
 
-# ───────── helpers ─────────
+@router.get("/documents")
+def list_source_documents(limit: int = 50, db: Session = Depends(get_db)):
+    rows = db.execute(
+        select(SourceDocument, CDU.name.label("cdu_name"))
+        .outerjoin(CDU, SourceDocument.cdu_id == CDU.id)
+        .order_by(SourceDocument.uploaded_at.desc())
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "id": row.SourceDocument.id,
+            "filename": row.SourceDocument.file_name,
+            "file_type": row.SourceDocument.doc_type,
+            "file_size": row.SourceDocument.file_size,
+            "import_status": row.SourceDocument.parse_status,
+            "imported_at": row.SourceDocument.uploaded_at.isoformat() if row.SourceDocument.uploaded_at else None,
+            "imported_by": row.SourceDocument.uploaded_by,
+            "source_cdu": row.cdu_name,
+            "doc_date": row.SourceDocument.doc_date.isoformat() if row.SourceDocument.doc_date else None,
+            "rows_imported": row.SourceDocument.rows_imported,
+        }
+        for row in rows
+    ]
+
 
 def _detect_file_type(filename: str) -> str:
     f = filename.lower()
-    if any(k in f for k in ("trade report", "trade_report", "сделки", "trade")) and f.endswith(".xlsx"):
+    if any(k in f for k in ("trade report", "trade_report", "сделки", "trade")) and f.endswith((".xlsx", ".xlsm")):
         return "trade_report"
-    if any(k in f for k in ("holdings", "позиции")) and f.endswith(".xlsx"):
+    if any(k in f for k in ("holdings", "позиции", "отчет об активах", "активах")) and f.endswith(".xlsx"):
         return "holdings"
     if any(k in f for k in ("сверка", "recon", "reconciliation")) and f.endswith(".xlsx"):
         return "reconciliation"
-    if any(k in f for k in ("биржев", "certificate", "cert")) and any(f.endswith(e) for e in (".pdf", ".png", ".docx")):
+    if any(k in f for k in ("биржев", "certificate", "cert")) and f.endswith((".pdf", ".png", ".jpg", ".jpeg", ".docx")):
         return "exchange_certificate"
     if any(k in f for k in ("выписка", "statement")) and f.endswith(".pdf"):
         return "pdf_statement"
     return "unknown"
 
 
-def _run_import(db, tmp_path: str, file_type: str, source_doc_id: int, user: str):
+def _run_import(db: Session, file_path: str, file_type: str, source_doc_id: int | None, user: str) -> dict:
     if file_type == "trade_report":
-        return import_single_trade_report_xlsx(db, tmp_path, uploaded_by=user, source_doc_id=source_doc_id)
+        return import_single_trade_report_xlsx(db, file_path, uploaded_by=user, source_doc_id=source_doc_id)
     if file_type == "holdings":
-        return import_holdings_xlsx(db, tmp_path, uploaded_by=user, source_doc_id=source_doc_id)
+        return import_holdings_xlsx(db, file_path, uploaded_by=user, source_doc_id=source_doc_id)
     if file_type == "reconciliation":
-        return parse_reconciliation_xlsx(tmp_path)
+        return parse_reconciliation_xlsx(file_path)
     if file_type == "exchange_certificate":
-        return parse_certificate(tmp_path)
+        return parse_certificate(file_path)
     if file_type == "pdf_statement":
-        return parse_pdf_statement(tmp_path)
+        return parse_pdf_statement(file_path)
     raise ValueError(f"Unsupported file_type {file_type}")
 
 
-@router.get("/documents")
-def list_source_documents(limit: int = 50, db: Session = Depends(get_db)):
-    try:
-        from models.db_models import CDU
-        rows = db.execute(
-            select(SourceDocument, CDU.name.label("cdu_name"))
-            .outerjoin(CDU, SourceDocument.cdu_id == CDU.id)
-            .order_by(SourceDocument.uploaded_at.desc())
-            .limit(limit)
-        ).all()
-        return [
-            {
-                "id": r.SourceDocument.id,
-                "filename": r.SourceDocument.file_name,
-                "file_type": r.SourceDocument.doc_type,
-                "file_size": r.SourceDocument.file_size,
-                "import_status": r.SourceDocument.parse_status,
-                "imported_at": r.SourceDocument.uploaded_at.isoformat() if r.SourceDocument.uploaded_at else None,
-                "imported_by": r.SourceDocument.uploaded_by,
-                "source_cdu": r.cdu_name,
-            }
-            for r in rows
-        ]
-    except Exception as exc:
-        logger.exception("Error listing source documents")
-        raise HTTPException(500, f"Server error: {exc}")
+def _to_doc_type(file_type: str) -> str:
+    return {
+        "trade_report": "TRADE_REPORT",
+        "holdings": "HOLDINGS",
+        "reconciliation": "RECONCILIATION",
+        "exchange_certificate": "CERTIFICATE",
+        "pdf_statement": "STATEMENT_PDF",
+    }.get(file_type, "OTHER")
 
 
-def _bulk_primary_job(job_id: int, folder_path: str, user: str):
+def _finalize_source_doc(db: Session, source_doc: SourceDocument, counters: dict) -> None:
+    source_doc.parse_status = "OK"
+    source_doc.parsed_at = datetime.utcnow()
+    source_doc.parse_meta_json = json.dumps(counters, ensure_ascii=False, default=str)
+    source_doc.rows_imported = _count_rows(counters)
+
+    cdu_name = counters.get("cdu_name")
+    if cdu_name:
+        canonical = normalize_cdu_name(cdu_name) or cdu_name
+        cdu = db.execute(select(CDU).where(CDU.name == canonical)).scalars().first()
+        if cdu:
+            source_doc.cdu_id = cdu.id
+
+    report_date = counters.get("trade_date") or counters.get("report_date")
+    if hasattr(report_date, "isoformat"):
+        source_doc.doc_date = report_date
+    elif isinstance(report_date, str):
+        try:
+            source_doc.doc_date = datetime.fromisoformat(report_date).date()
+        except ValueError:
+            pass
+
+
+def _count_rows(counters: dict) -> int:
+    total = 0
+    for key in ("trades", "cash_snapshots", "portfolio_positions", "rows_parsed"):
+        value = counters.get(key)
+        if isinstance(value, int):
+            total += value
+    return total
+
+
+def _bulk_primary_job(job_id: int, folder_path: str, user: str) -> None:
     db = SessionLocal()
     try:
-        job = db.query(ImportJob).get(job_id)
+        job = db.get(ImportJob, job_id)
         if not job:
             return
-        job.status = "running"
+        files = [p for p in sorted(Path(folder_path).rglob("*")) if p.is_file()]
+        job.files_total = len(files)
         db.commit()
-        p = Path(folder_path)
-        if not p.exists():
-            raise FileNotFoundError(f"Folder not found: {folder_path}")
 
-        total_counters: dict = {}
-        for f in sorted(p.iterdir()):
-            if f.is_dir():
-                continue
-            ft = _detect_file_type(f.name)
-            if ft == "unknown":
+        total_rows = 0
+        for path in files:
+            file_type = _detect_file_type(path.name)
+            if file_type == "unknown":
                 continue
             try:
-                counters = _run_import(db, str(f), ft, None, user)
-                for k, v in counters.items():
-                    total_counters[k] = total_counters.get(k, 0) + (v if isinstance(v, int) else 0)
+                counters = _run_import(db, str(path), file_type, None, user)
+                total_rows += _count_rows(counters)
+                job.files_done += 1
             except Exception as exc:
-                logger.warning(f"Failed to import {f.name}: {exc}")
+                job.files_failed += 1
+                job.log = (job.log or "") + f"\n[ERR] {path}: {exc}"
+                logger.warning(f"Failed to import {path.name}: {exc}")
+            db.commit()
 
-        job.status = "completed"
+        job.rows_imported = total_rows
+        job.status = "DONE" if job.files_failed == 0 else "PARTIAL"
         job.finished_at = datetime.utcnow()
-        job.records_inserted = total_counters.get("trades", 0)
         db.commit()
     except Exception as exc:
         logger.exception("Bulk primary import failed")
-        job = db.query(ImportJob).get(job_id)
+        job = db.get(ImportJob, job_id)
         if job:
-            job.status = "failed"
-            job.error_message = str(exc)[:4000]
+            job.status = "FAILED"
             job.finished_at = datetime.utcnow()
+            job.log = (job.log or "") + f"\n[FATAL] {exc}"
             db.commit()
     finally:
         db.close()

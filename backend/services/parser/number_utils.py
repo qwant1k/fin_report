@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 # Whitespace characters that may appear as thousands separators
@@ -49,6 +49,11 @@ def parse_kz_date(value: Any) -> Optional[date]:
         return value.date()
     if isinstance(value, date):
         return value
+    if isinstance(value, (int, float)):
+        # Excel serial date (Windows 1900 date system). Real KASE/ЧДУ files
+        # sometimes store dates as numbers when the cell style is lost.
+        if 1 <= float(value) <= 60000:
+            return (datetime(1899, 12, 30) + timedelta(days=float(value))).date()
     s = str(value).strip()
     if not s:
         return None
