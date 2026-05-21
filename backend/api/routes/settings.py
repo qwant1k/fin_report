@@ -8,7 +8,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from auth import require_admin
+from auth import require_admin, require_user
 from database import get_db
 from models.db_models import (
     AccountReceivable,
@@ -31,7 +31,11 @@ from models.schemas import (
     Instrument as InstrumentSchema,
 )
 
-router = APIRouter(prefix="/api/settings", tags=["settings"])
+router = APIRouter(
+    prefix="/api/settings",
+    tags=["settings"],
+    dependencies=[Depends(require_user)],
+)
 
 
 # ─────────── ЧДУ ───────────

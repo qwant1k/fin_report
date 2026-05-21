@@ -124,7 +124,19 @@ def cell_float(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)):
         f = float(value)
         return f if f == f else None  # NaN check
-    s = str(value).replace(" ", "").replace("\u00A0", "").replace(",", ".")
+    s = str(value).strip().replace("\u00A0", " ")
+    if not s or s == "-":
+        return None
+    has_comma = "," in s
+    has_dot = "." in s
+    if has_comma and has_dot:
+        # KASE XLSX: "1,214.9000" means 1214.9; comma is thousands separator.
+        s = s.replace(",", "").replace(" ", "")
+    elif has_comma:
+        # Local format: "1 214,90" means 1214.9; comma is decimal separator.
+        s = s.replace(" ", "").replace(",", ".")
+    else:
+        s = s.replace(" ", "")
     if not s or s == "-":
         return None
     try:

@@ -6,13 +6,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database import get_db
-from auth import require_admin
+from auth import require_admin, require_user
 from models.db_models import ImportJob
 from services.automation.coupon_redemption_engine import run_daily_auto_events
 from services.automation.fifo_engine import process_all_sell_fifo
 from services.automation.ar_closer import close_ar_items
 
-router = APIRouter(prefix="/api/automation", tags=["automation"])
+router = APIRouter(
+    prefix="/api/automation",
+    tags=["automation"],
+    dependencies=[Depends(require_user)],
+)
 
 
 class DailyRunRequest(BaseModel):

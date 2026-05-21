@@ -5,8 +5,10 @@ from datetime import date, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+
+from auth import require_user
 
 from database import get_db
 from models.db_models import (
@@ -14,11 +16,13 @@ from models.db_models import (
     BondLot,
     CDU,
     CDULimit,
+    GeneratedReport,
     MBMIndex,
     MVSnapshot,
     PortfolioPosition,
     PortfolioSummary,
     RepoLot,
+    SourceDocument,
     Trade,
 )
 from models.schemas import (
@@ -35,7 +39,21 @@ from services.calculator.constants import (
     DURATION_UPPER_OFFSET,
 )
 
-router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+
+def _source_doc_types(db: Session) -> dict[int, str]:
+    rows = db.execute(select(SourceDocument.id, SourceDocument.doc_type)).all()
+    return {int(row.id): str(row.doc_type or "") for row in rows if row.id is not None}
+
+
+def _is_trade_report_source(source_doc_types: dict[int, str], source_doc_id: Optional[int]) -> bool:
+    return source_doc_id is not None and source_doc_types.get(source_doc_id) == "TRADE_REPORT"
+
+
+router = APIRouter(
+    prefix="/api/dashboard",
+    tags=["dashboard"],
+    dependencies=[Depends(require_user)],
+)
 
 
 @router.get("/summary", response_model=DashboardResponse)
@@ -164,6 +182,20 @@ def dashboard_summary(
 
     blocks.sort(key=lambda block: block.total_mv_current, reverse=True)
 
+    # Operational KPIs (Phase 3)
+    pending_approvals_count = db.execute(
+        select(func.count(GeneratedReport.id)).where(
+            GeneratedReport.status == "pending_approval"
+        )
+    ).scalar() or 0
+    flagged_prices_count = db.execute(
+        select(func.count(Trade.id)).where(
+            Trade.price_flag == True,  # noqa: E712
+            Trade.is_active == True,   # noqa: E712
+            Trade.trade_date == report_date,
+        )
+    ).scalar() or 0
+
     return DashboardResponse(
         report_date=report_date,
         fund_total_mv=fund_total,
@@ -175,6 +207,8 @@ def dashboard_summary(
         benchmark_ytm=mbm.ytm_value if mbm else None,
         benchmark_duration=mbm.duration if mbm else None,
         breaches_count=breaches,
+        pending_approvals_count=pending_approvals_count,
+        flagged_prices_count=flagged_prices_count,
         blocks=blocks,
     )
 
@@ -250,36 +284,166 @@ def instrument_details(
         row["operations"] += operations
 
     position_rows_found = False
+    trade_rows_found = False
+    source_doc_types = _source_doc_types(db)
+    baseline_date: Optional[date] = None
+
+    if category == "REVERSE_REPO":
+        repo_dates = [
+            lot.valuation_date
+            for lot in db.execute(
+                select(RepoLot).where(
+                    RepoLot.cdu_id == cdu_id,
+                    RepoLot.valuation_date <= to_,
+                )
+            ).scalars()
+            if not _is_trade_report_source(source_doc_types, lot.source_doc_id)
+        ]
+        baseline_date = max(repo_dates) if repo_dates else None
+        if baseline_date is not None:
+            for lot in db.execute(
+                select(RepoLot).where(
+                    RepoLot.cdu_id == cdu_id,
+                    RepoLot.valuation_date == baseline_date,
+                )
+            ).scalars():
+                if _is_trade_report_source(source_doc_types, lot.source_doc_id):
+                    continue
+                position_rows_found = True
+                acc(
+                    lot.instrument_code or lot.isin or lot.deal_id or "REPO",
+                    isin=lot.isin,
+                    name="Открытое обратное REPO",
+                    quantity=lot.face_value,
+                    face_value=lot.face_value,
+                    amount=lot.market_value or lot.close_value or lot.face_value,
+                    ytm=lot.ytm or lot.repo_rate_pct,
+                    duration=lot.duration or ((lot.term_days / 365.0) if lot.term_days else None),
+                    first_date=lot.trade_date,
+                    last_date=lot.valuation_date,
+                    operations=0,
+                )
+    elif category not in ("CASH", "RECEIVABLES"):
+        dates: list[date] = []
+        dates.extend(
+            lot.valuation_date
+            for lot in db.execute(
+                select(BondLot).where(
+                    BondLot.cdu_id == cdu_id,
+                    BondLot.category == category,
+                    BondLot.valuation_date <= to_,
+                )
+            ).scalars()
+            if not _is_trade_report_source(source_doc_types, lot.source_doc_id)
+        )
+        dates.extend(
+            p.position_date
+            for p in db.execute(
+                select(PortfolioPosition).where(
+                    PortfolioPosition.cdu_id == cdu_id,
+                    PortfolioPosition.instrument_category == category,
+                    PortfolioPosition.instrument_code.is_not(None),
+                    PortfolioPosition.position_date <= to_,
+                )
+            ).scalars()
+        )
+        baseline_date = max(dates) if dates else None
+        if baseline_date is not None:
+            for lot in db.execute(
+                select(BondLot).where(
+                    BondLot.cdu_id == cdu_id,
+                    BondLot.category == category,
+                    BondLot.valuation_date == baseline_date,
+                )
+            ).scalars():
+                if _is_trade_report_source(source_doc_types, lot.source_doc_id):
+                    continue
+                position_rows_found = True
+                qty = float(lot.quantity_current or 0.0)
+                if abs(qty) < 1e-9:
+                    qty = float(lot.face_value_current or 0.0)
+                acc(
+                    lot.instrument_code or lot.isin,
+                    isin=lot.isin,
+                    name=lot.notes,
+                    quantity=qty,
+                    face_value=lot.face_value_current,
+                    amount=lot.market_value or lot.total_value or lot.face_value_current,
+                    ytm=lot.ytm,
+                    duration=lot.duration,
+                    first_date=lot.trade_date,
+                    last_date=lot.valuation_date,
+                    operations=0,
+                )
+            for p in db.execute(
+                select(PortfolioPosition).where(
+                    PortfolioPosition.cdu_id == cdu_id,
+                    PortfolioPosition.instrument_category == category,
+                    PortfolioPosition.instrument_code.is_not(None),
+                    PortfolioPosition.position_date == baseline_date,
+                )
+            ).scalars():
+                position_rows_found = True
+                acc(
+                    p.instrument_code,
+                    name=p.instrument_name,
+                    quantity=p.nominal_volume,
+                    face_value=p.nominal_volume,
+                    amount=p.market_value_current,
+                    ytm=p.ytm,
+                    duration=p.duration,
+                    first_date=p.position_date,
+                    last_date=p.position_date,
+                    operations=0,
+                )
 
     trade_q = select(Trade).where(
         Trade.cdu_id == cdu_id,
         Trade.instrument_category == category,
         Trade.is_active == True,
-        Trade.value_date >= from_,
         Trade.value_date <= to_,
     )
     for t in db.execute(trade_q).scalars().all():
-        signed_amount = t.amount_kzt or t.amount_ccy or t.face_value or 0.0
+        trade_effective_date = t.value_date or t.trade_date
+        if baseline_date is not None and trade_effective_date <= baseline_date:
+            continue
+        sign = 0
+        if t.operation_type in ("BUY", "REPO_OPEN", "FX_BUY", "DEPOSIT_OPEN"):
+            sign = 1
+        elif t.operation_type in ("SELL", "REPO_CLOSE", "REDEMPTION", "FX_SELL", "DEPOSIT_CLOSE"):
+            sign = -1
+        if sign == 0:
+            continue
+        trade_rows_found = True
+        signed_amount = (
+            t.repo_buyback_sum
+            or t.amount_kzt
+            or t.amount_ccy
+            or t.face_value
+            or 0.0
+        )
         acc(
             t.instrument_code or t.isin or t.deal_id or "—",
             isin=t.isin,
             name=t.description,
-            quantity=t.quantity,
-            face_value=t.face_value,
-            amount=abs(signed_amount),
+            quantity=sign * abs(float(t.quantity or 0.0)),
+            face_value=sign * abs(float(t.face_value or 0.0)),
+            amount=sign * abs(float(signed_amount or 0.0)),
             ytm=t.ytm or t.repo_rate_pct,
             duration=(t.repo_term_days / 365.0) if t.repo_term_days else None,
             first_date=t.trade_date,
             last_date=t.value_date,
         )
 
-    if category == "REVERSE_REPO":
+    if not trade_rows_found and not position_rows_found and category == "REVERSE_REPO":
         repo_q = select(RepoLot).where(
             RepoLot.cdu_id == cdu_id,
             RepoLot.trade_date <= to_,
             (RepoLot.close_date.is_(None) | (RepoLot.close_date >= from_)),
         )
         for lot in db.execute(repo_q).scalars().all():
+            if _is_trade_report_source(source_doc_types, lot.source_doc_id):
+                continue
             if not position_rows_found:
                 details.clear()
                 position_rows_found = True
@@ -297,7 +461,7 @@ def instrument_details(
                 operations=0,
             )
 
-    if category not in ("REVERSE_REPO", "CASH", "RECEIVABLES"):
+    if not trade_rows_found and not position_rows_found and category not in ("REVERSE_REPO", "CASH", "RECEIVABLES"):
         bond_q = select(BondLot).where(
             BondLot.cdu_id == cdu_id,
             BondLot.category == category,
@@ -305,14 +469,19 @@ def instrument_details(
             BondLot.valuation_date <= to_,
         )
         for lot in db.execute(bond_q).scalars().all():
+            if _is_trade_report_source(source_doc_types, lot.source_doc_id):
+                continue
             if not position_rows_found:
                 details.clear()
                 position_rows_found = True
+            qty = float(lot.quantity_current or 0.0)
+            if abs(qty) < 1e-9:
+                qty = float(lot.face_value_current or 0.0)
             acc(
                 lot.instrument_code or lot.isin,
                 isin=lot.isin,
                 name=lot.notes,
-                quantity=lot.quantity_current,
+                quantity=qty,
                 face_value=lot.face_value_current,
                 amount=lot.market_value or lot.total_value or lot.face_value_current,
                 ytm=lot.ytm,
@@ -324,6 +493,18 @@ def instrument_details(
 
     out = []
     for row in details.values():
+        if (
+            category not in ("CASH", "RECEIVABLES")
+            and abs(float(row.get("quantity") or 0.0)) < 1e-9
+            and abs(float(row.get("face_value") or 0.0)) < 1e-9
+        ):
+            continue
+        if (
+            abs(float(row.get("quantity") or 0.0)) < 1e-9
+            and abs(float(row.get("face_value") or 0.0)) < 1e-9
+            and abs(float(row.get("amount") or 0.0)) < 1e-9
+        ):
+            continue
         ytm_weight = row.pop("ytm_weight") or 0.0
         duration_weight = row.pop("duration_weight") or 0.0
         ytm_sum = row.pop("ytm_weighted_sum")
@@ -384,10 +565,26 @@ def dashboard_history(
     days: int = Query(90),
     from_: Optional[date] = Query(None, alias="from"),
     to_: Optional[date] = Query(None, alias="to"),
+    cdu_ids: Optional[str] = Query(None),
+    portfolio_type: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     upper = to_ or date.today()
     lower = from_ if from_ is not None else (upper - timedelta(days=days))
+    selected_cdu_ids = {
+        int(x) for x in cdu_ids.split(",")
+        if x.strip().isdigit()
+    } if cdu_ids else set()
+
+    def cdu_allowed(cdu: Optional[CDU]) -> bool:
+        if cdu is None:
+            return False
+        if selected_cdu_ids and cdu.id not in selected_cdu_ids:
+            return False
+        if portfolio_type and cdu.portfolio_type != portfolio_type:
+            return False
+        return True
+
     rows = db.execute(select(PortfolioSummary).where(
         PortfolioSummary.summary_date >= lower,
         PortfolioSummary.summary_date <= upper,
@@ -396,6 +593,8 @@ def dashboard_history(
     summary_keys: set[tuple[int, date]] = set()
     for s in rows:
         cdu = db.get(CDU, s.cdu_id)
+        if not cdu_allowed(cdu):
+            continue
         summary_keys.add((s.cdu_id, s.summary_date))
         out.append({
             "date": s.summary_date.isoformat(),
@@ -414,6 +613,8 @@ def dashboard_history(
         if (s.cdu_id, s.snapshot_date) in summary_keys:
             continue
         cdu = db.get(CDU, s.cdu_id)
+        if not cdu_allowed(cdu):
+            continue
         out.append({
             "date": s.snapshot_date.isoformat(),
             "cdu_id": s.cdu_id,

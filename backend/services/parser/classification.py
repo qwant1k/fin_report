@@ -145,7 +145,11 @@ def detect_cdu_prefix(participant_code: Optional[str], filename: str) -> Optiona
 
     Приоритет: более длинные совпадения побеждают (например HALFN перед HALY).
     """
-    src = (participant_code or "").upper() + "|" + (filename or "").upper()
+    participant_src = (participant_code or "").upper()
+    filename_src = (filename or "").upper()
+    if re.search(r"(^|[^A-Z0-9])JI([^A-Z0-9]|$)", filename_src):
+        return "JUSAN"
+    src = participant_src + "|" + filename_src
     # Сортируем по убыванию длины для greedy matching
     for prefix in sorted(DEFAULT_CDU_PREFIXES, key=lambda p: -len(p)):
         if prefix in src:

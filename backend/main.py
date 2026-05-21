@@ -13,6 +13,7 @@ from api.routes import (
     analytics,
     auth,
     calculate,
+    cdu_formats,
     dashboard,
     export,
     import_routes,
@@ -23,6 +24,9 @@ from api.routes import (
     reconciliation,
     mbm,
     reports,
+    data_editor,
+    risk_report,
+    securities,
     settings as settings_routes,
     upload,
 )
@@ -84,6 +88,10 @@ def create_app() -> FastAPI:
     app.include_router(export.router)
     app.include_router(reports.router)
     app.include_router(settings_routes.router)
+    app.include_router(cdu_formats.router)
+    app.include_router(securities.router)
+    app.include_router(risk_report.router)
+    app.include_router(data_editor.router)
     app.include_router(admin.router)
 
     return app

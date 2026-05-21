@@ -7,17 +7,30 @@ from datetime import date, datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from auth import require_user, require_write
 from database import get_db
-from models.db_models import CalculationRun
+from models.db_models import CalculationRun, User
 from models.schemas import CalculateRequest, CalculateResponse
+from services.audit import write_audit
 from services.calculator.portfolio_calculator import calculate_for_date
 
-router = APIRouter(prefix="/api/calculate", tags=["calculate"])
+router = APIRouter(
+    prefix="/api/calculate",
+    tags=["calculate"],
+    dependencies=[Depends(require_user)],
+)
 
 
 @router.post("/", response_model=CalculateResponse)
-def trigger_calc(payload: CalculateRequest, db: Session = Depends(get_db)):
-    run = CalculationRun(run_date=payload.report_date, status="RUNNING")
+def trigger_calc(
+    payload: CalculateRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_write),
+):
+    run = CalculationRun(
+        run_date=payload.report_date, status="RUNNING",
+        triggered_by=user.username,
+    )
     db.add(run)
     db.commit()
     t0 = time.perf_counter()
@@ -34,6 +47,16 @@ def trigger_calc(payload: CalculateRequest, db: Session = Depends(get_db)):
         raise HTTPException(500, f"Ошибка расчёта: {exc}") from exc
     finally:
         run.finished_at = datetime.utcnow()
+        write_audit(
+            db, user=user.username, action="CALCULATION_RUN",
+            entity="CalculationRun", entity_id=run.id,
+            details={
+                "run_date": payload.report_date.isoformat(),
+                "status": run.status,
+                "cdus_processed": run.cdus_processed,
+                "recalculate": payload.recalculate,
+            },
+        )
         db.commit()
 
     return CalculateResponse(

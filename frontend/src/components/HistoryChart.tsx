@@ -24,18 +24,22 @@ interface HistoryRow {
 interface Props {
   from?: string
   to?: string
+  portfolioType?: string
+  cduIds?: number[]
 }
 
 const colors = ['#1F6B38', '#70AD47', '#FFA000', '#1565C0', '#7E57C2']
 
-export default function HistoryChart({ from, to }: Props = {}) {
+export default function HistoryChart({ from, to, portfolioType, cduIds = [] }: Props = {}) {
   const { data } = useQuery<HistoryRow[]>({
-    queryKey: ['history-chart', from, to],
+    queryKey: ['history-chart', from, to, portfolioType, cduIds],
     queryFn: async () => {
       const params: Record<string, string | number> = {}
       if (from) params.from = from
       if (to) params.to = to
       if (!from) params.days = 90
+      if (portfolioType) params.portfolio_type = portfolioType
+      if (cduIds.length) params.cdu_ids = cduIds.join(',')
       return (await api.get('/dashboard/history', { params })).data
     },
   })

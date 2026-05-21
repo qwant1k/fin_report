@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Save } from 'lucide-react'
 import toast from 'react-hot-toast'
@@ -13,7 +13,7 @@ const CATS = ['CASH', 'GOV_BONDS', 'REVERSE_REPO', 'MFO_BONDS', 'AGENCY_BONDS', 
 export default function SettingsPage() {
   const qc = useQueryClient()
   const isAdmin = useAuthStore((s) => s.isAdmin())
-  const [tab, setTab] = useState<'cdus' | 'limits'>('cdus')
+  const [tab, setTab] = useState<'cdus' | 'limits' | 'formats'>('cdus')
 
   const cdus = useQuery<CDU[]>({
     queryKey: ['cdus'],
@@ -66,6 +66,7 @@ export default function SettingsPage() {
       <div className="flex gap-2 border-b border-slate-200">
         <button onClick={() => setTab('cdus')} className={`px-4 py-2 ${tab === 'cdus' ? 'border-b-2 border-kdif-green text-kdif-green font-semibold' : 'text-slate-500'}`}>ЧДУ</button>
         <button onClick={() => setTab('limits')} className={`px-4 py-2 ${tab === 'limits' ? 'border-b-2 border-kdif-green text-kdif-green font-semibold' : 'text-slate-500'}`}>Лимиты</button>
+        <button onClick={() => setTab('formats')} className={`px-4 py-2 ${tab === 'formats' ? 'border-b-2 border-kdif-green text-kdif-green font-semibold' : 'text-slate-500'}`}>Форматы файлов</button>
       </div>
 
       {tab === 'cdus' && (
@@ -91,6 +92,10 @@ export default function SettingsPage() {
             </table>
           </div>
         </div>
+      )}
+
+      {tab === 'formats' && (
+        <CDUFormatsPanel cdus={cdus.data ?? []} canEdit={isAdmin} />
       )}
 
       {tab === 'limits' && (
@@ -164,5 +169,181 @@ function LimitRow({ limit, cdus, canEdit, onSave }: {
       <td><input type="date" className="input py-1" value={v.valid_from} disabled={!canEdit} onChange={(e) => setV({ ...v, valid_from: e.target.value })} /></td>
       <td>{canEdit && <button onClick={() => onSave(v)} className="btn-secondary px-2 py-1"><Save className="w-4 h-4" /></button>}</td>
     </tr>
+  )
+}
+
+// ─────────────── CDU file format overrides ───────────────
+
+const FORMAT_FIELDS: Array<{ key: string; label: string }> = [
+  { key: 'deal_number', label: 'Сделка №' },
+  { key: 'order_number', label: 'Заявка №' },
+  { key: 'trade_time', label: 'Время сделки' },
+  { key: 'kp', label: 'Код участника (КП)' },
+  { key: 'regime_code', label: 'Режим торгов' },
+  { key: 'instrument_code', label: 'Код инструмента' },
+  { key: 'status', label: 'Статус сделки' },
+  { key: 'participant_code', label: 'Код участника' },
+  { key: 'trade_account', label: 'Счёт' },
+  { key: 'volume', label: 'Объём' },
+  { key: 'price', label: 'Цена' },
+  { key: 'amount', label: 'Сумма' },
+  { key: 'nkd', label: 'НКД' },
+  { key: 'currency', label: 'Валюта' },
+]
+
+interface CDUFormat {
+  id?: number
+  cdu_id: number
+  cdu_name?: string | null
+  field_aliases: Record<string, string[]>
+  header_row_index: number
+  is_active: boolean
+  updated_by?: string | null
+  updated_at?: string | null
+}
+
+function CDUFormatsPanel({ cdus, canEdit }: { cdus: CDU[]; canEdit: boolean }) {
+  const qc = useQueryClient()
+  const [selectedCduId, setSelectedCduId] = useState<number | null>(
+    cdus[0]?.id ?? null,
+  )
+
+  const fmt = useQuery<CDUFormat>({
+    queryKey: ['cdu-format', selectedCduId],
+    queryFn: async () =>
+      (await api.get(`/cdu-formats/${selectedCduId}`)).data,
+    enabled: selectedCduId != null,
+  })
+
+  const save = useMutation({
+    mutationFn: async (payload: CDUFormat) =>
+      (await api.post(`/cdu-formats/${payload.cdu_id}`, payload)).data,
+    onSuccess: () => {
+      toast.success('Формат сохранён')
+      qc.invalidateQueries({ queryKey: ['cdu-format', selectedCduId] })
+    },
+    onError: () => toast.error('Не удалось сохранить'),
+  })
+
+  const remove = useMutation({
+    mutationFn: async () => (await api.delete(`/cdu-formats/${selectedCduId}`)).data,
+    onSuccess: () => {
+      toast.success('Сброшено к умолчанию')
+      qc.invalidateQueries({ queryKey: ['cdu-format', selectedCduId] })
+    },
+  })
+
+  const [draft, setDraft] = useState<Record<string, string>>({})
+
+  // Reload draft when the selected CDU or its server-side aliases change.
+  useEffect(() => {
+    if (!fmt.data || selectedCduId == null) return
+    const aliases = fmt.data.field_aliases ?? {}
+    const next: Record<string, string> = {}
+    for (const f of FORMAT_FIELDS) {
+      next[f.key] = (aliases[f.key] ?? []).join(', ')
+    }
+    setDraft(next)
+  }, [selectedCduId, fmt.data])
+
+  const handleSave = () => {
+    if (selectedCduId == null) return
+    const built: Record<string, string[]> = {}
+    for (const f of FORMAT_FIELDS) {
+      const raw = (draft[f.key] ?? '').trim()
+      if (!raw) continue
+      const list = raw.split(',').map((s) => s.trim()).filter(Boolean)
+      if (list.length) built[f.key] = list
+    }
+    save.mutate({
+      cdu_id: selectedCduId,
+      field_aliases: built,
+      header_row_index: fmt.data?.header_row_index ?? 0,
+      is_active: fmt.data?.is_active ?? true,
+    })
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="card p-4">
+        <p className="text-sm text-slate-600">
+          Перекрытия имён колонок XLSX-файла для конкретного ЧДУ. Если CDU присылает
+          колонку с нестандартным заголовком (например, <em>«Номер сделки»</em> вместо
+          <em> «Сделка №»</em>), укажите альтернативные названия через запятую. При парсинге
+          этот список проверяется первым; если совпадений нет — используется встроенный словарь.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="text-sm font-medium text-slate-700">ЧДУ:</label>
+        <select
+          className="input py-1 max-w-md"
+          value={selectedCduId ?? ''}
+          onChange={(e) => setSelectedCduId(Number(e.target.value) || null)}
+        >
+          {cdus.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.short_name} — {c.name}
+            </option>
+          ))}
+        </select>
+        {fmt.data?.updated_at && (
+          <span className="text-xs text-slate-500">
+            обновлено: {fmt.data.updated_by ?? '—'}, {new Date(fmt.data.updated_at).toLocaleString()}
+          </span>
+        )}
+      </div>
+
+      {selectedCduId != null && (
+        <div className="card overflow-hidden">
+          <table className="kdif-table">
+            <thead>
+              <tr>
+                <th>Поле</th>
+                <th>Канонический ключ</th>
+                <th>Альтернативные заголовки (через запятую)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {FORMAT_FIELDS.map((f) => (
+                <tr key={f.key}>
+                  <td className="whitespace-nowrap font-medium">{f.label}</td>
+                  <td className="font-mono text-xs text-slate-500">{f.key}</td>
+                  <td>
+                    <input
+                      className="input py-1 w-full"
+                      placeholder="напр.: номер сделки, deal id"
+                      value={draft[f.key] ?? ''}
+                      disabled={!canEdit}
+                      onChange={(e) =>
+                        setDraft((d) => ({ ...d, [f.key]: e.target.value }))
+                      }
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {canEdit && (
+            <div className="flex items-center justify-end gap-2 border-t border-slate-200 p-3">
+              <button
+                onClick={() => remove.mutate()}
+                className="btn-secondary text-red-600"
+                disabled={!fmt.data?.id}
+              >
+                <Trash2 className="w-4 h-4 mr-1" /> Сбросить
+              </button>
+              <button
+                onClick={handleSave}
+                className="btn-primary"
+                disabled={save.isPending}
+              >
+                <Save className="w-4 h-4 mr-1" /> Сохранить
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   )
 }

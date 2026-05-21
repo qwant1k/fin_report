@@ -4,17 +4,27 @@ from __future__ import annotations
 from datetime import date
 from typing import List
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from models.db_models import KasePrice, PortfolioPosition, PriceReconciliation
 
 
-def reconcile_prices(db: Session, report_date: date) -> List[PriceReconciliation]:
+def reconcile_prices(
+    db: Session,
+    report_date: date,
+    *,
+    commit: bool = True,
+) -> List[PriceReconciliation]:
     positions = db.execute(select(PortfolioPosition).where(
         PortfolioPosition.position_date == report_date,
         PortfolioPosition.instrument_code.is_not(None),
     )).scalars().all()
+    position_ids = [p.id for p in positions if p.id is not None]
+    if position_ids:
+        db.execute(delete(PriceReconciliation).where(
+            PriceReconciliation.position_id.in_(position_ids)
+        ))
     kase_rows = {kp.instrument_code: kp for kp in db.execute(select(KasePrice).where(
         KasePrice.trade_date == report_date,
     )).scalars().all()}
@@ -41,5 +51,8 @@ def reconcile_prices(db: Session, report_date: date) -> List[PriceReconciliation
         )
         db.add(rec)
         out.append(rec)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return out

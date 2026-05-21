@@ -6,11 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database import get_db
-from auth import require_admin
+from auth import require_admin, require_user
 from models.db_models import ReconciliationResult
 from services.reconciliation.engine import reconcile_all_for_date, run_reconciliation
 
-router = APIRouter(prefix="/api/reconciliation", tags=["reconciliation"])
+router = APIRouter(
+    prefix="/api/reconciliation",
+    tags=["reconciliation"],
+    dependencies=[Depends(require_user)],
+)
 
 
 class ReconItem(BaseModel):

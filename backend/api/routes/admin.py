@@ -6,7 +6,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from auth import hash_password, require_admin
+from auth import ALLOWED_ROLES, hash_password, require_admin, require_user
 from database import get_db
 from models.db_models import AuditLog, User
 from models.schemas import UserCreate, UserOut
@@ -22,6 +22,8 @@ def list_users(db: Session = Depends(get_db), user: User = Depends(require_admin
 @router.post("/users", response_model=UserOut)
 def create_user(payload: UserCreate, db: Session = Depends(get_db),
                 actor: User = Depends(require_admin)):
+    if payload.role not in ALLOWED_ROLES:
+        raise HTTPException(400, f"role ∈ {{{', '.join(sorted(ALLOWED_ROLES))}}}")
     if db.query(User).filter_by(username=payload.username).first():
         raise HTTPException(409, "Пользователь существует")
     obj = User(
@@ -58,8 +60,8 @@ def delete_user(user_id: int, db: Session = Depends(get_db),
 @router.put("/users/{user_id}/role")
 def change_role(user_id: int, role: str, db: Session = Depends(get_db),
                 actor: User = Depends(require_admin)):
-    if role not in ("admin", "analyst", "viewer"):
-        raise HTTPException(400, "role ∈ {admin, analyst, viewer}")
+    if role not in ALLOWED_ROLES:
+        raise HTTPException(400, f"role ∈ {{{', '.join(sorted(ALLOWED_ROLES))}}}")
     u = db.get(User, user_id)
     if not u:
         raise HTTPException(404, "Пользователь не найден")
@@ -72,5 +74,5 @@ def change_role(user_id: int, role: str, db: Session = Depends(get_db),
 
 @router.get("/audit")
 def list_audit(limit: int = 200, db: Session = Depends(get_db),
-               user: User = Depends(require_admin)):
+               user: User = Depends(require_user)):
     return db.query(AuditLog).order_by(AuditLog.ts.desc()).limit(limit).all()

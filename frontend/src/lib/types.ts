@@ -43,7 +43,31 @@ export interface DashboardResponse {
   benchmark_ytm: number | null
   benchmark_duration: number | null
   breaches_count: number
+  pending_approvals_count?: number
+  flagged_prices_count?: number
   blocks: CDUBlock[]
+}
+
+export type ReportStatus = 'draft' | 'pending_approval' | 'approved' | 'rejected'
+
+export interface GeneratedReport {
+  id: number
+  report_date: string
+  report_type: string
+  file_path: string
+  generated_at: string
+  generated_by: string | null
+  notes: string | null
+  status: ReportStatus
+  submitted_by: string | null
+  submitted_at: string | null
+  approved_by: string | null
+  approved_at: string | null
+  rejected_by: string | null
+  rejected_at: string | null
+  rejection_comment: string | null
+  version: number
+  parent_report_id: number | null
 }
 
 export interface InstrumentDetailRow {
@@ -110,9 +134,11 @@ export interface TradeFile {
   trade_date: string
   filename: string
   uploaded_at: string
+  uploaded_by: string | null
   status: string
   rows_parsed: number
   rows_skipped: number
+  sha256: string | null
 }
 
 export interface KasePrice {
@@ -123,7 +149,24 @@ export interface KasePrice {
   instrument_name: string | null
   close_price: number | null
   ytm: number | null
+  accrued_interest: number | null
   duration: number | null
+  sec_type: string | null
+  fin_sec_ru: string | null
+  fin_sec_en: string | null
+  fin_sec_kz: string | null
+  org_code: string | null
+  org_name_ru: string | null
+  org_name_en: string | null
+  org_name_kz: string | null
+  settlement_price: number | null
+  settlement_dirty_price: number | null
+  dohod: number | null
+  dtm: number | null
+  kase_ytm: number | null
+  unit_ru: string | null
+  unit_en: string | null
+  unit_kz: string | null
   fetched_at: string
   source: string
 }

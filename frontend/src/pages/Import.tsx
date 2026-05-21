@@ -66,6 +66,7 @@ export default function ImportPage() {
   const qc = useQueryClient()
   const [folder, setFolder] = useState(SUGGESTED_FOLDER)
   const [pattern, setPattern] = useState('**/*.xlsm')
+  const [password, setPassword] = useState('7')
   const [activeJobId, setActiveJobId] = useState<number | null>(null)
 
   // ───── Список последних job-ов ─────
@@ -97,6 +98,7 @@ export default function ImportPage() {
       const fd = new FormData()
       fd.append('file', file)
       fd.append('skip_if_imported', 'true')
+      if (password.trim()) fd.append('password', password.trim())
       return (
         await api.post('/import/risk-report', fd, {
           headers: { 'Content-Type': 'multipart/form-data' },
@@ -122,16 +124,26 @@ export default function ImportPage() {
       }
       qc.invalidateQueries({ queryKey: ['import-jobs'] })
     },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.detail || 'Не удалось импортировать Risk Report')
+    },
   })
 
   // ───── Bulk folder import ─────
   const bulkImport = useMutation({
     mutationFn: async () =>
-      (await api.post('/import/risk-report/bulk-folder', { folder_path: folder, pattern })).data,
+      (await api.post('/import/risk-report/bulk-folder', {
+        folder_path: folder,
+        pattern,
+        password: password.trim() || undefined,
+      })).data,
     onSuccess: (r) => {
       toast.success(`Запущен job #${r.job_id} — папка: ${r.folder}`)
       setActiveJobId(r.job_id)
       qc.invalidateQueries({ queryKey: ['import-jobs'] })
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.detail || 'Не удалось запустить импорт Risk Report')
     },
   })
 
@@ -158,6 +170,17 @@ export default function ImportPage() {
         <h2 className="font-semibold mb-3 flex items-center gap-2">
           <FileSpreadsheet className="w-4 h-4 text-emerald-600" /> Загрузить один файл
         </h2>
+        <div className="mb-3 max-w-sm">
+          <label className="label">Пароль файла</label>
+          <input
+            className="input"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="По умолчанию 7"
+            autoComplete="off"
+          />
+        </div>
         <label
           htmlFor="rr-file"
           className="border-2 border-dashed border-slate-300 hover:border-kdif-green
@@ -210,6 +233,17 @@ export default function ImportPage() {
               value={pattern}
               onChange={(e) => setPattern(e.target.value)}
               placeholder="**/*.xlsm"
+            />
+          </div>
+          <div>
+            <label className="label">Пароль файла</label>
+            <input
+              className="input"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="По умолчанию 7"
+              autoComplete="off"
             />
           </div>
           <div className="md:col-span-3 flex justify-end">

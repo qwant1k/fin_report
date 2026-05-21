@@ -13,7 +13,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from services.mbm.mbm_client import MBMClient, MBMValue, parse_kase_mbm_xlsx, _to_float
+from services.mbm.mbm_client import (
+    DEFAULT_MBM_START_DATE,
+    MBMClient,
+    parse_kase_mbm_xlsx,
+    _to_float,
+)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "mbm_kase_archive.xlsx"
 
@@ -81,9 +86,13 @@ async def test_client_fetch_latest_uses_kase_xlsx_first():
         def raise_for_status(self):
             pass
 
-    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=_FakeResp())):
+    get = AsyncMock(return_value=_FakeResp())
+    with patch("httpx.AsyncClient.get", new=get):
         latest = await client.fetch_latest()
 
+    params = get.await_args.kwargs["params"]
+    assert params["start_date"] == DEFAULT_MBM_START_DATE.strftime("%Y-%m-%d")
+    assert params["end_date"] == date.today().strftime("%Y-%m-%d")
     assert latest is not None
     assert latest.index_date == date(2026, 5, 6)
     assert latest.ytm_value == pytest.approx(1214.9)
@@ -106,9 +115,13 @@ async def test_client_fetch_for_date_returns_exact_match():
         def raise_for_status(self):
             pass
 
-    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=_FakeResp())):
+    get = AsyncMock(return_value=_FakeResp())
+    with patch("httpx.AsyncClient.get", new=get):
         v = await client.fetch_for_date(date(2026, 5, 5))
 
+    params = get.await_args.kwargs["params"]
+    assert params["start_date"] == "2026-05-05"
+    assert params["end_date"] == "2026-05-05"
     assert v is not None
     assert v.index_date == date(2026, 5, 5)
     assert v.ytm_value == pytest.approx(1216.0)

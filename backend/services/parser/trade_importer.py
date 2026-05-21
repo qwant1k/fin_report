@@ -14,15 +14,20 @@ def import_trades_from_parsed(
     db: Session, parsed: ParsedTradeFile,
     *, uploaded_by: Optional[str] = None,
     source_doc_id: Optional[int] = None,
+    commit: bool = True,
 ) -> Dict[str, int]:
+    """Import parsed rows into the Trade ledger.
+
+    Set ``commit=False`` when the caller manages the transaction (e.g. the
+    upload route, which needs the full pipeline to be atomic).
+    """
     cdu_name = parsed.cdu_name
     cdu_id = None
     if cdu_name:
-        canonical = normalize_cdu_name(cdu_name)
-        if canonical:
-            row = db.execute(select(CDU).where(CDU.name == canonical)).scalars().first()
-            if row:
-                cdu_id = row.id
+        canonical = normalize_cdu_name(cdu_name) or str(cdu_name).strip()
+        row = db.execute(select(CDU).where(CDU.name == canonical)).scalars().first()
+        if row:
+            cdu_id = row.id
     if cdu_id is None:
         logger.warning(f"TradeReport {parsed.filename}: CDU not resolved")
         return {"trades": 0, "skipped_no_cdu": len(parsed.rows)}
@@ -95,6 +100,12 @@ def import_trades_from_parsed(
             repo_term_days=f.get("repo_term_days"),
             repo_buyback_sum=repo_buyback_sum,
             commission_total=_f(f.get("commission_total")),
+            # Initial price-reconciliation state: capture the original CDU
+            # price; ``price_final`` mirrors it until ``apply_kase_prices_to_trades``
+            # has had a chance to overwrite it from KASE.
+            price_original=price,
+            price_final=price,
+            price_flag=False,
             source_doc_id=source_doc_id,
             is_active=True,
             created_by=uploaded_by, created_at=datetime.utcnow(),
@@ -130,7 +141,10 @@ def import_trades_from_parsed(
             _dep(db, trade_obj, cdu_id, op, volume,
                  _f(f.get("repo_rate_pct")), trade_date, source_doc_id)
             counters["deposit_lots"] += 1
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     logger.info(f"Trade import: {counters} cdu={cdu_id} date={trade_date}")
     return counters
 

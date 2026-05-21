@@ -19,16 +19,19 @@ api.interceptors.request.use((cfg) => {
 
 api.interceptors.response.use(
   (resp: AxiosResponse) => resp,
-  (err: AxiosError<{ detail?: string }>) => {
+  (err: AxiosError<{ detail?: unknown }>) => {
     const status = err.response?.status
+    const detail = err.response?.data?.detail
     if (status === 401) {
       useAuthStore.getState().clear()
       toast.error('Сессия истекла, войдите заново')
     } else if (status && status >= 500) {
-      toast.error(err.response?.data?.detail ?? 'Ошибка сервера')
-    } else if (err.response?.data?.detail) {
-      toast.error(err.response.data.detail)
+      toast.error(typeof detail === 'string' ? detail : 'Ошибка сервера')
+    } else if (typeof detail === 'string') {
+      toast.error(detail)
     }
+    // Structured detail objects (e.g. duplicate_file 409) are surfaced to the
+    // caller so the UI can render its own dialog.
     return Promise.reject(err)
   },
 )

@@ -90,7 +90,8 @@ export default function AdminPage() {
               <input className="input" placeholder="ФИО" value={newUser.full_name} onChange={(e) => setNewUser({ ...newUser, full_name: e.target.value })} />
               <input className="input" placeholder="Email" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} />
               <select className="input" value={newUser.role} onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}>
-                <option value="viewer">viewer</option>
+                <option value="auditor">auditor</option>
+                <option value="operator">operator</option>
                 <option value="analyst">analyst</option>
                 <option value="admin">admin</option>
               </select>
@@ -115,9 +116,11 @@ export default function AdminPage() {
                       <td>{u.email ?? '—'}</td>
                       <td>
                         <select className="input py-1" value={u.role} onChange={(e) => setRole.mutate({ id: u.id, role: e.target.value })}>
-                          <option value="viewer">viewer</option>
+                          <option value="auditor">auditor</option>
+                          <option value="operator">operator</option>
                           <option value="analyst">analyst</option>
                           <option value="admin">admin</option>
+                          <option value="viewer">viewer (legacy)</option>
                         </select>
                       </td>
                       <td>{formatDate(u.created_at)}</td>

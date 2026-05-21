@@ -14,6 +14,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from auth import require_user
+
 from database import get_db
 from models.db_models import (
     BondLot,
@@ -26,7 +28,11 @@ from models.db_models import (
     RepoLot,
 )
 
-router = APIRouter(prefix="/api/analytics", tags=["analytics"])
+router = APIRouter(
+    prefix="/api/analytics",
+    tags=["analytics"],
+    dependencies=[Depends(require_user)],
+)
 
 CATEGORY_LABELS = {
     "TOTAL": "Итого",

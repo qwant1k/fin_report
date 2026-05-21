@@ -1,14 +1,22 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  AlertTriangle,
   Calendar,
+  ChevronDown,
+  ClipboardCheck,
+  Filter,
   FileSpreadsheet,
   FileText,
+  Flag,
+  Layers,
   RefreshCw,
   TrendingDown,
   TrendingUp,
   Wallet,
+  X,
 } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import clsx from 'clsx'
 import toast from 'react-hot-toast'
 
@@ -21,12 +29,30 @@ import { DashboardResponse } from '@/lib/types'
 
 type PeriodMode = 'all' | 'year' | 'month' | 'week' | 'custom'
 
+interface DashboardCduOption {
+  id: number
+  name: string
+  short_name: string
+  portfolio_type: string
+}
+
+interface DashboardHistoryMeta {
+  cdus: DashboardCduOption[]
+}
+
 const PERIOD_OPTIONS: Array<{ mode: PeriodMode; label: string }> = [
   { mode: 'all', label: 'Весь период' },
   { mode: 'year', label: 'Год' },
   { mode: 'month', label: 'Месяц' },
   { mode: 'week', label: 'Неделя' },
   { mode: 'custom', label: 'Период' },
+]
+
+const PORTFOLIO_TYPE_OPTIONS = [
+  { value: '', label: 'Все портфели' },
+  { value: 'PRIVATE_CDU', label: 'Частные ДУ' },
+  { value: 'NBRK_OWN', label: 'НБ РК собственные' },
+  { value: 'NBRK_RESERVE', label: 'НБ РК спецрезерв' },
 ]
 
 function toIsoDate(date: Date): string {
@@ -62,6 +88,9 @@ export default function DashboardPage() {
   const [periodMode, setPeriodMode] = useState<PeriodMode>('all')
   const [customFrom, setCustomFrom] = useState('')
   const [customTo, setCustomTo] = useState(today)
+  const [historyPortfolioType, setHistoryPortfolioType] = useState('')
+  const [historyCduIds, setHistoryCduIds] = useState<number[]>([])
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false)
   const qc = useQueryClient()
 
   const period = useMemo(
@@ -80,7 +109,36 @@ export default function DashboardPage() {
       return (await api.get('/dashboard/summary', { params })).data
     },
   })
+  const historyMeta = useQuery<DashboardHistoryMeta>({
+    queryKey: ['dashboard-history-meta'],
+    queryFn: async () => (await api.get('/analytics/meta')).data,
+  })
   const effectiveReportDate = data?.report_date ?? period.to
+
+  const historyCdus = useMemo(() => {
+    const cdus = historyMeta.data?.cdus ?? []
+    if (!historyPortfolioType) return cdus
+    return cdus.filter((cdu) => cdu.portfolio_type === historyPortfolioType)
+  }, [historyMeta.data?.cdus, historyPortfolioType])
+
+  useEffect(() => {
+    if (!historyPortfolioType || !historyMeta.data?.cdus.length) return
+    const allowed = new Set(historyCdus.map((cdu) => cdu.id))
+    setHistoryCduIds((ids) => ids.filter((id) => allowed.has(id)))
+  }, [historyCdus, historyMeta.data?.cdus?.length, historyPortfolioType])
+
+  const toggleHistoryCdu = (id: number) => {
+    setHistoryCduIds((ids) => (
+      ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]
+    ))
+  }
+
+  const resetHistoryFilters = () => {
+    setHistoryPortfolioType('')
+    setHistoryCduIds([])
+  }
+
+  const activeHistoryFilters = (historyPortfolioType ? 1 : 0) + historyCduIds.length
 
   const calc = useMutation({
     mutationFn: async () => (
@@ -201,7 +259,7 @@ export default function DashboardPage() {
         <KpiCard
           title="YTM (взвеш.)"
           value={formatPct(data?.fund_ytm_weighted ?? 0)}
-          subtitle={data?.benchmark_ytm != null ? `MBM: ${formatPct(data.benchmark_ytm)}` : 'MBM: —'}
+          subtitle={data?.benchmark_ytm != null ? `MBM index: ${formatNumber(data.benchmark_ytm, 2)}` : 'MBM index: —'}
         />
         <KpiCard
           title="Duration (взвеш.)"
@@ -210,18 +268,146 @@ export default function DashboardPage() {
         />
       </section>
 
-      {data && data.breaches_count > 0 && (
-        <div className="card border-l-4 border-red-500 bg-red-50/60 p-4">
-          <div className="font-semibold text-red-700">Нарушений лимитов: {data.breaches_count}</div>
-          <div className="text-sm text-red-700/80">См. вкладку «Алерты»</div>
-        </div>
+      {/* Operational KPIs (Phase 3) — render only if there is something to act on */}
+      {data && (data.breaches_count > 0
+                || (data.pending_approvals_count ?? 0) > 0
+                || (data.flagged_prices_count ?? 0) > 0) && (
+        <section className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          {data.breaches_count > 0 && (
+            <div className="card border-l-4 border-red-500 bg-red-50/60 p-4">
+              <div className="flex items-center gap-2 text-red-700">
+                <AlertTriangle className="w-4 h-4" />
+                <span className="font-semibold">Нарушения лимитов</span>
+              </div>
+              <div className="mt-1 text-2xl font-bold text-red-700">{data.breaches_count}</div>
+              <Link to="/alerts" className="text-xs text-red-700/80 hover:underline">
+                Перейти к алертам →
+              </Link>
+            </div>
+          )}
+          {(data.pending_approvals_count ?? 0) > 0 && (
+            <div className="card border-l-4 border-amber-500 bg-amber-50/60 p-4">
+              <div className="flex items-center gap-2 text-amber-800">
+                <ClipboardCheck className="w-4 h-4" />
+                <span className="font-semibold">Ждут утверждения</span>
+              </div>
+              <div className="mt-1 text-2xl font-bold text-amber-800">{data.pending_approvals_count}</div>
+              <Link to="/reports?status=pending_approval" className="text-xs text-amber-800/80 hover:underline">
+                Открыть отчёты →
+              </Link>
+            </div>
+          )}
+          {(data.flagged_prices_count ?? 0) > 0 && (
+            <div className="card border-l-4 border-orange-500 bg-orange-50/60 p-4">
+              <div className="flex items-center gap-2 text-orange-700">
+                <Flag className="w-4 h-4" />
+                <span className="font-semibold">Цена заменена на KASE</span>
+              </div>
+              <div className="mt-1 text-2xl font-bold text-orange-700">{data.flagged_prices_count}</div>
+              <div className="text-xs text-orange-700/80">сделок за {formatDate(effectiveReportDate)}</div>
+            </div>
+          )}
+        </section>
       )}
 
       <section className="card p-4">
-        <h2 className="mb-3 font-semibold">
+        <button
+          type="button"
+          onClick={() => setIsHistoryOpen((open) => !open)}
+          className="flex w-full items-center justify-between gap-3 text-left"
+          aria-expanded={isHistoryOpen}
+        >
+          <span className="font-semibold">
           Динамика портфеля {period.from ? `(${periodLabel})` : '(90 дней)'}
-        </h2>
-        <HistoryChart from={period.from} to={period.to} />
+          </span>
+          <span className="flex items-center gap-3 text-sm font-medium text-slate-500">
+            {isHistoryOpen ? 'Скрыть' : 'Показать'}
+            {activeHistoryFilters > 0 && (
+              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">
+                {activeHistoryFilters}
+              </span>
+            )}
+            <ChevronDown className={clsx('h-5 w-5 transition-transform', isHistoryOpen && 'rotate-180')} />
+          </span>
+        </button>
+
+        {isHistoryOpen && (
+          <>
+        <div className="mb-4 mt-4 rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+              <Filter className="h-4 w-4 text-emerald-600" />
+              Фильтры графика
+              {activeHistoryFilters > 0 && (
+                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">
+                  {activeHistoryFilters}
+                </span>
+              )}
+            </div>
+            {activeHistoryFilters > 0 && (
+              <button type="button" onClick={resetHistoryFilters} className="btn-secondary h-8 px-2 text-xs">
+                <X className="h-3.5 w-3.5" />
+                Сбросить
+              </button>
+            )}
+          </div>
+
+          <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-[280px_1fr]">
+            <label className="text-sm">
+              <span className="label flex items-center gap-1.5">
+                <Layers className="h-3.5 w-3.5" />
+                Тип портфеля
+              </span>
+              <select
+                className="input h-10"
+                value={historyPortfolioType}
+                onChange={(e) => setHistoryPortfolioType(e.target.value)}
+              >
+                {PORTFOLIO_TYPE_OPTIONS.map((option) => (
+                  <option key={option.value || 'all'} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div>
+              <div className="label">ЧДУ</div>
+              <div className="flex max-h-24 flex-wrap gap-2 overflow-auto rounded-lg border border-slate-200 bg-white p-2">
+                {historyCdus.length === 0 ? (
+                  <div className="px-2 py-1 text-sm text-slate-500">Нет ЧДУ для выбранного типа</div>
+                ) : historyCdus.map((cdu) => (
+                  <label
+                    key={cdu.id}
+                    className={clsx(
+                      'flex min-h-8 items-center gap-2 rounded-md border px-2.5 py-1 text-sm font-medium transition',
+                      historyCduIds.includes(cdu.id)
+                        ? 'border-emerald-500 bg-emerald-50 text-emerald-800'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100',
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={historyCduIds.includes(cdu.id)}
+                      onChange={() => toggleHistoryCdu(cdu.id)}
+                      className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                    />
+                    {cdu.short_name}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <HistoryChart
+          from={period.from}
+          to={period.to}
+          portfolioType={historyPortfolioType}
+          cduIds={historyCduIds}
+        />
+          </>
+        )}
       </section>
 
       <section className="space-y-6">

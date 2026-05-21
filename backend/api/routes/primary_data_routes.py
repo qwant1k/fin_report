@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from auth import require_admin
+from auth import require_admin, require_user
 from config import settings
 from database import SessionLocal, get_db
 from models.db_models import CDU, ImportJob, SourceDocument, User
@@ -24,7 +24,11 @@ from services.import_primary.recon_parser import parse_reconciliation_xlsx
 from services.import_primary.statement_parser import parse_pdf_statement
 from services.parser.trade_importer import import_single_trade_report_xlsx
 
-router = APIRouter(prefix="/api/primary-data", tags=["primary-data"])
+router = APIRouter(
+    prefix="/api/primary-data",
+    tags=["primary-data"],
+    dependencies=[Depends(require_user)],
+)
 
 
 class ImportResponse(BaseModel):

@@ -73,3 +73,45 @@ def require_admin(user: User = Depends(require_user)) -> User:
     if user.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Требуются права администратора")
     return user
+
+
+# ─────────────── 4-role RBAC (Phase 2 / PR-3) ───────────────
+# Allowed roles. ``viewer`` is kept as a backwards-compat alias for ``auditor``
+# (read-only). Old DB rows with role="viewer" are still accepted everywhere a
+# read access is needed.
+ALLOWED_ROLES = {"admin", "analyst", "operator", "auditor", "viewer"}
+WRITE_ROLES = {"admin", "analyst", "operator"}
+
+
+def _role_or_alias(role: str) -> str:
+    return "auditor" if role == "viewer" else role
+
+
+def require_role(*roles: str):
+    """Dependency factory: allow only the listed roles.
+
+    Example: ``Depends(require_role("admin", "analyst"))``.
+    ``viewer`` is treated as ``auditor`` for backwards compatibility.
+    """
+    allowed = set(roles)
+
+    def _dep(user: User = Depends(require_user)) -> User:
+        actual = _role_or_alias(user.role)
+        if actual not in allowed:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"Недостаточно прав. Требуется одна из ролей: {', '.join(sorted(allowed))}",
+            )
+        return user
+
+    return _dep
+
+
+def require_write(user: User = Depends(require_user)) -> User:
+    """Any role that can mutate data (admin/analyst/operator)."""
+    if _role_or_alias(user.role) not in WRITE_ROLES:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Только аудитор: запись запрещена",
+        )
+    return user

@@ -8,13 +8,18 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from auth import require_admin
+from auth import require_admin, require_user
+from config import settings
 from database import get_db
 from models.db_models import MBMIndex, User
 from models.schemas import MBMOut
 from services.mbm import MBMClient, MBMValue
 
-router = APIRouter(prefix="/api/mbm", tags=["mbm"])
+router = APIRouter(
+    prefix="/api/mbm",
+    tags=["mbm"],
+    dependencies=[Depends(require_user)],
+)
 
 
 def _upsert(db: Session, val: MBMValue) -> MBMIndex:
@@ -39,8 +44,16 @@ def _upsert(db: Session, val: MBMValue) -> MBMIndex:
 
 
 @router.get("/", response_model=List[MBMOut])
-def list_mbm(days: int = 90, db: Session = Depends(get_db)):
-    since = date.today() - timedelta(days=days)
+def list_mbm(
+    days: Optional[int] = None,
+    start_date: Optional[date] = None,
+    db: Session = Depends(get_db),
+):
+    since = start_date or (
+        date.today() - timedelta(days=days)
+        if days is not None
+        else settings.kase_mbm_start_date
+    )
     return list(db.execute(select(MBMIndex).where(
         MBMIndex.index_date >= since,
     ).order_by(MBMIndex.index_date.desc())).scalars().all())
@@ -54,18 +67,28 @@ async def refresh_mbm(
 ):
     """Подтянуть последнее значение MBM с KASE (или строго на ``target_date``)."""
     client = MBMClient()
-    val = await (client.fetch_for_date(target_date) if target_date else client.fetch_latest())
-    if val is None:
+    if target_date:
+        val = await client.fetch_for_date(target_date)
+        if val is None:
+            raise HTTPException(503, "Не удалось получить значение MBM. Введите вручную.")
+        obj = _upsert(db, val)
+        db.commit()
+        db.refresh(obj)
+        return obj
+
+    rows = await client.fetch_history()
+    if not rows:
         raise HTTPException(503, "Не удалось получить значение MBM. Введите вручную.")
-    obj = _upsert(db, val)
+    saved: List[MBMIndex] = [_upsert(db, v) for v in rows]
     db.commit()
-    db.refresh(obj)
-    return obj
+    latest = saved[0]
+    db.refresh(latest)
+    return latest
 
 
 @router.post("/backfill", response_model=List[MBMOut])
 async def backfill_mbm(
-    start_date: date,
+    start_date: date = settings.kase_mbm_start_date,
     end_date: Optional[date] = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),

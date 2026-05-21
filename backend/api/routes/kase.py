@@ -1,6 +1,7 @@
 """KASE quotes endpoints."""
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import List
 
@@ -8,21 +9,55 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from auth import require_admin
+from auth import require_admin, require_user
 from database import get_db
 from models.db_models import KasePrice, User
 from models.schemas import KasePriceOut
 from services.kase import KaseClient
+from services.kase.propagation import apply_kase_update
 from services.kase.reconciler import reconcile_prices
 
-router = APIRouter(prefix="/api/kase", tags=["kase"])
+router = APIRouter(
+    prefix="/api/kase",
+    tags=["kase"],
+    dependencies=[Depends(require_user)],
+)
+
+
+def _apply_quote(obj: KasePrice, q) -> None:
+    obj.isin = q.isin
+    obj.instrument_name = q.instrument_name
+    obj.close_price = q.close_price
+    obj.ytm = q.ytm
+    obj.accrued_interest = q.accrued_interest
+    obj.duration = q.duration
+    obj.sec_type = q.sec_type
+    obj.fin_sec_ru = q.fin_sec_ru
+    obj.fin_sec_en = q.fin_sec_en
+    obj.fin_sec_kz = q.fin_sec_kz
+    obj.org_code = q.org_code
+    obj.org_name_ru = q.org_name_ru
+    obj.org_name_en = q.org_name_en
+    obj.org_name_kz = q.org_name_kz
+    obj.settlement_price = q.settlement_price
+    obj.settlement_dirty_price = q.settlement_dirty_price
+    obj.dohod = q.dohod
+    obj.dtm = q.dtm
+    obj.kase_ytm = q.kase_ytm
+    obj.unit_ru = q.unit_ru
+    obj.unit_en = q.unit_en
+    obj.unit_kz = q.unit_kz
+    obj.raw_data_json = json.dumps(q.raw_data, ensure_ascii=False) if q.raw_data else None
+    obj.source = q.source
 
 
 @router.get("/prices", response_model=List[KasePriceOut])
 def list_prices(report_date: date | None = None, db: Session = Depends(get_db)):
-    q = select(KasePrice).order_by(KasePrice.trade_date.desc(), KasePrice.instrument_code).limit(1000)
+    q = select(KasePrice).order_by(KasePrice.trade_date.desc(), KasePrice.instrument_code)
     if report_date:
         q = q.where(KasePrice.trade_date == report_date)
+    else:
+        q = q.limit(5000)
     return list(db.execute(q).scalars().all())
 
 
@@ -30,7 +65,9 @@ def list_prices(report_date: date | None = None, db: Session = Depends(get_db)):
 async def refresh_kase(report_date: date = Query(...), db: Session = Depends(get_db),
                        user: User = Depends(require_admin)):
     client = KaseClient()
-    quotes = await client.fetch_bonds()
+    quotes = await client.fetch_bonds(report_date)
+    if not quotes:
+        raise HTTPException(503, "KASE не вернул рыночные цены за выбранную дату.")
     saved = 0
     for q in quotes:
         existing = db.execute(select(KasePrice).where(
@@ -38,26 +75,27 @@ async def refresh_kase(report_date: date = Query(...), db: Session = Depends(get
             KasePrice.instrument_code == q.instrument_code,
         )).scalars().first()
         if existing:
-            existing.close_price = q.close_price
-            existing.ytm = q.ytm
-            existing.accrued_interest = q.accrued_interest
-            existing.duration = q.duration
-            existing.source = q.source
+            _apply_quote(existing, q)
         else:
-            db.add(KasePrice(
+            obj = KasePrice(
                 trade_date=report_date,
                 instrument_code=q.instrument_code,
-                isin=q.isin,
-                instrument_name=q.instrument_name,
-                close_price=q.close_price,
-                ytm=q.ytm,
-                accrued_interest=q.accrued_interest,
-                duration=q.duration,
-                source=q.source,
-            ))
+            )
+            _apply_quote(obj, q)
+            db.add(obj)
             saved += 1
+    propagation = apply_kase_update(
+        db,
+        report_date=report_date,
+        actor=user.username if user else None,
+    )
     db.commit()
-    return {"fetched": len(quotes), "new_rows": saved, "report_date": report_date}
+    return {
+        "fetched": len(quotes),
+        "new_rows": saved,
+        "report_date": report_date,
+        "propagation": propagation,
+    }
 
 
 @router.post("/reconcile")
@@ -73,6 +111,12 @@ def add_manual_price(payload: dict, db: Session = Depends(get_db),
     """Allow manual input of KASE quote when scrape failed."""
     price = KasePrice(**payload, source="manual")
     db.add(price)
+    db.flush()
+    propagation = apply_kase_update(
+        db,
+        report_date=price.trade_date,
+        actor=user.username if user else None,
+    )
     db.commit()
     db.refresh(price)
-    return price
+    return {"price": price, "propagation": propagation}

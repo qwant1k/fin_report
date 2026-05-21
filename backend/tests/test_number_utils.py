@@ -2,12 +2,19 @@
 from datetime import date, datetime
 
 from services.parser.number_utils import parse_int, parse_kz_date, parse_kz_number, s
+from services.import_rr.helpers import cell_float
 
 
 def test_parse_kz_number_with_space_and_comma():
     assert parse_kz_number("2 069 895 029") == 2069895029.0
     assert parse_kz_number("12 000 590,78") == 12000590.78
     assert parse_kz_number("16,5") == 16.5
+
+
+def test_cell_float_handles_kase_mbm_index_format():
+    assert cell_float("1,214.9000") == 1214.9
+    assert cell_float("1,216.1600") == 1216.16
+    assert cell_float("1 214,90") == 1214.9
 
 
 def test_parse_kz_number_passes_through_floats():

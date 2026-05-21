@@ -1,10 +1,10 @@
 """Application configuration loaded from environment / .env file."""
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import List
 
-from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     upload_dir: str = "./data/uploads"
     report_dir: str = "./data/reports"
     log_dir: str = "./data/logs"
+    risk_report_password: str = "7"
 
     # KASE
     kase_bonds_url: str = "https://kase.kz/ru/markets/markets-valuation/market-prices"
@@ -37,11 +38,16 @@ class Settings(BaseSettings):
     kase_indices_url: str = "https://kase.kz/ru/indices/"
     kase_cache_ttl_seconds: int = 1800
 
+    # Price reconciliation tolerance vs KASE (fraction, 0.0001 = 0.01% = 1 bp).
+    # If |price_cdu - price_kase| / price_kase > tolerance, Trade.price_flag is
+    # set, price_final is replaced with price_kase, and the change is audited.
+    price_tolerance_pct: float = 0.0001
+
     # MBM
     nbrk_mbm_url: str = "https://nationalbank.kz/ru/page/mbm"
     nbrk_rates_url: str = "https://nationalbank.kz/ru/rates/"
     kase_mbm_xlsx_url: str = "https://kase.kz/api/indicators/mbm-index/archive-xls"
-    kase_mbm_lookback_days: int = 14
+    kase_mbm_start_date: date = date(2020, 1, 1)
 
     # Scheduler
     kase_fetch_cron_hour: int = 18

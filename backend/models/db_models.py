@@ -46,6 +46,9 @@ class CDU(Base):
 
     limits: Mapped[list["CDULimit"]] = relationship(back_populates="cdu", cascade="all, delete-orphan")
     files: Mapped[list["TradeFile"]] = relationship(back_populates="cdu", cascade="all, delete-orphan")
+    file_formats: Mapped[Optional["CDUFileFormat"]] = relationship(
+        back_populates="cdu", cascade="all, delete-orphan", uselist=False,
+    )
 
 
 # ─────────────── REFERENCE: Лимиты по категориям инструментов ───────────────
@@ -255,6 +258,23 @@ class KasePrice(Base):
     ytm: Mapped[Optional[float]] = mapped_column(Float)
     accrued_interest: Mapped[Optional[float]] = mapped_column(Float)
     duration: Mapped[Optional[float]] = mapped_column(Float)
+    sec_type: Mapped[Optional[str]] = mapped_column(String(30))
+    fin_sec_ru: Mapped[Optional[str]] = mapped_column(String(200))
+    fin_sec_en: Mapped[Optional[str]] = mapped_column(String(200))
+    fin_sec_kz: Mapped[Optional[str]] = mapped_column(String(200))
+    org_code: Mapped[Optional[str]] = mapped_column(String(40))
+    org_name_ru: Mapped[Optional[str]] = mapped_column(String(300))
+    org_name_en: Mapped[Optional[str]] = mapped_column(String(300))
+    org_name_kz: Mapped[Optional[str]] = mapped_column(String(300))
+    settlement_price: Mapped[Optional[float]] = mapped_column(Float)
+    settlement_dirty_price: Mapped[Optional[float]] = mapped_column(Float)
+    dohod: Mapped[Optional[float]] = mapped_column(Float)
+    dtm: Mapped[Optional[float]] = mapped_column(Float)
+    kase_ytm: Mapped[Optional[float]] = mapped_column(Float)
+    unit_ru: Mapped[Optional[str]] = mapped_column(String(120))
+    unit_en: Mapped[Optional[str]] = mapped_column(String(120))
+    unit_kz: Mapped[Optional[str]] = mapped_column(String(120))
+    raw_data_json: Mapped[Optional[str]] = mapped_column(Text)
     fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     source: Mapped[str] = mapped_column(String(40), default="api")
 
@@ -308,6 +328,16 @@ class Alert(Base):
 
 # ─────────────── Сформированные отчёты ───────────────
 class GeneratedReport(Base):
+    """Generated XLSX/PDF report with explicit approval workflow.
+
+    Lifecycle (status field):
+        draft  ──submit──▶  pending_approval  ──approve──▶  approved (immutable)
+                                            └──reject──▶  rejected ──submit──▶ pending_approval
+        Regeneration is allowed only while ``status in {draft, rejected}``.
+        Once ``approved`` the row is locked: file path, content, status —
+        all immutable. Subsequent re-runs MUST create a new ``GeneratedReport``
+        row with ``parent_report_id`` set and ``version`` incremented.
+    """
     __tablename__ = "generated_reports"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -317,6 +347,21 @@ class GeneratedReport(Base):
     generated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     generated_by: Mapped[Optional[str]] = mapped_column(String(80))
     notes: Mapped[Optional[str]] = mapped_column(Text)
+
+    # ── Approval workflow (Phase 3) ──
+    # draft / pending_approval / approved / rejected
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    submitted_by: Mapped[Optional[str]] = mapped_column(String(80))
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    approved_by: Mapped[Optional[str]] = mapped_column(String(80))
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    rejected_by: Mapped[Optional[str]] = mapped_column(String(80))
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    rejection_comment: Mapped[Optional[str]] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    parent_report_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("generated_reports.id"), index=True,
+    )
 
 
 # ─────────────── Дебиторская задолженность ───────────────
@@ -409,6 +454,34 @@ class FormulaDefinition(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
     updated_by: Mapped[Optional[str]] = mapped_column(String(80))
+
+
+# ─────────────── CDU-специфичный формат файла (маппинг колонок) ───────────────
+class CDUFileFormat(Base):
+    """Перекрытия имён колонок для конкретного CDU.
+
+    ``field_aliases`` хранит JSON вида
+    ``{"deal_number": ["номер сделки"], "trade_time": ["время сделки"]}``
+    и переопределяет/дополняет встроенный ``HEADER_ALIASES`` при парсинге.
+    """
+    __tablename__ = "cdu_file_formats"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cdu_id: Mapped[int] = mapped_column(
+        ForeignKey("cdu_registry.id", ondelete="CASCADE"), nullable=False, unique=True,
+    )
+    field_aliases: Mapped[Optional[str]] = mapped_column(
+        Text, comment="JSON {canonical: [alias,...]}"
+    )
+    header_row_index: Mapped[int] = mapped_column(
+        Integer, default=0, comment="0-based row index of header row"
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_by: Mapped[Optional[str]] = mapped_column(String(80))
+
+    cdu: Mapped["CDU"] = relationship(back_populates="file_formats")
 
 
 # ─────────────── Снимки расчётов ───────────────
@@ -519,6 +592,14 @@ class Trade(Base):
     commission_clearing: Mapped[Optional[float]] = mapped_column(Float)
     commission_kase: Mapped[Optional[float]] = mapped_column(Float)
     commission_total: Mapped[Optional[float]] = mapped_column(Float)
+
+    # Price reconciliation vs KASE (Phase 2)
+    price_original: Mapped[Optional[float]] = mapped_column(Float)
+    price_kase: Mapped[Optional[float]] = mapped_column(Float)
+    price_final: Mapped[Optional[float]] = mapped_column(Float)
+    price_flag: Mapped[bool] = mapped_column(Boolean, default=False)
+    price_diff_pct: Mapped[Optional[float]] = mapped_column(Float)
+    price_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     # Audit
     is_manual: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -848,3 +929,89 @@ class ImportJob(Base):
     log: Mapped[Optional[str]] = mapped_column(Text)
     params_json: Mapped[Optional[str]] = mapped_column(Text)
 
+
+# ─────────────── Справочник ценных бумаг (агрегат позиций) ───────────────
+class SecurityHolding(Base):
+    """Aggregated current security position per (CDU, ISIN).
+
+    Materialised view-like table. Recomputed after each TradeReport import
+    from active ``Trade`` rows (BUY adds, SELL/REDEMPTION subtracts). Rows
+    with ``source='AUTO'`` are managed by the sync job — they appear when
+    a non-zero position exists and disappear when net quantity hits zero.
+    Rows with ``source='MANUAL'`` are user-created/edited and are NEVER
+    auto-deleted; the sync job may still refresh their ``last_kase_price``.
+    """
+    __tablename__ = "security_holdings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cdu_id: Mapped[int] = mapped_column(
+        ForeignKey("cdu_registry.id", ondelete="CASCADE"), index=True, nullable=False,
+    )
+    isin: Mapped[str] = mapped_column(String(20), index=True, nullable=False)
+    instrument_code: Mapped[Optional[str]] = mapped_column(String(40))
+    instrument_name: Mapped[Optional[str]] = mapped_column(String(300))
+    category: Mapped[Optional[str]] = mapped_column(String(40), index=True)
+    currency: Mapped[str] = mapped_column(String(8), default="KZT")
+
+    quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    avg_purchase_price: Mapped[Optional[float]] = mapped_column(Float)
+    last_kase_price: Mapped[Optional[float]] = mapped_column(Float)
+    last_kase_date: Mapped[Optional[date]] = mapped_column(Date)
+    market_value: Mapped[Optional[float]] = mapped_column(Float)
+
+    nominal_per_unit: Mapped[Optional[float]] = mapped_column(Float)
+    coupon_rate_pct: Mapped[Optional[float]] = mapped_column(Float)
+    maturity_date: Mapped[Optional[date]] = mapped_column(Date)
+
+    source: Mapped[str] = mapped_column(String(10), default="AUTO", index=True)  # AUTO / MANUAL
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+
+    last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(),
+    )
+    updated_by: Mapped[Optional[str]] = mapped_column(String(80))
+
+    __table_args__ = (
+        UniqueConstraint("cdu_id", "isin", name="uq_holding_cdu_isin"),
+        Index("ix_holding_category", "category"),
+    )
+
+
+# ─────────────── Risk Report — заметки и оверрайды ───────────────
+class RiskReportNote(Base):
+    """Manual annotations / overrides attached to an imported risk report.
+
+    Lets analysts add commentary or override specific values without touching
+    the original imported snapshot. ``field_key`` is a dotted path like
+    ``positions.<isin>.market_value`` or a free-form section key such as
+    ``stress_test.summary``. ``override_value`` is JSON-encoded so the same
+    table can store strings, numbers and structured objects.
+    """
+    __tablename__ = "risk_report_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    cdu_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("cdu_registry.id", ondelete="CASCADE"), index=True,
+    )
+    source_doc_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("source_documents.id"), index=True,
+    )
+    section: Mapped[str] = mapped_column(String(40), index=True)   # positions/cash/summary/stress
+    field_key: Mapped[str] = mapped_column(String(200))            # dotted path or row identifier
+    override_value: Mapped[Optional[str]] = mapped_column(Text)    # JSON-encoded; null = comment-only
+    comment: Mapped[Optional[str]] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_by: Mapped[Optional[str]] = mapped_column(String(80))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(),
+    )
+    updated_by: Mapped[Optional[str]] = mapped_column(String(80))
+
+    __table_args__ = (
+        Index("ix_rrnote_date_section", "report_date", "section"),
+    )

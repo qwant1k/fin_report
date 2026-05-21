@@ -124,9 +124,11 @@ class TradeFileBrief(ORMModel):
     trade_date: date
     filename: str
     uploaded_at: datetime
+    uploaded_by: Optional[str] = None
     status: str
     rows_parsed: int
     rows_skipped: int
+    sha256: Optional[str] = None
 
 
 class UploadResponse(BaseModel):
@@ -137,6 +139,10 @@ class UploadResponse(BaseModel):
     rows_parsed: int
     rows_skipped: int
     warnings: List[str] = []
+    # Price reconciliation summary against KASE (Phase 2). Filled only after a
+    # successful import; ``None`` when the price check could not be executed
+    # (no CDU resolved, no KASE data yet, etc.).
+    price_check: Optional[dict] = None
 
 
 # ───────── Position / Summary ─────────
@@ -221,6 +227,9 @@ class DashboardResponse(BaseModel):
     benchmark_ytm: Optional[float]
     benchmark_duration: Optional[float]
     breaches_count: int
+    # Phase 3 — operational KPIs
+    pending_approvals_count: int = 0
+    flagged_prices_count: int = 0
     blocks: List[CDUBlock]
 
 
@@ -276,7 +285,24 @@ class KasePriceOut(ORMModel):
     instrument_name: Optional[str]
     close_price: Optional[float]
     ytm: Optional[float]
+    accrued_interest: Optional[float]
     duration: Optional[float]
+    sec_type: Optional[str] = None
+    fin_sec_ru: Optional[str] = None
+    fin_sec_en: Optional[str] = None
+    fin_sec_kz: Optional[str] = None
+    org_code: Optional[str] = None
+    org_name_ru: Optional[str] = None
+    org_name_en: Optional[str] = None
+    org_name_kz: Optional[str] = None
+    settlement_price: Optional[float] = None
+    settlement_dirty_price: Optional[float] = None
+    dohod: Optional[float] = None
+    dtm: Optional[float] = None
+    kase_ytm: Optional[float] = None
+    unit_ru: Optional[str] = None
+    unit_en: Optional[str] = None
+    unit_kz: Optional[str] = None
     fetched_at: datetime
     source: str
 
@@ -312,6 +338,34 @@ class FormulaDefinitionUpsert(BaseModel):
     target: str
     expression_json: str
     is_active: bool = True
+
+
+# ───────── Generated reports / approval workflow (Phase 3) ─────────
+ReportStatus = Literal["draft", "pending_approval", "approved", "rejected"]
+
+
+class GeneratedReportOut(ORMModel):
+    id: int
+    report_date: date
+    report_type: str
+    file_path: str
+    generated_at: datetime
+    generated_by: Optional[str]
+    notes: Optional[str]
+    status: ReportStatus
+    submitted_by: Optional[str] = None
+    submitted_at: Optional[datetime] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    rejected_by: Optional[str] = None
+    rejected_at: Optional[datetime] = None
+    rejection_comment: Optional[str] = None
+    version: int = 1
+    parent_report_id: Optional[int] = None
+
+
+class ReportRejectRequest(BaseModel):
+    comment: str = Field(min_length=1, max_length=2000)
 
 
 # ───────── Calculation ─────────

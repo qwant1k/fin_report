@@ -13,7 +13,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from auth import require_admin
+from auth import require_admin, require_user
 from config import settings
 from database import SessionLocal, get_db
 from models.db_models import ImportJob, SourceDocument, User
@@ -22,7 +22,11 @@ from services.import_rr import (
     import_risk_report,
 )
 
-router = APIRouter(prefix="/api/import", tags=["import"])
+router = APIRouter(
+    prefix="/api/import",
+    tags=["import"],
+    dependencies=[Depends(require_user)],
+)
 
 
 # ─────────── Single-file upload (XLSM Risk Report) ───────────
@@ -30,6 +34,7 @@ router = APIRouter(prefix="/api/import", tags=["import"])
 async def upload_single_rr(
     file: UploadFile = File(...),
     skip_if_imported: bool = Form(True),
+    password: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ):
@@ -48,7 +53,10 @@ async def upload_single_rr(
         db, target,
         uploaded_by=user.username,
         skip_if_imported=skip_if_imported,
+        password=password,
     )
+    if result.error:
+        raise HTTPException(400, result.error)
     return {
         "file_path": str(target),
         "file_date": result.file_date.isoformat() if result.file_date else None,
@@ -93,6 +101,7 @@ async def import_rr_folder(
         raise HTTPException(400, f"Папка не найдена или не является директорией: {folder}")
 
     pattern = payload.get("pattern", "**/*.xlsm")
+    password = payload.get("password")
 
     # Создать ImportJob сразу, чтобы фронт мог поллить
     job = ImportJob(
@@ -116,6 +125,7 @@ async def import_rr_folder(
                     uploaded_by=user.username,
                     job=fresh_job,
                     pattern=pattern,
+                    password=password,
                 )
             except Exception as exc:
                 logger.exception(f"Bulk import job {job_id} failed")

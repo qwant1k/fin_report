@@ -21,7 +21,7 @@ from __future__ import annotations
 import io
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import List, Optional
 
 import httpx
@@ -30,6 +30,8 @@ from loguru import logger
 from openpyxl import load_workbook
 
 from config import settings
+
+DEFAULT_MBM_START_DATE = date(2020, 1, 1)
 
 
 @dataclass
@@ -47,7 +49,7 @@ class MBMClient:
     def __init__(self) -> None:
         self.nbrk_url = settings.nbrk_mbm_url
         self.kase_xlsx_url = settings.kase_mbm_xlsx_url
-        self.lookback_days = max(1, int(getattr(settings, "kase_mbm_lookback_days", 14)))
+        self.default_start_date = getattr(settings, "kase_mbm_start_date", DEFAULT_MBM_START_DATE)
         self._headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -58,7 +60,7 @@ class MBMClient:
 
     # ────────────────── public API ──────────────────
     async def fetch_latest(self) -> Optional[MBMValue]:
-        """Вернуть самое свежее доступное значение MBM (за последние N дней)."""
+        """Вернуть самое свежее доступное значение MBM из полного архивного диапазона."""
         rows = await self.fetch_history()
         return rows[0] if rows else None
 
@@ -77,7 +79,7 @@ class MBMClient:
     ) -> List[MBMValue]:
         """Скачать диапазон значений MBM, отсортированных по убыванию даты."""
         end = end or date.today()
-        start = start or (end - timedelta(days=self.lookback_days))
+        start = start or self.default_start_date
         async with httpx.AsyncClient(
             timeout=30.0, headers=self._headers, follow_redirects=True
         ) as cli:

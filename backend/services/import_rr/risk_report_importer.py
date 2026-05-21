@@ -7,16 +7,21 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
+from zipfile import BadZipFile
 from typing import Iterable, Optional
 
+import msoffcrypto
+from msoffcrypto.exceptions import DecryptionError, InvalidKeyError
 from loguru import logger
 from openpyxl import load_workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from config import settings
 from models.db_models import (
     AccountReceivable,
     BondLot,
@@ -50,6 +55,45 @@ def _mat(wb, *names):
     """
     ws = safe_sheet(wb, *names)
     return materialize_sheet(ws) if ws is not None else None
+
+
+def _load_risk_workbook(fp: Path, password: Optional[str] = None):
+    """Open normal OOXML workbooks and password-encrypted Office files.
+
+    Some SIUA files have an ``.xlsm`` extension but are actually OLE containers
+    with ``EncryptedPackage``. ``openpyxl`` cannot open those until they are
+    decrypted, so we use ``msoffcrypto`` first when needed.
+    """
+    try:
+        return load_workbook(fp, read_only=True, data_only=True, keep_vba=False)
+    except (BadZipFile, OSError) as first_exc:
+        try:
+            with fp.open("rb") as src:
+                office = msoffcrypto.OfficeFile(src)
+                if not office.is_encrypted():
+                    raise first_exc
+
+                pwd = password or settings.risk_report_password or None
+                if not pwd:
+                    raise ValueError(
+                        "Файл Risk Report зашифрован. Укажите пароль при загрузке "
+                        "или задайте RISK_REPORT_PASSWORD в .env."
+                    )
+
+                decrypted = BytesIO()
+                office.load_key(password=pwd, verify_password=True)
+                office.decrypt(decrypted)
+                decrypted.seek(0)
+        except (DecryptionError, InvalidKeyError) as exc:
+            raise ValueError(
+                "Пароль неверный. Введите правильный пароль для Risk Report и повторите загрузку."
+            ) from exc
+        except Exception:
+            raise
+
+        wb = load_workbook(decrypted, read_only=True, data_only=True, keep_vba=False)
+        wb._decrypted_stream = decrypted  # keep BytesIO alive for read_only mode
+        return wb
 from .sheet_parsers import (
     get_report_date,
     parse_ar_sheet,
@@ -113,6 +157,7 @@ def import_risk_report(
     *,
     uploaded_by: Optional[str] = None,
     skip_if_imported: bool = True,
+    password: Optional[str] = None,
 ) -> ImportResult:
     """Импорт одного XLSM-файла Risk Report в БД.
 
@@ -156,7 +201,7 @@ def import_risk_report(
         res.source_doc_id = sd.id
 
         # 4. Открыть книгу (read_only + data_only — формулы как значения)
-        wb = load_workbook(fp, read_only=True, data_only=True, keep_vba=False)
+        wb = _load_risk_workbook(fp, password=password)
 
         # 5. Дата отчёта: Report!B2 — авторитетный источник (это «дата снимка»),
         # имя файла часто содержит дату генерации, а не отчёта (например,
@@ -265,14 +310,14 @@ def import_risk_report(
     except Exception as exc:
         logger.exception(f"import_risk_report failed for {fp}")
         db.rollback()
-        res.error = repr(exc)
+        res.error = str(exc) or repr(exc)
         # Best-effort: пометить SourceDocument как ERROR (уже создан)
         try:
             if res.source_doc_id:
                 sd2 = db.get(SourceDocument, res.source_doc_id)
                 if sd2:
                     sd2.parse_status = "ERROR"
-                    sd2.parse_errors = repr(exc)[:1000]
+                    sd2.parse_errors = (str(exc) or repr(exc))[:1000]
                     sd2.parsed_at = datetime.utcnow()
                     db.commit()
         except Exception:
@@ -291,6 +336,7 @@ def import_folder(
     uploaded_by: Optional[str] = None,
     job: Optional[ImportJob] = None,
     pattern: str = "**/*.xlsm",
+    password: Optional[str] = None,
 ) -> ImportJob:
     """Рекурсивно импортирует все XLSM-файлы из папки.
 
@@ -321,7 +367,7 @@ def import_folder(
 
     for i, fp in enumerate(files, start=1):
         # Свежая сессия не нужна — мы внутри Session, но коммиты атомарны
-        result = import_risk_report(db, fp, uploaded_by=uploaded_by)
+        result = import_risk_report(db, fp, uploaded_by=uploaded_by, password=password)
         log_lines.append(result.to_log_line())
         if result.error:
             failed += 1
@@ -377,13 +423,13 @@ def _upsert_report_dashboard(
         if not cdu_id:
             continue
         summary_date = r["snapshot_date"]
-        fund_totals_by_date[summary_date] = (
-            fund_totals_by_date.get(summary_date, 0.0) + (r.get("total_mv_current") or 0.0)
-        )
-        existing = db.execute(select(PortfolioSummary).where(
-            PortfolioSummary.cdu_id == cdu_id,
-            PortfolioSummary.summary_date == summary_date,
-        )).scalars().first()
+        key = (cdu_id, summary_date)
+        existing = summaries_by_key.get(key)
+        if existing is None:
+            existing = db.execute(select(PortfolioSummary).where(
+                PortfolioSummary.cdu_id == cdu_id,
+                PortfolioSummary.summary_date == summary_date,
+            )).scalars().first()
         kwargs = dict(
             total_mv_prev=r.get("total_mv_prev") or 0.0,
             total_daily_change=r.get("total_daily_change") or 0.0,
@@ -400,9 +446,15 @@ def _upsert_report_dashboard(
         else:
             summary = PortfolioSummary(cdu_id=cdu_id, summary_date=summary_date, **kwargs)
             db.add(summary)
-        summaries_by_key[(cdu_id, summary_date)] = summary
-        summary_count += 1
+        if key not in summaries_by_key:
+            summary_count += 1
+        summaries_by_key[key] = summary
 
+    for (cdu_id, summary_date), summary in summaries_by_key.items():
+        fund_totals_by_date[summary_date] = (
+            fund_totals_by_date.get(summary_date, 0.0)
+            + (summary.total_mv_current or 0.0)
+        )
     for (cdu_id, summary_date), summary in summaries_by_key.items():
         fund_total = fund_totals_by_date.get(summary_date) or 0.0
         summary.cdu_share_pct = summary.total_mv_current / fund_total if fund_total else 0.0

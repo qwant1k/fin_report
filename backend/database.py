@@ -118,17 +118,91 @@ def _apply_dev_migrations() -> None:
             ))
 
     # trades table — soft-delete columns
+    if "kase_prices" in inspector.get_table_names():
+        kase_cols = {c["name"] for c in inspector.get_columns("kase_prices")}
+        for col, ddl in [
+            ("sec_type",                 "VARCHAR(30)"),
+            ("fin_sec_ru",               "VARCHAR(200)"),
+            ("fin_sec_en",               "VARCHAR(200)"),
+            ("fin_sec_kz",               "VARCHAR(200)"),
+            ("org_code",                 "VARCHAR(40)"),
+            ("org_name_ru",              "VARCHAR(300)"),
+            ("org_name_en",              "VARCHAR(300)"),
+            ("org_name_kz",              "VARCHAR(300)"),
+            ("settlement_price",         "FLOAT"),
+            ("settlement_dirty_price",   "FLOAT"),
+            ("dohod",                    "FLOAT"),
+            ("dtm",                      "FLOAT"),
+            ("kase_ytm",                 "FLOAT"),
+            ("unit_ru",                  "VARCHAR(120)"),
+            ("unit_en",                  "VARCHAR(120)"),
+            ("unit_kz",                  "VARCHAR(120)"),
+            ("raw_data_json",            "TEXT"),
+        ]:
+            if col not in kase_cols:
+                additions.append((
+                    "kase_prices", col,
+                    f"ALTER TABLE kase_prices ADD COLUMN {col} {ddl}",
+                ))
+
+    # generated_reports — добавлен approval workflow
+    if "generated_reports" in inspector.get_table_names():
+        gr_cols = {c["name"] for c in inspector.get_columns("generated_reports")}
+        for col, ddl in [
+            ("status",            "VARCHAR(20) DEFAULT 'draft'"),
+            ("submitted_by",      "VARCHAR(80)"),
+            ("submitted_at",      "DATETIME"),
+            ("approved_by",       "VARCHAR(80)"),
+            ("approved_at",       "DATETIME"),
+            ("rejected_by",       "VARCHAR(80)"),
+            ("rejected_at",       "DATETIME"),
+            ("rejection_comment", "TEXT"),
+            ("version",           "INTEGER DEFAULT 1"),
+            ("parent_report_id",  "INTEGER"),
+        ]:
+            if col not in gr_cols:
+                additions.append((
+                    "generated_reports", col,
+                    f"ALTER TABLE generated_reports ADD COLUMN {col} {ddl}",
+                ))
+
+    # trades table — добавлены столбцы
     if "trades" in inspector.get_table_names():
         trade_cols = {c["name"] for c in inspector.get_columns("trades")}
         for col, ddl in [
-            ("is_active",   "BOOLEAN DEFAULT 1"),
-            ("updated_at",  "DATETIME"),
+            ("is_active",        "BOOLEAN DEFAULT 1"),
+            ("updated_at",       "DATETIME"),
+            # Phase 2 — price reconciliation vs KASE
+            ("price_original",   "FLOAT"),
+            ("price_kase",       "FLOAT"),
+            ("price_final",      "FLOAT"),
+            ("price_flag",       "BOOLEAN DEFAULT 0"),
+            ("price_diff_pct",   "FLOAT"),
+            ("price_checked_at", "DATETIME"),
         ]:
             if col not in trade_cols:
                 additions.append((
                     "trades", col,
                     f"ALTER TABLE trades ADD COLUMN {col} {ddl}",
                 ))
+
+    # Phase 3 — CDU-specific file format overrides
+    if "cdu_file_formats" not in inspector.get_table_names():
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE cdu_file_formats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cdu_id INTEGER NOT NULL UNIQUE,
+                    field_aliases TEXT,
+                    header_row_index INTEGER DEFAULT 0,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_by VARCHAR(80),
+                    FOREIGN KEY (cdu_id) REFERENCES cdu_registry(id) ON DELETE CASCADE
+                )
+            """))
+        logger.info("[migrate] cdu_file_formats created")
 
     if not additions:
         return

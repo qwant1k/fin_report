@@ -115,11 +115,35 @@ class ParsedTradeFile:
 
 
 class TradeReportParser:
-    """Parse a single XLSX file (one ЧДУ → list of trades for one date)."""
+    """Parse a single XLSX file (one ЧДУ → list of trades for one date).
 
-    def __init__(self, file_path: Path | str, original_name: Optional[str] = None) -> None:
+    ``alias_overrides`` lets callers extend or replace the default
+    ``HEADER_ALIASES`` per-CDU. The structure mirrors ``HEADER_ALIASES``:
+    ``{canonical_field: ["alias 1", "alias 2", ...]}``. Aliases are lower-cased
+    and whitespace-collapsed before matching. The override list takes priority:
+    if a header matches an override alias, the canonical field is bound there
+    and the default list is consulted only as a fallback.
+    """
+
+    def __init__(
+        self,
+        file_path: Path | str,
+        original_name: Optional[str] = None,
+        *,
+        alias_overrides: Optional[Dict[str, Tuple[str, ...]]] = None,
+    ) -> None:
         self.file_path = Path(file_path)
         self.original_name = original_name or self.file_path.name
+        # Normalise overrides: lower-cased, whitespace-collapsed tuples.
+        self.alias_overrides: Dict[str, Tuple[str, ...]] = {}
+        if alias_overrides:
+            for key, aliases in alias_overrides.items():
+                cleaned = tuple(
+                    re.sub(r"\s+", " ", str(a).strip().lower())
+                    for a in aliases if a and str(a).strip()
+                )
+                if cleaned:
+                    self.alias_overrides[key] = cleaned
 
     # ───────── public API ─────────
     def parse(self) -> ParsedTradeFile:
@@ -243,13 +267,30 @@ class TradeReportParser:
         return h.hexdigest()
 
     def _build_column_index(self, header_row: Iterable[Any]) -> Dict[str, int]:
-        """Map normalised aliases to the actual column index (1-based)."""
+        """Map normalised aliases to the actual column index (1-based).
+
+        Per-CDU overrides (``self.alias_overrides``) are consulted first; the
+        global ``HEADER_ALIASES`` is the fallback. The greedy substring match
+        also consults overrides first so a custom format can shadow a default
+        match (e.g. CDU sends ``«Сумма НКД (репо)»`` for repo accrued
+        interest where the default would have matched the bare ``«НКД»``).
+        """
         index: Dict[str, int] = {}
         for i, val in enumerate(header_row, start=0):
             if val is None:
                 continue
             normalised = re.sub(r"\s+", " ", str(val).strip().lower())
             matched = False
+            # Pass 1: per-CDU exact match (overrides win).
+            for key, aliases in self.alias_overrides.items():
+                if normalised in aliases:
+                    if key not in index:
+                        index[key] = i
+                    matched = True
+                    break
+            if matched:
+                continue
+            # Pass 2: built-in exact match.
             for key, aliases in HEADER_ALIASES.items():
                 if normalised in aliases:
                     if key not in index:
@@ -258,7 +299,12 @@ class TradeReportParser:
                     break
             if matched:
                 continue
-            candidates = []
+            # Pass 3: substring (fuzzy) match — overrides first, then defaults.
+            candidates: list[tuple[int, str]] = []
+            for key, aliases in self.alias_overrides.items():
+                for alias in aliases:
+                    if len(alias) >= 6 and alias in normalised:
+                        candidates.append((len(alias) + 100, key))  # bonus for overrides
             for key, aliases in HEADER_ALIASES.items():
                 for alias in aliases:
                     if alias in {"цена", "сумма", "объем", "тип"}:

@@ -16,6 +16,10 @@ import AlertsPage from './pages/Alerts'
 import SettingsPage from './pages/Settings'
 import AdminPage from './pages/Admin'
 import FormulasPage from './pages/Formulas'
+import ReportsPage from './pages/Reports'
+import SecuritiesPage from './pages/Securities'
+import RiskReportPage from './pages/RiskReport'
+import DataEditorPage from './pages/DataEditor'
 import { useAuthStore } from './lib/auth'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -46,6 +50,10 @@ export default function App() {
         <Route path="/kase" element={<KasePage />} />
         <Route path="/mbm" element={<MbmPage />} />
         <Route path="/alerts" element={<AlertsPage />} />
+        <Route path="/reports" element={<ReportsPage />} />
+        <Route path="/securities" element={<SecuritiesPage />} />
+        <Route path="/risk-report" element={<RiskReportPage />} />
+        <Route path="/data-editor" element={<DataEditorPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/formulas" element={<AdminOnly><FormulasPage /></AdminOnly>} />
         <Route path="/admin" element={<AdminOnly><AdminPage /></AdminOnly>} />
