@@ -28,9 +28,15 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-function AdminOnly({ children }: { children: React.ReactNode }) {
-  const isAdmin = useAuthStore((s) => s.isAdmin())
-  if (!isAdmin) return <Navigate to="/" replace />
+function PermissionRoute({ permission, children }: { permission: string; children: React.ReactNode }) {
+  const allowed = useAuthStore((s) => s.can(permission))
+  if (!allowed) {
+    return (
+      <div className="card p-8 text-center text-slate-500">
+        Нет прав для просмотра этой страницы.
+      </div>
+    )
+  }
   return <>{children}</>
 }
 
@@ -39,24 +45,24 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-        <Route path="/" element={<DashboardPage />} />
-        <Route path="/upload" element={<UploadPage />} />
-        <Route path="/import" element={<AdminOnly><ImportPage /></AdminOnly>} />
-        <Route path="/analytics" element={<AnalyticsPage />} />
-        <Route path="/primary-data" element={<PrimaryDataPage />} />
-        <Route path="/reconciliation" element={<ReconciliationPage />} />
-        <Route path="/positions" element={<PositionsPage />} />
-        <Route path="/history" element={<HistoryPage />} />
-        <Route path="/kase" element={<KasePage />} />
-        <Route path="/mbm" element={<MbmPage />} />
-        <Route path="/alerts" element={<AlertsPage />} />
-        <Route path="/reports" element={<ReportsPage />} />
-        <Route path="/securities" element={<SecuritiesPage />} />
-        <Route path="/risk-report" element={<RiskReportPage />} />
-        <Route path="/data-editor" element={<DataEditorPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
-        <Route path="/formulas" element={<AdminOnly><FormulasPage /></AdminOnly>} />
-        <Route path="/admin" element={<AdminOnly><AdminPage /></AdminOnly>} />
+        <Route path="/" element={<PermissionRoute permission="page.dashboard"><DashboardPage /></PermissionRoute>} />
+        <Route path="/upload" element={<PermissionRoute permission="page.upload"><UploadPage /></PermissionRoute>} />
+        <Route path="/import" element={<PermissionRoute permission="page.import"><ImportPage /></PermissionRoute>} />
+        <Route path="/analytics" element={<PermissionRoute permission="page.analytics"><AnalyticsPage /></PermissionRoute>} />
+        <Route path="/primary-data" element={<PermissionRoute permission="page.primary_data"><PrimaryDataPage /></PermissionRoute>} />
+        <Route path="/reconciliation" element={<PermissionRoute permission="page.reconciliation"><ReconciliationPage /></PermissionRoute>} />
+        <Route path="/positions" element={<PermissionRoute permission="page.positions"><PositionsPage /></PermissionRoute>} />
+        <Route path="/history" element={<PermissionRoute permission="page.history"><HistoryPage /></PermissionRoute>} />
+        <Route path="/kase" element={<PermissionRoute permission="page.kase"><KasePage /></PermissionRoute>} />
+        <Route path="/mbm" element={<PermissionRoute permission="page.mbm"><MbmPage /></PermissionRoute>} />
+        <Route path="/alerts" element={<PermissionRoute permission="page.alerts"><AlertsPage /></PermissionRoute>} />
+        <Route path="/reports" element={<PermissionRoute permission="page.reports"><ReportsPage /></PermissionRoute>} />
+        <Route path="/securities" element={<PermissionRoute permission="page.securities"><SecuritiesPage /></PermissionRoute>} />
+        <Route path="/risk-report" element={<PermissionRoute permission="page.risk_report"><RiskReportPage /></PermissionRoute>} />
+        <Route path="/data-editor" element={<PermissionRoute permission="page.data_editor"><DataEditorPage /></PermissionRoute>} />
+        <Route path="/settings" element={<PermissionRoute permission="page.settings"><SettingsPage /></PermissionRoute>} />
+        <Route path="/formulas" element={<PermissionRoute permission="page.formulas"><FormulasPage /></PermissionRoute>} />
+        <Route path="/admin" element={<PermissionRoute permission="page.admin"><AdminPage /></PermissionRoute>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

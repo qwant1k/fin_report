@@ -44,8 +44,7 @@ const VALID_STATUSES: ReportStatus[] = ['draft', 'pending_approval', 'approved',
 
 export default function ReportsPage() {
   const qc = useQueryClient()
-  const isAdmin = useAuthStore((s) => s.isAdmin())
-  const canWrite = useAuthStore((s) => s.canWrite())
+  const can = useAuthStore((s) => s.can)
   const [searchParams, setSearchParams] = useSearchParams()
   const initialStatus = (searchParams.get('status') ?? '') as ReportStatus | ''
   const [statusFilter, setStatusFilter] = useState<ReportStatus | ''>(
@@ -220,7 +219,7 @@ export default function ReportsPage() {
                         <Download className="w-4 h-4" />
                       </button>
 
-                      {canWrite && (r.status === 'draft' || r.status === 'rejected') && (
+                      {can('reports.submit') && (r.status === 'draft' || r.status === 'rejected') && (
                         <button
                           className="btn-primary px-2 py-1"
                           title="Отправить на утверждение"
@@ -231,7 +230,7 @@ export default function ReportsPage() {
                         </button>
                       )}
 
-                      {canWrite && (r.status === 'draft' || r.status === 'rejected') && (
+                      {can('reports.regenerate') && (r.status === 'draft' || r.status === 'rejected') && (
                         <button
                           className="btn-secondary px-2 py-1"
                           title="Перегенерировать"
@@ -242,8 +241,9 @@ export default function ReportsPage() {
                         </button>
                       )}
 
-                      {isAdmin && r.status === 'pending_approval' && (
+                      {(can('reports.approve') || can('reports.reject')) && r.status === 'pending_approval' && (
                         <>
+                          {can('reports.approve') && (
                           <button
                             className="btn-primary px-2 py-1 bg-emerald-600 hover:bg-emerald-700"
                             title="Утвердить"
@@ -252,6 +252,8 @@ export default function ReportsPage() {
                           >
                             <CheckCircle2 className="w-4 h-4" />
                           </button>
+                          )}
+                          {can('reports.reject') && (
                           <button
                             className="btn-secondary px-2 py-1 text-red-700 border-red-300 hover:bg-red-50"
                             title="Отклонить"
@@ -259,10 +261,11 @@ export default function ReportsPage() {
                           >
                             <XCircle className="w-4 h-4" />
                           </button>
+                          )}
                         </>
                       )}
 
-                      {isAdmin && r.status !== 'approved' && (
+                      {can('reports.delete') && r.status !== 'approved' && (
                         <button
                           className="btn-secondary px-2 py-1 text-red-600"
                           title="Удалить"

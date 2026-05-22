@@ -133,6 +133,10 @@ DEFAULT_CDU_PREFIXES: dict[str, str] = {
     "CENTR": "Centras Securities",
     "TANSAR":"Tansar Capital",
     "TANSA": "Tansar Capital",
+    "TANSR": "Tansar Capital",
+    "ALATAU": "Alatau City Invest",
+    "ALATA": "Alatau City Invest",
+    "ACI":   "Alatau City Invest",
     "UDCAP": "UD Capital",
     "UD":    "UD Capital",
     "310138":"НБ РК (Собственные средства)",   # собст портфель

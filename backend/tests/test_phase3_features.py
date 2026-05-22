@@ -8,6 +8,7 @@ changes from Phase 3 migrations are exercised.
 """
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,7 +21,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 import database as db_module
-from auth import _role_or_alias, WRITE_ROLES
+from auth import ALL_PERMISSIONS, WRITE_ROLES, _role_or_alias, has_permission, permissions_for_role, user_permissions
 from database import Base
 from models.db_models import (
     BondLot,
@@ -30,6 +31,7 @@ from models.db_models import (
     KasePrice,
     PortfolioPosition,
     PortfolioSummary,
+    RoleDefinition,
     SecurityHolding,
     Trade,
     User,
@@ -582,6 +584,44 @@ class TestRBACRoleHelper:
     ])
     def test_write_role_matrix(self, role, can_write):
         assert (_role_or_alias(role) in WRITE_ROLES) is can_write
+
+    def test_admin_user_has_all_permissions(self, db):
+        user = User(username="admin", password_hash="x", role="admin", is_active=True)
+        db.add(user)
+        db.commit()
+
+        assert set(user_permissions(user, db)) == set(ALL_PERMISSIONS)
+        assert has_permission(user, "admin.roles.manage", db)
+        assert has_permission(user, "data_editor.edit", db)
+
+    def test_custom_role_permissions_loaded_from_role_definition(self, db):
+        db.add(RoleDefinition(
+            code="report_approver",
+            name="Report approver",
+            permissions_json=json.dumps(["page.reports", "reports.approve"]),
+            is_system=False,
+            is_active=True,
+        ))
+        db.commit()
+
+        permissions = permissions_for_role(db, "report_approver")
+        assert permissions == ["page.reports", "reports.approve"]
+
+        user = User(username="approver", password_hash="x", role="report_approver", is_active=True)
+        assert has_permission(user, "reports.approve", db)
+        assert not has_permission(user, "reports.delete", db)
+
+    def test_inactive_custom_role_has_no_permissions(self, db):
+        db.add(RoleDefinition(
+            code="disabled_role",
+            name="Disabled",
+            permissions_json=json.dumps(["page.reports", "reports.approve"]),
+            is_system=False,
+            is_active=False,
+        ))
+        db.commit()
+
+        assert permissions_for_role(db, "disabled_role") == []
 
 
 # ═══════════════════════════════════════════════════════════════════════════

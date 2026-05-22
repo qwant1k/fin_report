@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CheckCircle2, Filter, RefreshCw, Search, X } from 'lucide-react'
+import { CheckCircle2, Filter, Plus, RefreshCw, Search, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
+import { useAuthStore } from '@/lib/auth'
 import { KasePrice } from '@/lib/types'
 import { formatDate, formatNumber } from '@/lib/format'
 
@@ -11,6 +12,13 @@ function todayIso() {
   const d = new Date()
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset())
   return d.toISOString().slice(0, 10)
+}
+
+function toNumberOrNull(value: string): number | null {
+  const normalized = value.trim().replace(/\s/g, '').replace(',', '.')
+  if (!normalized) return null
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 export default function KasePage() {
@@ -23,7 +31,14 @@ export default function KasePage() {
   const [dateTo, setDateTo] = useState('')
   const [onlyDirtyPrice, setOnlyDirtyPrice] = useState(false)
   const [onlyMaturity, setOnlyMaturity] = useState(false)
+  const [manualCode, setManualCode] = useState('')
+  const [manualIsin, setManualIsin] = useState('')
+  const [manualPrice, setManualPrice] = useState('')
+  const [manualDirtyPrice, setManualDirtyPrice] = useState('')
+  const [manualYtm, setManualYtm] = useState('')
+  const [manualSource, setManualSource] = useState<'external' | 'manual' | 'risk_parameters'>('external')
   const qc = useQueryClient()
+  const can = useAuthStore((s) => s.can)
 
   const { data } = useQuery<KasePrice[]>({
     queryKey: ['kase-prices', reportDate],
@@ -54,6 +69,44 @@ export default function KasePage() {
     },
     onSuccess: (r) => toast.success(`Сверено цен: ${r.checked}`),
     onError: (err: any) => toast.error(err?.message ?? 'Не удалось выполнить сверку'),
+  })
+
+  const manual = useMutation({
+    mutationFn: async () => {
+      if (!reportDate) throw new Error('Выберите дату для ручной цены')
+      if (!manualCode.trim()) throw new Error('Укажите код инструмента')
+      const ytmPct = toNumberOrNull(manualYtm)
+      const closePrice = toNumberOrNull(manualPrice)
+      const dirtyPrice = toNumberOrNull(manualDirtyPrice)
+      const payload: Record<string, string | number | null> = {
+        trade_date: reportDate,
+        instrument_code: manualCode.trim().toUpperCase(),
+        source: manualSource,
+      }
+      if (manualIsin.trim()) payload.isin = manualIsin.trim().toUpperCase()
+      if (closePrice != null) {
+        payload.close_price = closePrice
+        payload.settlement_price = closePrice
+      }
+      if (dirtyPrice != null) payload.settlement_dirty_price = dirtyPrice
+      if (ytmPct != null) {
+        payload.ytm = ytmPct / 100
+        payload.dohod = ytmPct
+      }
+      return (await api.post('/kase/prices/manual', payload)).data
+    },
+    onSuccess: () => {
+      toast.success('Цена сохранена')
+      setManualCode('')
+      setManualIsin('')
+      setManualPrice('')
+      setManualDirtyPrice('')
+      setManualYtm('')
+      qc.invalidateQueries({ queryKey: ['kase-prices'] })
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.detail ?? err?.message ?? 'Не удалось сохранить цену')
+    },
   })
 
   const rows = data ?? []
@@ -142,12 +195,16 @@ export default function KasePage() {
               </button>
             )}
           </div>
+          {can('kase.refresh') && (
           <button onClick={() => refresh.mutate()} disabled={refresh.isPending || !reportDate} className="btn-primary">
             <RefreshCw className={`w-4 h-4 ${refresh.isPending ? 'animate-spin' : ''}`} /> Обновить с KASE
           </button>
+          )}
+          {can('kase.reconcile') && (
           <button onClick={() => reconcile.mutate()} disabled={!reportDate} className="btn-secondary">
             <CheckCircle2 className="w-4 h-4" /> Сверить с портфелем
           </button>
+          )}
         </div>
       </header>
 
@@ -247,6 +304,64 @@ export default function KasePage() {
           </label>
         </div>
       </section>
+
+      {can('kase.manual_price') && (
+      <section className="card p-4">
+        <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-800">
+          <Plus className="h-4 w-4 text-emerald-600" />
+          Ручная цена
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3 xl:grid-cols-7">
+          <input
+            className="input h-10 font-mono uppercase"
+            value={manualCode}
+            onChange={(e) => setManualCode(e.target.value)}
+            placeholder="Код"
+          />
+          <input
+            className="input h-10 font-mono uppercase"
+            value={manualIsin}
+            onChange={(e) => setManualIsin(e.target.value)}
+            placeholder="ISIN"
+          />
+          <input
+            className="input h-10 text-right"
+            value={manualPrice}
+            onChange={(e) => setManualPrice(e.target.value)}
+            placeholder="Цена"
+          />
+          <input
+            className="input h-10 text-right"
+            value={manualDirtyPrice}
+            onChange={(e) => setManualDirtyPrice(e.target.value)}
+            placeholder="Грязная цена"
+          />
+          <input
+            className="input h-10 text-right"
+            value={manualYtm}
+            onChange={(e) => setManualYtm(e.target.value)}
+            placeholder="YTM %"
+          />
+          <select
+            className="input h-10"
+            value={manualSource}
+            onChange={(e) => setManualSource(e.target.value as 'external' | 'manual' | 'risk_parameters')}
+          >
+            <option value="external">External</option>
+            <option value="risk_parameters">Risk params</option>
+            <option value="manual">Manual</option>
+          </select>
+          <button
+            onClick={() => manual.mutate()}
+            disabled={manual.isPending || !reportDate || !manualCode.trim()}
+            className="btn-primary h-10"
+          >
+            <Plus className="h-4 w-4" />
+            Сохранить
+          </button>
+        </div>
+      </section>
+      )}
 
       <div className="card overflow-hidden">
         <div className="table-wrap">

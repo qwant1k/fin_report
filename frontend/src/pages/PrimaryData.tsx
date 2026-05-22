@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, ReactNode } from 'react'
 import { FileUp, CheckCircle, AlertTriangle, Clock, FileSpreadsheet, FileText, Building2, Trash2, RefreshCw } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useAuthStore } from '@/lib/auth'
 
 interface SourceDoc {
   id: number
@@ -38,6 +39,7 @@ export default function PrimaryDataPage() {
   const [error, setError] = useState<string | null>(null)
   const [docs, setDocs] = useState<SourceDoc[]>([])
   const [docsLoading, setDocsLoading] = useState(false)
+  const canUpload = useAuthStore((s) => s.can('primary_data.upload'))
 
   const fetchDocs = async () => {
     setDocsLoading(true)
@@ -119,6 +121,7 @@ export default function PrimaryDataPage() {
       </div>
 
       {/* Upload zone */}
+      {canUpload && (
       <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
         <h2 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
           <FileUp className="w-4 h-4 text-emerald-600" />
@@ -181,6 +184,7 @@ export default function PrimaryDataPage() {
           </div>
         )}
       </div>
+      )}
 
       {/* Recent documents table */}
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">

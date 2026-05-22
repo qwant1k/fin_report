@@ -91,8 +91,7 @@ function coercePayload(value: unknown, colType: string): unknown {
 
 export default function DataEditorPage() {
   const queryClient = useQueryClient()
-  const role = useAuthStore((s) => s.role)
-  const canWrite = useAuthStore((s) => s.canWrite())
+  const canWrite = useAuthStore((s) => s.can('data_editor.edit'))
 
   const [selectedTable, setSelectedTable] = useState<string>('')
   const [search, setSearch] = useState('')

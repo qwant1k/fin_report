@@ -16,6 +16,7 @@ import {
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
+import { useAuthStore } from '@/lib/auth'
 import { TradeFile, CDU } from '@/lib/types'
 import { formatDate } from '@/lib/format'
 
@@ -83,6 +84,7 @@ export default function UploadPage() {
   const [duplicate, setDuplicate] = useState<DuplicatePrompt | null>(null)
   const [duplicateBusy, setDuplicateBusy] = useState<DuplicateAction | null>(null)
   const [jobs, setJobs] = useState<UploadJob[]>([])
+  const canUpload = useAuthStore((s) => s.can('upload.trade_report'))
 
   const updateJob = (id: string, patch: Partial<UploadJob>) =>
     setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, ...patch } : j)))
@@ -192,6 +194,7 @@ export default function UploadPage() {
       'application/vnd.ms-excel.sheet.macroEnabled.12': ['.xlsm'],
     },
     multiple: true,
+    disabled: !canUpload,
   })
 
   const resolveDuplicate = async (action: DuplicateAction) => {
@@ -258,6 +261,7 @@ export default function UploadPage() {
         <p className="text-sm text-slate-500">XLSX выгрузка KASE-сделок (TradeReport)</p>
       </header>
 
+      {canUpload && (
       <div className="card p-4 space-y-3">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
@@ -284,6 +288,7 @@ export default function UploadPage() {
           <div className="text-xs text-slate-500 mt-1">Можно загружать несколько файлов одновременно</div>
         </div>
       </div>
+      )}
 
       {jobs.length > 0 && (
         <div className="card p-4 space-y-2">
@@ -334,6 +339,7 @@ export default function UploadPage() {
                       className="input py-1"
                       defaultValue={f.cdu_id ?? ''}
                       onChange={(e) => setCdu.mutate({ id: f.id, cduId: Number(e.target.value) })}
+                      disabled={!canUpload}
                     >
                       <option value="">— выбрать —</option>
                       {cdus.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -349,9 +355,11 @@ export default function UploadPage() {
                       : <span className="badge-warn"><AlertCircle className="w-3 h-3 inline mr-1" />{f.status}</span>}
                   </td>
                   <td>
-                    <button onClick={() => remove.mutate(f.id)} className="btn-secondary text-red-600 px-2 py-1">
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    {canUpload && (
+                      <button onClick={() => remove.mutate(f.id)} className="btn-secondary text-red-600 px-2 py-1">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}

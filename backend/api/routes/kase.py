@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from auth import require_admin, require_user
+from auth import require_permission, require_user
 from database import get_db
 from models.db_models import KasePrice, User
 from models.schemas import KasePriceOut
@@ -20,7 +20,7 @@ from services.kase.reconciler import reconcile_prices
 router = APIRouter(
     prefix="/api/kase",
     tags=["kase"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_permission("page.kase"))],
 )
 
 
@@ -63,7 +63,7 @@ def list_prices(report_date: date | None = None, db: Session = Depends(get_db)):
 
 @router.post("/refresh")
 async def refresh_kase(report_date: date = Query(...), db: Session = Depends(get_db),
-                       user: User = Depends(require_admin)):
+                       user: User = Depends(require_permission("kase.refresh"))):
     client = KaseClient()
     quotes = await client.fetch_bonds(report_date)
     if not quotes:
@@ -100,17 +100,43 @@ async def refresh_kase(report_date: date = Query(...), db: Session = Depends(get
 
 @router.post("/reconcile")
 def reconcile(report_date: date, db: Session = Depends(get_db),
-              user: User = Depends(require_admin)):
+              user: User = Depends(require_permission("kase.reconcile"))):
     rows = reconcile_prices(db, report_date)
     return {"checked": len(rows)}
 
 
 @router.post("/prices/manual")
 def add_manual_price(payload: dict, db: Session = Depends(get_db),
-                     user: User = Depends(require_admin)):
-    """Allow manual input of KASE quote when scrape failed."""
-    price = KasePrice(**payload, source="manual")
-    db.add(price)
+                     user: User = Depends(require_permission("kase.manual_price"))):
+    """Allow manual/external input of a quote when KASE scrape failed."""
+    trade_date = payload.get("trade_date")
+    if isinstance(trade_date, str):
+        trade_date = date.fromisoformat(trade_date)
+    instrument_code = str(payload.get("instrument_code") or "").strip()
+    if not trade_date or not instrument_code:
+        raise HTTPException(400, "trade_date and instrument_code are required")
+
+    source = str(payload.get("source") or "manual").strip().lower()
+    if source not in {"manual", "external", "risk_parameters"}:
+        source = "manual"
+
+    existing = db.execute(select(KasePrice).where(
+        KasePrice.trade_date == trade_date,
+        KasePrice.instrument_code == instrument_code,
+    )).scalars().first()
+    price = existing or KasePrice(trade_date=trade_date, instrument_code=instrument_code)
+
+    for field in (
+        "isin", "instrument_name", "close_price", "ytm", "accrued_interest",
+        "duration", "settlement_price", "settlement_dirty_price", "dohod", "dtm",
+        "kase_ytm", "unit_ru", "sec_type", "fin_sec_ru",
+    ):
+        if field in payload:
+            setattr(price, field, payload[field])
+    price.source = source
+    price.fetched_at = datetime.utcnow()
+    if existing is None:
+        db.add(price)
     db.flush()
     propagation = apply_kase_update(
         db,

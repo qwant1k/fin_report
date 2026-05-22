@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from auth import require_admin, require_user
+from auth import require_permission, require_user
 from config import settings
 from database import get_db
 from models.db_models import MBMIndex, User
@@ -18,7 +18,7 @@ from services.mbm import MBMClient, MBMValue
 router = APIRouter(
     prefix="/api/mbm",
     tags=["mbm"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_permission("page.mbm"))],
 )
 
 
@@ -63,7 +63,7 @@ def list_mbm(
 async def refresh_mbm(
     target_date: Optional[date] = None,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_permission("mbm.refresh")),
 ):
     """Подтянуть последнее значение MBM с KASE (или строго на ``target_date``)."""
     client = MBMClient()
@@ -91,7 +91,7 @@ async def backfill_mbm(
     start_date: date = settings.kase_mbm_start_date,
     end_date: Optional[date] = None,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_permission("mbm.refresh")),
 ):
     """Скачать с KASE все значения MBM за диапазон [start_date, end_date] и upsert-ить в БД."""
     end_date = end_date or date.today()
@@ -109,7 +109,7 @@ async def backfill_mbm(
 
 
 @router.post("/manual", response_model=MBMOut)
-def manual_mbm(payload: dict, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def manual_mbm(payload: dict, db: Session = Depends(get_db), user: User = Depends(require_permission("mbm.manual"))):
     """Manually upsert MBM values for a date."""
     idx_date = payload.get("index_date")
     if isinstance(idx_date, str):

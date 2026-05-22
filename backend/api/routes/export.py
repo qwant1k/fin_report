@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from auth import require_user, require_write
+from auth import require_permission, require_user
 from config import settings
 from database import get_db
 from models.db_models import GeneratedReport, User
@@ -88,7 +88,7 @@ def _persist_export(
 def export_xlsx(
     report_date: date,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_permission("reports.export")),
 ):
     out = generate_xlsx_report(db, report_date, settings.report_path)
     rep = _persist_export(
@@ -117,7 +117,7 @@ def export_xlsx(
 def export_pdf(
     report_date: date,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_permission("reports.export")),
 ):
     out = generate_pdf_report(db, report_date, settings.report_path)
     rep = _persist_export(

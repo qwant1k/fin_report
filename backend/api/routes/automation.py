@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database import get_db
-from auth import require_admin, require_user
+from auth import require_permission, require_user
 from models.db_models import ImportJob
 from services.automation.coupon_redemption_engine import run_daily_auto_events
 from services.automation.fifo_engine import process_all_sell_fifo
@@ -35,7 +35,7 @@ class DailyRunResponse(BaseModel):
 def daily_run(
     req: DailyRunRequest,
     db: Session = Depends(get_db),
-    user: str = Depends(require_admin),
+    user: str = Depends(require_permission("automation.run")),
 ):
     """Run all daily automation engines for target_date."""
     try:
@@ -57,7 +57,7 @@ def daily_run(
 def fifo_run(
     target_date: Optional[date] = Query(None),
     db: Session = Depends(get_db),
-    user: str = Depends(require_admin),
+    user: str = Depends(require_permission("automation.run")),
 ):
     return process_all_sell_fifo(db, target_date)
 
@@ -66,6 +66,6 @@ def fifo_run(
 def ar_close(
     target_date: Optional[date] = Query(None),
     db: Session = Depends(get_db),
-    user: str = Depends(require_admin),
+    user: str = Depends(require_permission("automation.run")),
 ):
     return close_ar_items(db, target_date)

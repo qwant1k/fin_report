@@ -4,6 +4,7 @@ import { Save, Plus, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
+import { useAuthStore } from '@/lib/auth'
 import { FormulaDefinition } from '@/lib/types'
 import { formatDate } from '@/lib/format'
 
@@ -21,6 +22,7 @@ const OPS: Array<'ADD' | 'SUB' | 'MUL' | 'DIV'> = ['ADD', 'SUB', 'MUL', 'DIV']
 
 export default function FormulasPage() {
   const qc = useQueryClient()
+  const canEdit = useAuthStore((s) => s.can('formulas.edit'))
   const formulas = useQuery<FormulaDefinition[]>({
     queryKey: ['formulas'],
     queryFn: async () => (await api.get('/settings/formulas')).data,
@@ -77,7 +79,7 @@ export default function FormulasPage() {
           <h1 className="text-2xl font-bold">Формулы расчёта</h1>
           <p className="text-sm text-slate-500">Drag-and-drop конструктор формул для CMV/YTM/Duration</p>
         </div>
-        <button onClick={startNew} className="btn-primary"><Plus className="w-4 h-4" /> Новая формула</button>
+        {canEdit && <button onClick={startNew} className="btn-primary"><Plus className="w-4 h-4" /> Новая формула</button>}
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -91,9 +93,11 @@ export default function FormulasPage() {
                   <div className="text-xs text-slate-500">{f.name} · {f.target} · v{f.version}</div>
                   <div className="text-[10px] text-slate-400">{formatDate(f.updated_at)}</div>
                 </div>
+                {canEdit && (
                 <button onClick={(e) => { e.stopPropagation(); remove.mutate(f.id) }} className="text-red-500 hover:text-red-700">
                   <Trash2 className="w-4 h-4" />
                 </button>
+                )}
               </div>
             ))}
           </div>
@@ -120,9 +124,11 @@ export default function FormulasPage() {
                 </select>
               </div>
             </div>
+            {canEdit && (
             <button onClick={save} disabled={!code || !name} className="btn-primary">
               <Save className="w-4 h-4" /> Сохранить
             </button>
+            )}
           </div>
 
           <div className="card p-4 space-y-3">

@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from auth import require_user, require_write
+from auth import require_permission, require_user
 from database import get_db
 from models.db_models import (
     CDU,
@@ -36,7 +36,7 @@ from services.audit import write_audit
 router = APIRouter(
     prefix="/api/risk-report",
     tags=["Risk Report"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_permission("page.risk_report"))],
 )
 
 
@@ -225,7 +225,7 @@ def _encode_override(value: Any) -> Optional[str]:
 _SECTIONS = {"summary", "positions", "cash", "stress", "other"}
 
 
-@router.post("/notes", dependencies=[Depends(require_write)])
+@router.post("/notes", dependencies=[Depends(require_permission("risk_report.notes.edit"))])
 def create_note(
     payload: dict[str, Any],
     db: Session = Depends(get_db),
@@ -268,7 +268,7 @@ def create_note(
     return _note_to_dict(n)
 
 
-@router.patch("/notes/{note_id}", dependencies=[Depends(require_write)])
+@router.patch("/notes/{note_id}", dependencies=[Depends(require_permission("risk_report.notes.edit"))])
 def update_note(
     note_id: int,
     payload: dict[str, Any],
@@ -306,7 +306,7 @@ def update_note(
     return _note_to_dict(n)
 
 
-@router.delete("/notes/{note_id}", dependencies=[Depends(require_write)])
+@router.delete("/notes/{note_id}", dependencies=[Depends(require_permission("risk_report.notes.edit"))])
 def delete_note(
     note_id: int,
     db: Session = Depends(get_db),

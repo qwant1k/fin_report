@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from auth import require_user, require_write
+from auth import require_permission, require_user
 from database import SessionLocal
 from models.db_models import CDU, CDUFileFormat, User
 
@@ -57,7 +57,7 @@ def get_cdu_format(cdu_id: int, db: Session = Depends(get_db)) -> dict[str, Any]
         return {"cdu_id": cdu_id, "field_aliases": {}, "header_row_index": 0, "is_active": True}
     return _to_dict(row)
 
-@router.post("/{cdu_id}", dependencies=[Depends(require_user), Depends(require_write)])
+@router.post("/{cdu_id}", dependencies=[Depends(require_user), Depends(require_permission("cdu_formats.edit"))])
 def create_or_update_cdu_format(
     cdu_id: int,
     data: dict[str, Any],
@@ -98,7 +98,7 @@ def create_or_update_cdu_format(
     db.refresh(row)
     return _to_dict(row)
 
-@router.patch("/{cdu_id}", dependencies=[Depends(require_user), Depends(require_write)])
+@router.patch("/{cdu_id}", dependencies=[Depends(require_user), Depends(require_permission("cdu_formats.edit"))])
 def patch_cdu_format(
     cdu_id: int,
     data: dict[str, Any],
@@ -124,7 +124,7 @@ def patch_cdu_format(
     db.refresh(row)
     return _to_dict(row)
 
-@router.delete("/{cdu_id}", dependencies=[Depends(require_user), Depends(require_write)])
+@router.delete("/{cdu_id}", dependencies=[Depends(require_user), Depends(require_permission("cdu_formats.edit"))])
 def delete_cdu_format(cdu_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     """Удалить формат CDU."""
     row = db.query(CDUFileFormat).filter(CDUFileFormat.cdu_id == cdu_id).first()

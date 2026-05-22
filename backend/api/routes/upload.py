@@ -12,7 +12,7 @@ from loguru import logger
 from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
-from auth import require_user
+from auth import require_permission, require_user
 from config import settings
 from database import get_db
 from models.db_models import CDU, CDUFileFormat, RawTrade, SourceDocument, Trade, TradeFile, User
@@ -27,7 +27,7 @@ from services.parser.trade_importer import import_trades_from_parsed
 router = APIRouter(
     prefix="/api/upload",
     tags=["upload"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_permission("page.upload"))],
 )
 
 _DUPLICATE_ACTIONS = ("replace", "new_version")
@@ -66,7 +66,7 @@ async def upload_trade_report(
     trade_date: Optional[str] = Form(None),
     on_duplicate: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    user: User = Depends(require_user),
+    user: User = Depends(require_permission("upload.trade_report")),
 ):
     """Upload a Trade Report XLSX/XLSM, parse, persist and import into the
     Trade ledger as a single atomic transaction.
@@ -389,7 +389,7 @@ def get_file_status(file_id: int, db: Session = Depends(get_db)) -> dict:
 def set_file_cdu(
     file_id: int, cdu_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(require_user),
+    user: User = Depends(require_permission("upload.trade_report")),
 ):
     tf = db.get(TradeFile, file_id)
     if not tf:
@@ -468,7 +468,7 @@ def set_file_cdu(
 def import_file_to_trades(
     file_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(require_user),
+    user: User = Depends(require_permission("upload.trade_report")),
 ):
     tf = db.get(TradeFile, file_id)
     if not tf:
@@ -527,7 +527,7 @@ def import_file_to_trades(
 def delete_file(
     file_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(require_user),
+    user: User = Depends(require_permission("upload.trade_report")),
 ):
     tf = db.get(TradeFile, file_id)
     if not tf:

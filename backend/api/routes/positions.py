@@ -12,14 +12,14 @@ from pydantic import BaseModel
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
-from auth import require_user
+from auth import require_permission
 from database import get_db
 from models.db_models import BondLot, CDU, PortfolioPosition, RepoLot, Trade
 
 router = APIRouter(
     prefix="/api/positions",
     tags=["positions"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_permission("page.positions"))],
 )
 
 

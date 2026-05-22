@@ -6,27 +6,55 @@ from datetime import date
 
 from sqlalchemy.orm import Session
 
-from auth import hash_password
+from auth import hash_password, role_specs
 from config import settings
 from models.db_models import (
     CDU,
     CDULimit,
     FormulaDefinition,
     InstrumentCategoryRule,
+    RoleDefinition,
     User,
 )
 from services.calculator.constants import DEFAULT_CDU_SEED, DEFAULT_LIMITS
 
 
 def seed_initial_data(db: Session) -> None:
+    _seed_roles(db)
     _seed_admin(db)
     _seed_cdus(db)
     _seed_rules(db)
     _seed_formulas(db)
 
 
+def _seed_roles(db: Session) -> None:
+    for spec in role_specs():
+        obj = db.query(RoleDefinition).filter_by(code=spec["code"]).first()
+        permissions_json = json.dumps(spec["permissions"], ensure_ascii=False)
+        if obj:
+            obj.name = str(spec["name"])
+            obj.description = str(spec["description"])
+            obj.permissions_json = permissions_json
+            obj.is_system = bool(spec["is_system"])
+            obj.is_active = bool(spec["is_active"])
+            continue
+        db.add(RoleDefinition(
+            code=str(spec["code"]),
+            name=str(spec["name"]),
+            description=str(spec["description"]),
+            permissions_json=permissions_json,
+            is_system=bool(spec["is_system"]),
+            is_active=bool(spec["is_active"]),
+        ))
+    db.commit()
+
+
 def _seed_admin(db: Session) -> None:
-    if db.query(User).filter_by(username=settings.admin_username).first():
+    existing = db.query(User).filter_by(username=settings.admin_username).first()
+    if existing:
+        existing.role = "admin"
+        existing.is_active = True
+        db.commit()
         return
     db.add(User(
         username=settings.admin_username,

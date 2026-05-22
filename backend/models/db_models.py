@@ -420,13 +420,27 @@ class User(Base):
     full_name: Mapped[Optional[str]] = mapped_column(String(150))
     email: Mapped[Optional[str]] = mapped_column(String(150))
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), default="viewer")  # admin/analyst/viewer
+    role: Mapped[str] = mapped_column(String(40), default="viewer")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
 
 # ─────────────── Аудит-лог ───────────────
+class RoleDefinition(Base):
+    __tablename__ = "role_definitions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(40), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    permissions_json: Mapped[str] = mapped_column(Text, default="[]")
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
 

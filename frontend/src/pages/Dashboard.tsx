@@ -24,6 +24,7 @@ import CDUBlockCard from '@/components/CDUBlockCard'
 import HistoryChart from '@/components/HistoryChart'
 import KpiCard from '@/components/KpiCard'
 import { api } from '@/lib/api'
+import { useAuthStore } from '@/lib/auth'
 import { formatDate, formatNumber, formatPct } from '@/lib/format'
 import { DashboardResponse } from '@/lib/types'
 
@@ -92,6 +93,7 @@ export default function DashboardPage() {
   const [historyCduIds, setHistoryCduIds] = useState<number[]>([])
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
   const qc = useQueryClient()
+  const can = useAuthStore((s) => s.can)
 
   const period = useMemo(
     () => getPeriodBounds(periodMode, customFrom, customTo),
@@ -231,15 +233,21 @@ export default function DashboardPage() {
           <button onClick={() => refetch()} className="btn-secondary">
             <RefreshCw className="h-4 w-4" /> Обновить
           </button>
+          {can('dashboard.calculate') && (
           <button onClick={() => calc.mutate()} disabled={calc.isPending} className="btn-primary">
             <RefreshCw className={`h-4 w-4 ${calc.isPending ? 'animate-spin' : ''}`} /> Пересчитать
           </button>
+          )}
+          {can('reports.export') && (
+            <>
           <button onClick={downloadXlsx} className="btn-secondary">
             <FileSpreadsheet className="h-4 w-4" /> XLSX
           </button>
           <button onClick={downloadPdf} className="btn-secondary">
             <FileText className="h-4 w-4" /> PDF
           </button>
+            </>
+          )}
         </div>
       </header>
 

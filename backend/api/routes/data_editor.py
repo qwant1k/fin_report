@@ -22,12 +22,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text, inspect, select, text
 from sqlalchemy.orm import Session
 
-from auth import require_user, require_write
+from auth import require_permission, require_user
 from database import get_db
 import models.db_models as db_models
 from services.audit import write_audit
 
-router = APIRouter(prefix="/api/data", tags=["data-editor"])
+router = APIRouter(
+    prefix="/api/data",
+    tags=["data-editor"],
+    dependencies=[Depends(require_permission("page.data_editor"))],
+)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Table registry — maps public slug → SQLAlchemy model class
@@ -325,7 +329,7 @@ def get_row(
     return _row_to_dict(row, _model_columns(model))
 
 
-@router.post("/tables/{table}", dependencies=[Depends(require_write)])
+@router.post("/tables/{table}", dependencies=[Depends(require_permission("data_editor.edit"))])
 def create_row(
     table: str,
     payload: Dict[str, Any],
@@ -360,7 +364,7 @@ def create_row(
     return _row_to_dict(row, columns)
 
 
-@router.patch("/tables/{table}/{row_id}", dependencies=[Depends(require_write)])
+@router.patch("/tables/{table}/{row_id}", dependencies=[Depends(require_permission("data_editor.edit"))])
 def update_row(
     table: str,
     row_id: int,
@@ -402,7 +406,7 @@ def update_row(
     return _row_to_dict(row, columns)
 
 
-@router.delete("/tables/{table}/{row_id}", dependencies=[Depends(require_write)])
+@router.delete("/tables/{table}/{row_id}", dependencies=[Depends(require_permission("data_editor.edit"))])
 def delete_row(
     table: str,
     row_id: int,

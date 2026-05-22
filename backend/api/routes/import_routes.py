@@ -13,7 +13,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from auth import require_admin, require_user
+from auth import require_permission, require_user
 from config import settings
 from database import SessionLocal, get_db
 from models.db_models import ImportJob, SourceDocument, User
@@ -25,7 +25,7 @@ from services.import_rr import (
 router = APIRouter(
     prefix="/api/import",
     tags=["import"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_permission("page.import"))],
 )
 
 
@@ -36,7 +36,7 @@ async def upload_single_rr(
     skip_if_imported: bool = Form(True),
     password: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_permission("import.run")),
 ):
     """Загрузка одного Risk Report XLSM. Сохраняется в uploads/risk_reports/, импортируется синхронно."""
     if not file.filename.lower().endswith(('.xlsm', '.xlsx')):
@@ -86,7 +86,7 @@ async def import_rr_folder(
     payload: dict,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_permission("import.run")),
 ):
     """Запустить bulk-импорт всех XLSM-файлов из указанной папки на сервере.
 

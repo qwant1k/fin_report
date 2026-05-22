@@ -120,7 +120,7 @@ function fmtMln(n: number | null | undefined): string {
 
 export default function RiskReportPage() {
   const qc = useQueryClient()
-  const canWrite = useAuthStore((s) => s.canWrite())
+  const canWrite = useAuthStore((s) => s.can('risk_report.notes.edit'))
 
   const datesQ = useQuery<RrDate[]>({
     queryKey: ['rr-dates'],

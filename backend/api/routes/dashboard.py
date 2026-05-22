@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from auth import require_user
+from auth import require_permission
 
 from database import get_db
 from models.db_models import (
@@ -52,7 +52,7 @@ def _is_trade_report_source(source_doc_types: dict[int, str], source_doc_id: Opt
 router = APIRouter(
     prefix="/api/dashboard",
     tags=["dashboard"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_permission("page.dashboard"))],
 )
 
 

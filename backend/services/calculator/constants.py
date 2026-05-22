@@ -86,6 +86,11 @@ DEFAULT_CDU_SEED = [
         "portfolio_type": PORTFOLIO_TYPE_PRIVATE_CDU, "portfolio_code": None,
     },
     {
+        "name": "Alatau City Invest", "short_name": "Alatau",
+        "participant_code_prefix": "ALATAU", "share_target_pct": 0.0,
+        "portfolio_type": PORTFOLIO_TYPE_PRIVATE_CDU, "portfolio_code": None,
+    },
+    {
         "name": "UD Capital", "short_name": "UD Capital",
         "participant_code_prefix": "UDCAP", "share_target_pct": 0.1667,
         "portfolio_type": PORTFOLIO_TYPE_PRIVATE_CDU, "portfolio_code": None,
@@ -126,6 +131,9 @@ CDU_NAME_ALIASES: Dict[str, str] = {
     "tansar": "Tansar Capital",
     "tansar capital": "Tansar Capital",
     "тансар": "Tansar Capital",
+    "alatau": "Alatau City Invest",
+    "alatau city invest": "Alatau City Invest",
+    "alatau invest": "Alatau City Invest",
     "ud capital": "UD Capital",
     "udcap": "UD Capital",
     "ud": "UD Capital",

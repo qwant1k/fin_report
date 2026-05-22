@@ -7,7 +7,7 @@ from datetime import date, datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from auth import require_user, require_write
+from auth import require_permission, require_user
 from database import get_db
 from models.db_models import CalculationRun, User
 from models.schemas import CalculateRequest, CalculateResponse
@@ -25,7 +25,7 @@ router = APIRouter(
 def trigger_calc(
     payload: CalculateRequest,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_permission("dashboard.calculate")),
 ):
     run = CalculationRun(
         run_date=payload.report_date, status="RUNNING",

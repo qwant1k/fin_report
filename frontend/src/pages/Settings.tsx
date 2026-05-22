@@ -12,7 +12,9 @@ const CATS = ['CASH', 'GOV_BONDS', 'REVERSE_REPO', 'MFO_BONDS', 'AGENCY_BONDS', 
 
 export default function SettingsPage() {
   const qc = useQueryClient()
-  const isAdmin = useAuthStore((s) => s.isAdmin())
+  const can = useAuthStore((s) => s.can)
+  const canEdit = can('settings.edit')
+  const canEditFormats = can('cdu_formats.edit')
   const [tab, setTab] = useState<'cdus' | 'limits' | 'formats'>('cdus')
 
   const cdus = useQuery<CDU[]>({
@@ -86,7 +88,7 @@ export default function SettingsPage() {
               </thead>
               <tbody>
                 {(cdus.data ?? []).map((c) => (
-                  <CduRow key={c.id} cdu={c} canEdit={isAdmin} onSave={(u) => saveCdu.mutate(u)} onDelete={() => delCdu.mutate(c.id)} />
+                  <CduRow key={c.id} cdu={c} canEdit={canEdit} onSave={(u) => saveCdu.mutate(u)} onDelete={() => delCdu.mutate(c.id)} />
                 ))}
               </tbody>
             </table>
@@ -95,7 +97,7 @@ export default function SettingsPage() {
       )}
 
       {tab === 'formats' && (
-        <CDUFormatsPanel cdus={cdus.data ?? []} canEdit={isAdmin} />
+        <CDUFormatsPanel cdus={cdus.data ?? []} canEdit={canEditFormats} />
       )}
 
       {tab === 'limits' && (
@@ -116,7 +118,7 @@ export default function SettingsPage() {
               </thead>
               <tbody>
                 {(limits.data ?? []).map((l) => (
-                  <LimitRow key={l.id} limit={l} cdus={cdus.data ?? []} canEdit={isAdmin} onSave={(u) => saveLimit.mutate(u)} />
+                  <LimitRow key={l.id} limit={l} cdus={cdus.data ?? []} canEdit={canEdit} onSave={(u) => saveLimit.mutate(u)} />
                 ))}
               </tbody>
             </table>

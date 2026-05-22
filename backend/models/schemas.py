@@ -256,6 +256,7 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     role: str
     full_name: Optional[str] = None
+    permissions: List[str] = Field(default_factory=list)
 
 
 class UserOut(ORMModel):
@@ -266,6 +267,7 @@ class UserOut(ORMModel):
     role: str
     is_active: bool
     created_at: datetime
+    permissions: List[str] = Field(default_factory=list)
 
 
 class UserCreate(BaseModel):
@@ -274,6 +276,39 @@ class UserCreate(BaseModel):
     full_name: Optional[str] = None
     email: Optional[str] = None
     role: str = "viewer"
+
+
+class PermissionCatalogItem(BaseModel):
+    code: str
+    group: str
+    label: str
+
+
+class RoleDefinitionOut(BaseModel):
+    id: int
+    code: str
+    name: str
+    description: Optional[str] = None
+    permissions: List[str] = Field(default_factory=list)
+    is_system: bool
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class RoleDefinitionCreate(BaseModel):
+    code: str
+    name: str
+    description: Optional[str] = None
+    permissions: List[str] = Field(default_factory=list)
+    is_active: bool = True
+
+
+class RoleDefinitionUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    permissions: Optional[List[str]] = None
+    is_active: Optional[bool] = None
 
 
 # ───────── KASE / MBM ─────────

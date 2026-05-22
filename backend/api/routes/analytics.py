@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from auth import require_user
+from auth import require_permission
 
 from database import get_db
 from models.db_models import (
@@ -31,7 +31,7 @@ from models.db_models import (
 router = APIRouter(
     prefix="/api/analytics",
     tags=["analytics"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_permission("page.analytics"))],
 )
 
 CATEGORY_LABELS = {

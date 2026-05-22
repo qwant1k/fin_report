@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from auth import require_admin, require_user, require_write
+from auth import require_permission, require_user
 from config import settings
 from database import get_db
 from models.db_models import GeneratedReport, RawTrade, User
@@ -33,7 +33,7 @@ from services.report_approval import (
 router = APIRouter(
     prefix="/api/reports",
     tags=["reports"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_permission("page.reports"))],
 )
 
 
@@ -73,7 +73,7 @@ def download(report_id: int, db: Session = Depends(get_db)):
 def submit(
     report_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_permission("reports.submit")),
 ):
     obj = db.get(GeneratedReport, report_id)
     if not obj:
@@ -88,7 +88,7 @@ def submit(
 def approve(
     report_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_permission("reports.approve")),
 ):
     obj = db.get(GeneratedReport, report_id)
     if not obj:
@@ -104,7 +104,7 @@ def reject(
     report_id: int,
     payload: ReportRejectRequest,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_permission("reports.reject")),
 ):
     obj = db.get(GeneratedReport, report_id)
     if not obj:
@@ -119,7 +119,7 @@ def reject(
 def regenerate(
     report_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_permission("reports.regenerate")),
 ):
     """Re-run generation for a draft/rejected report.
 
@@ -162,7 +162,7 @@ def regenerate(
 def delete_report(
     report_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_permission("reports.delete")),
 ):
     obj = db.get(GeneratedReport, report_id)
     if not obj:

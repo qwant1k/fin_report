@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { CheckCircle, AlertTriangle, XCircle, Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useAuthStore } from '@/lib/auth'
 
 interface ReconItem {
   id: number
@@ -21,6 +22,7 @@ export default function ReconciliationPage() {
   const [loading, setLoading] = useState(false)
   const [runDate, setRunDate] = useState(() => new Date().toISOString().slice(0, 10))
   const [runLoading, setRunLoading] = useState(false)
+  const canRun = useAuthStore((s) => s.can('reconciliation.run'))
 
   const fetchList = async () => {
     setLoading(true)
@@ -57,6 +59,7 @@ export default function ReconciliationPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-slate-800">Сверка первички</h1>
+        {canRun && (
         <div className="flex items-center gap-2">
           <input
             type="date"
@@ -68,6 +71,7 @@ export default function ReconciliationPage() {
             {runLoading ? 'Выполняется…' : 'Запустить сверку'}
           </button>
         </div>
+        )}
       </div>
 
       {loading && <div className="text-sm text-slate-500">Загрузка…</div>}

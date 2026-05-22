@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from auth import require_user, require_write
+from auth import require_permission, require_user
 from database import get_db
 from models.db_models import CDU, SecurityHolding, User
 from services.audit import write_audit
@@ -29,7 +29,7 @@ from services.holdings_sync import sync_holdings
 router = APIRouter(
     prefix="/api/securities",
     tags=["Securities catalogue"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_permission("page.securities"))],
 )
 
 
@@ -154,7 +154,7 @@ _EDITABLE_FIELDS = (
 )
 
 
-@router.post("/", dependencies=[Depends(require_user), Depends(require_write)])
+@router.post("/", dependencies=[Depends(require_user), Depends(require_permission("securities.edit"))])
 def create_manual_holding(
     payload: dict[str, Any],
     db: Session = Depends(get_db),
@@ -202,7 +202,7 @@ def create_manual_holding(
     return _join_cdu_names(db, [row])[0]
 
 
-@router.patch("/{holding_id}", dependencies=[Depends(require_user), Depends(require_write)])
+@router.patch("/{holding_id}", dependencies=[Depends(require_user), Depends(require_permission("securities.edit"))])
 def update_holding(
     holding_id: int,
     payload: dict[str, Any],
@@ -255,7 +255,7 @@ def update_holding(
     return _join_cdu_names(db, [row])[0]
 
 
-@router.delete("/{holding_id}", dependencies=[Depends(require_user), Depends(require_write)])
+@router.delete("/{holding_id}", dependencies=[Depends(require_user), Depends(require_permission("securities.edit"))])
 def delete_holding(
     holding_id: int,
     db: Session = Depends(get_db),
@@ -283,7 +283,7 @@ def delete_holding(
     return {"ok": True}
 
 
-@router.post("/sync", dependencies=[Depends(require_user), Depends(require_write)])
+@router.post("/sync", dependencies=[Depends(require_user), Depends(require_permission("securities.edit"))])
 def trigger_sync(
     cdu_id: Optional[int] = Query(None, description="Только для конкретного CDU"),
     db: Session = Depends(get_db),

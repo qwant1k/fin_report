@@ -13,6 +13,7 @@ import {
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
+import { useAuthStore } from '@/lib/auth'
 import { formatDate } from '@/lib/format'
 
 interface ImportJobItem {
@@ -68,6 +69,7 @@ export default function ImportPage() {
   const [pattern, setPattern] = useState('**/*.xlsm')
   const [password, setPassword] = useState('7')
   const [activeJobId, setActiveJobId] = useState<number | null>(null)
+  const canRunImport = useAuthStore((s) => s.can('import.run'))
 
   // ───── Список последних job-ов ─────
   const jobs = useQuery<ImportJobItem[]>({
@@ -166,6 +168,8 @@ export default function ImportPage() {
       </header>
 
       {/* ───── Панель «Один файл» ───── */}
+      {canRunImport && (
+      <>
       <div className="card p-4">
         <h2 className="font-semibold mb-3 flex items-center gap-2">
           <FileSpreadsheet className="w-4 h-4 text-emerald-600" /> Загрузить один файл
@@ -260,6 +264,9 @@ export default function ImportPage() {
           </div>
         </form>
       </div>
+      </>
+
+      )}
 
       {/* ───── История запусков ───── */}
       <div className="card overflow-hidden">

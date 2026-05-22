@@ -89,7 +89,7 @@ function formatMillions(n: number | null | undefined): string {
 
 export default function SecuritiesPage() {
   const qc = useQueryClient()
-  const canWrite = useAuthStore((s) => s.canWrite())
+  const canWrite = useAuthStore((s) => s.can('securities.edit'))
 
   const [cduFilter, setCduFilter] = useState<number | ''>('')
   const [categoryFilter, setCategoryFilter] = useState<string>('')

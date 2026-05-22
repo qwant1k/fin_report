@@ -36,4 +36,6 @@ def test_category_resolution():
 def test_detect_cdu():
     assert detect_cdu_prefix("HALFN0BT13", "trade.xlsx") == "HALFN"
     assert detect_cdu_prefix(None, "BCC_trade.xlsx") == "BCC"
+    assert detect_cdu_prefix("TANSR_MAIN", "trade.xlsx") == "TANSR"
+    assert detect_cdu_prefix(None, "Alatau City Invest trade.xlsx") == "ALATAU"
     assert detect_cdu_prefix(None, "report.xlsx") is None

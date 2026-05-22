@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from auth import create_token, require_user, verify_password
+from auth import create_token, require_user, user_permissions, verify_password
 from database import get_db
 from models.db_models import User
 from models.schemas import LoginRequest, LoginResponse, UserOut
@@ -25,9 +25,19 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         access_token=create_token(sub=user.username, role=user.role),
         role=user.role,
         full_name=user.full_name,
+        permissions=user_permissions(user, db),
     )
 
 
 @router.get("/me", response_model=UserOut)
-def me(user: User = Depends(require_user)):
-    return user
+def me(user: User = Depends(require_user), db: Session = Depends(get_db)):
+    return {
+        "id": user.id,
+        "username": user.username,
+        "full_name": user.full_name,
+        "email": user.email,
+        "role": user.role,
+        "is_active": user.is_active,
+        "created_at": user.created_at,
+        "permissions": user_permissions(user, db),
+    }

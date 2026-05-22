@@ -4,6 +4,7 @@ import { Download, Plus } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
+import { useAuthStore } from '@/lib/auth'
 import { MBM } from '@/lib/types'
 import { formatDate, formatNumber } from '@/lib/format'
 
@@ -23,6 +24,8 @@ export default function MbmPage() {
   const [manualDate, setManualDate] = useState(today)
   const [manualYtm, setManualYtm] = useState('')
   const [manualDur, setManualDur] = useState('')
+  const [manualModDur, setManualModDur] = useState('')
+  const can = useAuthStore((s) => s.can)
 
   const { data } = useQuery<MBM[]>({
     queryKey: ['mbm', archiveStart],
@@ -49,6 +52,7 @@ export default function MbmPage() {
         index_date: manualDate,
         ytm_value: manualYtm ? Number(manualYtm) : null,
         duration: manualDur ? Number(manualDur) : null,
+        mod_duration: manualModDur ? Number(manualModDur) : null,
       })).data,
     onSuccess: () => {
       toast.success('MBM сохранён')
@@ -65,6 +69,7 @@ export default function MbmPage() {
         </div>
       </header>
 
+      {can('mbm.refresh') && (
       <div className="card p-4 space-y-3">
         <h2 className="font-semibold">Архив KASE</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -75,24 +80,28 @@ export default function MbmPage() {
           </button>
         </div>
       </div>
+      )}
 
+      {can('mbm.manual') && (
       <div className="card p-4 space-y-3">
         <h2 className="font-semibold">Ввод вручную</h2>
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
           <input type="date" className="input" value={manualDate} onChange={(e) => setManualDate(e.target.value)} />
           <input className="input" placeholder="MBM index, напр. 1214.9" value={manualYtm} onChange={(e) => setManualYtm(e.target.value)} />
           <input className="input" placeholder="Duration (лет)" value={manualDur} onChange={(e) => setManualDur(e.target.value)} />
+          <input className="input" placeholder="ModDuration" value={manualModDur} onChange={(e) => setManualModDur(e.target.value)} />
           <button onClick={() => manual.mutate()} className="btn-primary">
             <Plus className="w-4 h-4" /> Сохранить
           </button>
         </div>
       </div>
+      )}
 
       <div className="card overflow-hidden">
         <div className="table-wrap">
           <table className="kdif-table">
             <thead>
-              <tr><th>Дата</th><th>MBM index</th><th>Duration</th><th>Источник</th><th>Получено</th></tr>
+              <tr><th>Дата</th><th>MBM index</th><th>Duration</th><th>ModDuration</th><th>Источник</th><th>Получено</th></tr>
             </thead>
             <tbody>
               {(data ?? []).map((r) => (
@@ -100,11 +109,12 @@ export default function MbmPage() {
                   <td>{formatDate(r.index_date)}</td>
                   <td className="text-right">{r.ytm_value != null ? formatNumber(r.ytm_value, 4) : '—'}</td>
                   <td className="text-right">{r.duration != null ? formatNumber(r.duration, 2) : '—'}</td>
+                  <td className="text-right">{r.mod_duration != null ? formatNumber(r.mod_duration, 2) : '—'}</td>
                   <td>{r.source}</td>
                   <td>{formatDate(r.fetched_at)}</td>
                 </tr>
               ))}
-              {!data?.length && <tr><td colSpan={5} className="text-center text-slate-400 py-6">Нет данных</td></tr>}
+              {!data?.length && <tr><td colSpan={6} className="text-center text-slate-400 py-6">Нет данных</td></tr>}
             </tbody>
           </table>
         </div>

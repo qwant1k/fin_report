@@ -24,14 +24,14 @@ import {
 } from 'lucide-react'
 import clsx from 'clsx'
 
-import { Role, useAuthStore } from '@/lib/auth'
+import { useAuthStore } from '@/lib/auth'
 
 interface NavItem {
   to: string
   label: string
   icon: typeof LayoutDashboard
+  permission: string
   end?: boolean
-  roles?: Role[]
 }
 
 interface NavGroup {
@@ -41,25 +41,15 @@ interface NavGroup {
   items: NavItem[]
 }
 
-const ALL: Role[] = ['admin', 'analyst', 'operator', 'auditor', 'viewer']
-const NON_AUDITOR: Role[] = ['admin', 'analyst', 'operator']
-
-// Operator profile is upload-centric: only the surfaces they actively work
-// with show up. Everyone else sees the full read suite; writes are still
-// gated server-side by `require_write` / `require_admin`.
-const OPERATOR_VISIBLE = new Set([
-  '/', '/upload', '/primary-data', '/reconciliation', '/history', '/alerts',
-])
-
 const navGroups: NavGroup[] = [
   {
     id: 'dashboard',
     label: 'Дашборд',
     icon: LayoutDashboard,
     items: [
-      { to: '/',           label: 'Сводка',     icon: LayoutDashboard, end: true, roles: ALL },
-      { to: '/analytics',  label: 'Аналитика',  icon: LineChart,                  roles: ALL },
-      { to: '/alerts',     label: 'Алерты',     icon: AlertCircle,                roles: ALL },
+      { to: '/', label: 'Сводка', icon: LayoutDashboard, permission: 'page.dashboard', end: true },
+      { to: '/analytics', label: 'Аналитика', icon: LineChart, permission: 'page.analytics' },
+      { to: '/alerts', label: 'Алерты', icon: AlertCircle, permission: 'page.alerts' },
     ],
   },
   {
@@ -67,24 +57,24 @@ const navGroups: NavGroup[] = [
     label: 'Загрузка',
     icon: Upload,
     items: [
-      { to: '/upload',         label: 'Загрузка XLSX', icon: Upload,    roles: ALL },
-      { to: '/primary-data',   label: 'Первичка',      icon: FileUp,    roles: ALL },
-      { to: '/reconciliation', label: 'Сверка',        icon: CheckCircle, roles: ALL },
-      { to: '/history',        label: 'История',       icon: History,   roles: ALL },
-      { to: '/import',         label: 'Импорт истории',icon: Database,  roles: ['admin'] },
+      { to: '/upload', label: 'Загрузка XLSX', icon: Upload, permission: 'page.upload' },
+      { to: '/primary-data', label: 'Первичка', icon: FileUp, permission: 'page.primary_data' },
+      { to: '/reconciliation', label: 'Сверка', icon: CheckCircle, permission: 'page.reconciliation' },
+      { to: '/history', label: 'История', icon: History, permission: 'page.history' },
+      { to: '/import', label: 'Импорт истории', icon: Database, permission: 'page.import' },
     ],
   },
   {
     id: 'reports',
-    label: 'Отчёты',
+    label: 'Отчеты',
     icon: FileText,
     items: [
-      { to: '/reports',     label: 'Сводные отчёты', icon: FileText,   roles: ALL },
-      { to: '/positions',   label: 'Позиции',        icon: Table2,     roles: ALL },
-      { to: '/securities',  label: 'Справочник ЦБ',  icon: BookMarked, roles: ALL },
-      { to: '/risk-report', label: 'Risk Report',    icon: ShieldAlert,roles: ALL },
-      { to: '/kase',        label: 'KASE',           icon: TrendingUp, roles: ALL },
-      { to: '/mbm',         label: 'MBM',            icon: Activity,   roles: ALL },
+      { to: '/reports', label: 'Сводные отчеты', icon: FileText, permission: 'page.reports' },
+      { to: '/positions', label: 'Позиции', icon: Table2, permission: 'page.positions' },
+      { to: '/securities', label: 'Справочник ЦБ', icon: BookMarked, permission: 'page.securities' },
+      { to: '/risk-report', label: 'Risk Report', icon: ShieldAlert, permission: 'page.risk_report' },
+      { to: '/kase', label: 'KASE', icon: TrendingUp, permission: 'page.kase' },
+      { to: '/mbm', label: 'MBM', icon: Activity, permission: 'page.mbm' },
     ],
   },
   {
@@ -92,24 +82,15 @@ const navGroups: NavGroup[] = [
     label: 'Настройки',
     icon: Settings,
     items: [
-      { to: '/settings',    label: 'ЧДУ и лимиты',  icon: Settings,       roles: NON_AUDITOR },
-      { to: '/data-editor', label: 'Редактор БД',   icon: Pencil,         roles: ['admin', 'analyst'] },
-      { to: '/formulas',    label: 'Формулы',       icon: FunctionSquare, roles: ['admin'] },
-      { to: '/admin',       label: 'Пользователи', icon: Users,          roles: ['admin'] },
+      { to: '/settings', label: 'ЧДУ и лимиты', icon: Settings, permission: 'page.settings' },
+      { to: '/data-editor', label: 'Редактор БД', icon: Pencil, permission: 'page.data_editor' },
+      { to: '/formulas', label: 'Формулы', icon: FunctionSquare, permission: 'page.formulas' },
+      { to: '/admin', label: 'Пользователи', icon: Users, permission: 'page.admin' },
     ],
   },
 ]
 
-const filterItems = (items: NavItem[], role: Role | null): NavItem[] => {
-  if (!role) return []
-  return items.filter((item) => {
-    if (item.roles && !item.roles.includes(role)) return false
-    if (role === 'operator' && !OPERATOR_VISIBLE.has(item.to)) return false
-    return true
-  })
-}
-
-const ROLE_BADGE: Record<Role, string> = {
+const ROLE_BADGE: Record<string, string> = {
   admin: 'Администратор',
   analyst: 'Аналитик',
   operator: 'Оператор',
@@ -125,8 +106,7 @@ interface NavGroupBlockProps {
 
 function NavGroupBlock({ group, items, initiallyOpen }: NavGroupBlockProps) {
   const [open, setOpen] = useState(initiallyOpen)
-  // If a child route becomes active later (e.g. via URL change), keep the
-  // group open so the active link stays visible.
+
   useEffect(() => {
     if (initiallyOpen) setOpen(true)
   }, [initiallyOpen])
@@ -191,6 +171,7 @@ function NavGroupBlock({ group, items, initiallyOpen }: NavGroupBlockProps) {
 export default function Layout() {
   const role = useAuthStore((s) => s.role)
   const fullName = useAuthStore((s) => s.fullName)
+  const permissions = useAuthStore((s) => s.permissions)
   const clear = useAuthStore((s) => s.clear)
   const nav = useNavigate()
   const { pathname } = useLocation()
@@ -200,14 +181,13 @@ export default function Layout() {
     nav('/login', { replace: true })
   }
 
-  // Filter groups by role, dropping any that became empty.
   const groupsForRole = useMemo(() => {
+    const current = new Set(permissions)
     return navGroups
-      .map((g) => ({ group: g, items: filterItems(g.items, role) }))
-      .filter((g) => g.items.length > 0)
-  }, [role])
+      .map((group) => ({ group, items: group.items.filter((item) => current.has(item.permission)) }))
+      .filter((group) => group.items.length > 0)
+  }, [permissions])
 
-  // A group is open by default if it contains the currently active route.
   const isGroupActive = (items: NavItem[]) =>
     items.some((it) => (it.end ? pathname === it.to : pathname.startsWith(it.to)))
 
@@ -240,7 +220,7 @@ export default function Layout() {
         <div className="border-t border-white/10 p-3">
           <div className="text-sm font-semibold">{fullName ?? 'Пользователь'}</div>
           <div className="mb-3 text-xs text-emerald-100/70">
-            {role ? ROLE_BADGE[role] : '—'}
+            {role ? (ROLE_BADGE[role] ?? role) : '-'}
           </div>
           <button onClick={handleLogout} className="btn w-full border border-white/10 bg-white/10 text-white hover:bg-white/20">
             <LogOut className="h-4 w-4" />

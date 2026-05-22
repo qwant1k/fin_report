@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from auth import require_admin, require_user
+from auth import require_permission, require_user
 from config import settings
 from database import SessionLocal, get_db
 from models.db_models import CDU, ImportJob, SourceDocument, User
@@ -27,7 +27,7 @@ from services.parser.trade_importer import import_single_trade_report_xlsx
 router = APIRouter(
     prefix="/api/primary-data",
     tags=["primary-data"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_permission("page.primary_data"))],
 )
 
 
@@ -42,7 +42,7 @@ class ImportResponse(BaseModel):
 async def upload_primary_data(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_permission("primary_data.upload")),
 ):
     """Upload one primary-data file, save it for audit, and import immediately."""
     original_name = file.filename or "unnamed"
@@ -126,7 +126,7 @@ async def bulk_import_primary_folder(
     payload: dict,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_permission("primary_data.upload")),
 ):
     """Queue recursive folder import for primary-data packages."""
     folder_path = payload.get("folder_path")

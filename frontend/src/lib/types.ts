@@ -176,6 +176,7 @@ export interface MBM {
   index_date: string
   ytm_value: number | null
   duration: number | null
+  mod_duration: number | null
   source: string
   fetched_at: string
 }

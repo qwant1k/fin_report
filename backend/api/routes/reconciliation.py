@@ -6,14 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database import get_db
-from auth import require_admin, require_user
+from auth import require_permission, require_user
 from models.db_models import ReconciliationResult
 from services.reconciliation.engine import reconcile_all_for_date, run_reconciliation
 
 router = APIRouter(
     prefix="/api/reconciliation",
     tags=["reconciliation"],
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_permission("page.reconciliation"))],
 )
 
 
@@ -41,7 +41,7 @@ class ReconRunRequest(BaseModel):
 def run_single_recon(
     req: ReconRunRequest,
     db: Session = Depends(get_db),
-    user: str = Depends(require_admin),
+    user: str = Depends(require_permission("reconciliation.run")),
 ):
     """Run a single reconciliation check."""
     res = run_reconciliation(db, req.cdu_id, req.recon_date, req.recon_type)
@@ -52,7 +52,7 @@ def run_single_recon(
 def run_all_recon(
     recon_date: date = Query(...),
     db: Session = Depends(get_db),
-    user: str = Depends(require_admin),
+    user: str = Depends(require_permission("reconciliation.run")),
 ):
     """Run all reconciliation types for every active CDU."""
     results = reconcile_all_for_date(db, recon_date)

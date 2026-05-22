@@ -18,7 +18,7 @@ export default function LoginPage() {
     setLoading(true)
     try {
       const { data } = await api.post('/auth/login', { username, password })
-      setSession(data.access_token, data.role, data.full_name ?? null)
+      setSession(data.access_token, data.role, data.full_name ?? null, data.permissions ?? [])
       toast.success(`Добро пожаловать${data.full_name ? `, ${data.full_name}` : ''}!`)
       nav('/', { replace: true })
     } catch {
