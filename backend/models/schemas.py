@@ -214,6 +214,10 @@ class CDUBlock(BaseModel):
     duration_upper: Optional[float]
     duration_status: Optional[str]
     cdu_share_pct: float
+    # Date of the slice actually shown for this manager and whether it is
+    # older than the requested report date (the dashboard is «as of»).
+    as_of_date: Optional[date] = None
+    is_stale: bool = False
 
 
 class DashboardResponse(BaseModel):
@@ -338,6 +342,24 @@ class KasePriceOut(ORMModel):
     unit_ru: Optional[str] = None
     unit_en: Optional[str] = None
     unit_kz: Optional[str] = None
+    fetched_at: datetime
+    source: str
+
+
+class KaseRiskPriceOut(ORMModel):
+    id: int
+    trade_date: date
+    valuation_date: Optional[date] = None
+    instrument_code: str
+    isin: Optional[str] = None
+    algo: Optional[str] = None
+    issuer_name: Optional[str] = None
+    settlement_price: Optional[float] = None
+    settlement_dirty_price: Optional[float] = None
+    dohod: Optional[float] = None
+    ytm: Optional[float] = None
+    dtm: Optional[float] = None
+    unit_ru: Optional[str] = None
     fetched_at: datetime
     source: str
 

@@ -64,8 +64,21 @@ def submit(db: Session, report: GeneratedReport, *, actor: str) -> GeneratedRepo
     return report
 
 
+def _ensure_four_eyes(report: GeneratedReport, actor: str, action: str) -> None:
+    """Вводящий ≠ утверждающий (requirement 5 of the business process)."""
+    if actor and actor in {report.submitted_by, report.generated_by}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "four_eyes",
+                "message": f"Сформировавший или отправивший отчёт пользователь не может сам его {action}.",
+            },
+        )
+
+
 def approve(db: Session, report: GeneratedReport, *, actor: str) -> GeneratedReport:
     _ensure_transition(report.status or "draft", "approved")
+    _ensure_four_eyes(report, actor, "утвердить")
     report.status = "approved"
     report.approved_by = actor
     report.approved_at = datetime.utcnow()
@@ -85,6 +98,7 @@ def reject(
     db: Session, report: GeneratedReport, *, actor: str, comment: str,
 ) -> GeneratedReport:
     _ensure_transition(report.status or "draft", "rejected")
+    _ensure_four_eyes(report, actor, "отклонить")
     if not comment or not comment.strip():
         raise HTTPException(400, "Комментарий обязателен для отклонения отчёта")
     report.status = "rejected"

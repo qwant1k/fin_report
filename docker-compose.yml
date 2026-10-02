@@ -10,11 +10,12 @@ services:
       - .env
     environment:
       APP_ENV: production
+      INITIAL_DATA_MODE: ${INITIAL_DATA_MODE:-full}
       DATABASE_URL: sqlite:////app/data/fund_reporting.db
       UPLOAD_DIR: /app/data/uploads
       REPORT_DIR: /app/data/reports
       LOG_DIR: /app/data/logs
-      CORS_ORIGINS: http://localhost,http://127.0.0.1,http://localhost:5173
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,http://127.0.0.1,http://localhost:5173}
     volumes:
       - backend_data:/app/data
     ports:

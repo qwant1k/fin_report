@@ -122,11 +122,10 @@ def import_holdings_xlsx(
 
     cdu_id: Optional[int] = None
     if cdu_name:
-        canonical = normalize_cdu_name(cdu_name)
-        if canonical:
-            row = db.execute(select(CDU).where(CDU.name == canonical)).scalars().first()
-            if row:
-                cdu_id = row.id
+        from services.cdu_lookup import find_cdu
+        row = find_cdu(db, name=cdu_name)
+        if row:
+            cdu_id = row.id
 
     if cdu_id is None:
         logger.warning(f"Holdings import: CDU not resolved for {file_path}")
@@ -140,6 +139,8 @@ def import_holdings_xlsx(
         }
 
     counters = {"cash_snapshots": 0, "portfolio_positions": 0, "skipped": 0}
+    from services.portfolio.reference import ReferenceBook
+    refs = ReferenceBook(db)
 
     # Upsert cash snapshots
     for cr in cash_rows:
@@ -151,6 +152,11 @@ def import_holdings_xlsx(
             CashSnapshot.currency == ccy,
         )).scalars().first()
         if existing:
+            # The Holdings report is the manager's *external* view used for
+            # reconciliation — it must never overwrite the Risk Report cash.
+            if existing.source not in ("holdings_report_xlsx", None):
+                counters["skipped"] += 1
+                continue
             existing.amount = amt
             existing.source = "holdings_report_xlsx"
             existing.source_doc_id = source_doc_id
@@ -171,16 +177,21 @@ def import_holdings_xlsx(
             PortfolioPosition.position_date == report_date,
             PortfolioPosition.instrument_code == isin,
         )).scalars().first()
+        category = pos["category"]
+        if pos.get("instrument_type") == "bond":
+            category = refs.category(isin, category)
         if existing:
             existing.nominal_volume = qty
-            existing.instrument_category = pos["category"]
+            existing.instrument_category = category
             existing.instrument_name = pos.get("instrument_type")
+            existing.notes = "holdings_import"
         else:
             db.add(PortfolioPosition(
                 cdu_id=cdu_id, position_date=report_date,
                 instrument_code=isin, nominal_volume=qty,
-                instrument_category=pos["category"],
+                instrument_category=category,
                 instrument_name=pos.get("instrument_type"),
+                notes="holdings_import",
             ))
         counters["portfolio_positions"] += 1
 
@@ -207,15 +218,8 @@ def _to_float(v: Any) -> Optional[float]:
 
 
 def _guess_bond_category(isin: str) -> str:
-    if isin.startswith(("KFUS", "MFRK", "KZK", "KZKD")):
-        return "GOV_BONDS"
-    if isin.startswith(("EABR", "EAB")):
-        return "AGENCY_BONDS"
-    if isin.startswith("MFO"):
-        return "MFO_BONDS"
-    if isin.startswith(("XS", "US", "RU")):
-        return "FOREIGN_BONDS"
-    return "OTHER"
+    from services.portfolio.reference import category_from_ticker
+    return category_from_ticker(isin, isin) or "OTHER"
 
 
 def _aggregate_cash_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

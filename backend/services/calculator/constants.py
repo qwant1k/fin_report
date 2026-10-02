@@ -1,6 +1,8 @@
 """Domain constants for the portfolio calculator."""
 from __future__ import annotations
 
+import re
+
 from typing import Dict, List
 
 # Order in which categories are shown in the report (matches Excel layout)
@@ -46,9 +48,21 @@ PORTFOLIO_TYPE_PRIVATE_CDU = "PRIVATE_CDU"   # частный доверител
 PORTFOLIO_TYPE_NBRK_OWN = "NBRK_OWN"         # НБ РК собственные активы
 PORTFOLIO_TYPE_NBRK_RESERVE = "NBRK_RESERVE" # НБ РК спецрезерв
 
-# Duration vs benchmark: lower=−0.2, upper=+0.5 (per spec)
-DURATION_LOWER_OFFSET = -0.2
-DURATION_UPPER_OFFSET = 0.5
+# Duration vs benchmark (Risk Report, Report!E18/F18): the corridor is
+# relative — «−0,2» / «+0,5» in the header mean −20 % / +50 % of the MBM
+# duration: lower = benchmark × 0.8, upper = benchmark × 1.5.
+DURATION_LOWER_MULT = 0.8
+DURATION_UPPER_MULT = 1.5
+# kept for backward compatibility of imports (relative offsets)
+DURATION_LOWER_OFFSET = DURATION_LOWER_MULT - 1.0
+DURATION_UPPER_OFFSET = DURATION_UPPER_MULT - 1.0
+
+
+def duration_band(benchmark):
+    """(lower, upper) duration corridor for a benchmark duration, or (None, None)."""
+    if benchmark is None:
+        return None, None
+    return benchmark * DURATION_LOWER_MULT, benchmark * DURATION_UPPER_MULT
 
 # Tolerance for reconciliation (per spec section 8)
 RECON_TOLERANCE_KZT = 0.01    # ±0.01 KZT
@@ -116,29 +130,50 @@ NBRK_PORTFOLIO_MAP: Dict[str, str] = {
 
 # Sub-fund алиасы (как в Risk Report) для ЧДУ → каноническое имя
 CDU_NAME_ALIASES: Dict[str, str] = {
-    # ЧДУ
+    # ЧДУ (латиница, кириллица, юридические названия)
     "halyk finance": "Halyk Finance",
     "halfn": "Halyk Finance",
     "halyk": "Halyk Finance",
+    "hf": "Halyk Finance",
+    "халык финанс": "Halyk Finance",
+    "народного банка казахстана": "Halyk Finance",
     "bcc invest": "BCC Invest",
     "bcc": "BCC Invest",
+    "бцк инвест": "BCC Invest",
+    "kibam": "BCC Invest",
     "jusan invest": "Jusan Invest",
     "jusan": "Jusan Invest",
+    "jysan": "Jusan Invest",
+    "жусан": "Jusan Invest",
     "centras": "Centras Securities",
     "centras securities": "Centras Securities",
     "centr": "Centras Securities",
+    "cesec": "Centras Securities",
     "сентрас": "Centras Securities",  # русская транслитерация в Risk Report
+    "сентрас секьюритиз": "Centras Securities",
     "tansar": "Tansar Capital",
     "tansar capital": "Tansar Capital",
     "тансар": "Tansar Capital",
+    "caifc": "Tansar Capital",
     "alatau": "Alatau City Invest",
     "alatau city invest": "Alatau City Invest",
+    "alatau citi invest": "Alatau City Invest",
     "alatau invest": "Alatau City Invest",
+    "алатау": "Alatau City Invest",
+    "drbes": "Alatau City Invest",
+    "aci": "Alatau City Invest",
     "ud capital": "UD Capital",
     "udcap": "UD Capital",
     "ud": "UD Capital",
+    "юди капитал": "UD Capital",
     # Портфели НБ РК
     "собст": "НБ РК — Собственные активы",
+    "собственные": "НБ РК — Собственные активы",
+    "собственные активы": "НБ РК — Собственные активы",
+    "собственные средства": "НБ РК — Собственные активы",
+    "специальный": "НБ РК — Спецрезерв",
+    "специальный резерв": "НБ РК — Спецрезерв",
+    "спецрезерв": "НБ РК — Спецрезерв",
     "соб": "НБ РК — Собственные активы",
     "own": "НБ РК — Собственные активы",
     "спец": "НБ РК — Спецрезерв",
@@ -149,9 +184,25 @@ CDU_NAME_ALIASES: Dict[str, str] = {
 
 
 def normalize_cdu_name(raw: str | None) -> str | None:
-    """Привести любое представление ЧДУ к каноническому имени из DEFAULT_CDU_SEED."""
+    """Привести любое представление ЧДУ к каноническому имени из DEFAULT_CDU_SEED.
+
+    Понимает юридические названия («АО "Сентрас Секьюритиз"», «АО "Дочерняя
+    организация Народного Банка Казахстана "Halyk Finance"»), кириллицу и коды
+    участников KASE.  Псевдонимы ищутся целыми словами, длинные — первыми,
+    поэтому «ud» не срабатывает внутри «Study», а «сп» — внутри «Сентрас».
+    """
     if not raw:
         return None
+    key = re.sub(r"[«»\"'`“”„.,()]+", " ", str(raw).strip().lower().replace("ё", "е"))
+    key = re.sub(r"\s+", " ", key).strip()
+    if key in CDU_NAME_ALIASES:
+        return CDU_NAME_ALIASES[key]
+    if key in {v.lower() for v in CDU_NAME_ALIASES.values()}:
+        return next(v for v in CDU_NAME_ALIASES.values() if v.lower() == key)
+    for alias in sorted(CDU_NAME_ALIASES, key=len, reverse=True):
+        if re.search(rf"(?<![0-9a-zа-я]){re.escape(alias)}(?![0-9a-zа-я])", key):
+            return CDU_NAME_ALIASES[alias]
+    return None
     key = str(raw).strip().lower()
     if key in CDU_NAME_ALIASES:
         return CDU_NAME_ALIASES[key]

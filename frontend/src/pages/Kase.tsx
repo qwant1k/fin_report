@@ -5,14 +5,10 @@ import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/lib/auth'
+import { useWorkContextStore } from '@/lib/workContext'
 import { KasePrice } from '@/lib/types'
 import { formatDate, formatNumber } from '@/lib/format'
-
-function todayIso() {
-  const d = new Date()
-  d.setMinutes(d.getMinutes() - d.getTimezoneOffset())
-  return d.toISOString().slice(0, 10)
-}
+import KaseRiskPrices from '@/components/KaseRiskPrices'
 
 function toNumberOrNull(value: string): number | null {
   const normalized = value.trim().replace(/\s/g, '').replace(',', '.')
@@ -22,7 +18,11 @@ function toNumberOrNull(value: string): number | null {
 }
 
 export default function KasePage() {
-  const [reportDate, setReportDate] = useState(todayIso())
+  // KASE поддерживает отдельный режим "без фильтра по дате" (пустая строка — показать
+  // все котировки), поэтому дата здесь остаётся локальной, но по умолчанию берётся из
+  // общего рабочего контекста — при обычном открытии страницы дата совпадает с остальным
+  // приложением, а очистка фильтра не трогает общий контекст.
+  const [reportDate, setReportDate] = useState(() => useWorkContextStore.getState().workDate)
   const [query, setQuery] = useState('')
   const [securityType, setSecurityType] = useState('')
   const [unit, setUnit] = useState('')
@@ -37,6 +37,7 @@ export default function KasePage() {
   const [manualDirtyPrice, setManualDirtyPrice] = useState('')
   const [manualYtm, setManualYtm] = useState('')
   const [manualSource, setManualSource] = useState<'external' | 'manual' | 'risk_parameters'>('external')
+  const [tab, setTab] = useState<'market' | 'risk'>('market')
   const qc = useQueryClient()
   const can = useAuthStore((s) => s.can)
 
@@ -54,8 +55,9 @@ export default function KasePage() {
       return (await api.post('/kase/refresh', null, { params: { report_date: reportDate } })).data
     },
     onSuccess: (r) => {
-      toast.success(`Получено: ${r.fetched}, новых записей: ${r.new_rows}`)
+      toast.success(`Рыночные цены: ${r.fetched} (новых ${r.new_rows}); по риск-параметрам: ${r.risk?.fetched ?? 0}`)
       qc.invalidateQueries({ queryKey: ['kase-prices'] })
+      qc.invalidateQueries({ queryKey: ['kase-risk-prices'] })
     },
     onError: (err: any) => {
       toast.error(err?.response?.data?.detail ?? err?.message ?? 'Не удалось загрузить KASE')
@@ -173,8 +175,8 @@ export default function KasePage() {
     <div className="space-y-6">
       <header className="flex items-center justify-between flex-wrap gap-2">
         <div>
-          <h1 className="text-2xl font-bold">KASE котировки</h1>
-          <p className="text-sm text-slate-500">Рыночные цены KASE с сохранением колонок исходной таблицы</p>
+          <h1 className="text-2xl font-bold">Цены KASE</h1>
+          <p className="text-sm text-slate-500">Рыночные цены и цены на основе риск-параметров KASE — с датой и источником каждой цены</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative">
@@ -208,6 +210,16 @@ export default function KasePage() {
         </div>
       </header>
 
+      <div className="flex gap-1 rounded-xl bg-slate-100 p-1 w-fit">
+        {([['market', 'Рыночные цены'], ['risk', 'Цены на основе риск-параметров']] as const).map(([key, label]) => (
+          <button key={key} type="button" onClick={() => setTab(key)}
+            className={`rounded-lg px-4 py-1.5 text-sm font-semibold ${tab === key ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'risk' ? <KaseRiskPrices reportDate={reportDate} /> : <>
       <section className="card p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
@@ -412,6 +424,7 @@ export default function KasePage() {
           </table>
         </div>
       </div>
+      </>}
     </div>
   )
 }

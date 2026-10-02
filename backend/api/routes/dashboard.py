@@ -31,12 +31,13 @@ from models.schemas import (
     CDUBlock,
     DashboardResponse,
 )
+from services.calculator.limit_checker import LimitSpec, check_limit_spec
+from services.calculator.portfolio_calculator import _benchmark_for, _load_limit_specs
 from services.calculator.constants import (
     CATEGORY_LABELS,
     CATEGORY_ORDER,
     DEFAULT_LIMITS,
-    DURATION_LOWER_OFFSET,
-    DURATION_UPPER_OFFSET,
+    duration_band,
 )
 
 
@@ -67,6 +68,7 @@ def dashboard_summary(
         report_date = to_
     if report_date is None:
         report_date = date.today()
+    requested_date = report_date
 
     # As-of dashboard: each CDU can have its own latest available calculated
     # slice. If Halyk was calculated on 10.09 and BCC on 11.09, the main report
@@ -118,10 +120,14 @@ def dashboard_summary(
         positions = db.execute(select(PortfolioPosition).where(
             PortfolioPosition.cdu_id == s.cdu_id,
             PortfolioPosition.position_date == position_date,
+            # category rows only — instrument rows (Holdings import) must not
+            # replace a category total
+            PortfolioPosition.instrument_code.is_(None),
         )).scalars().all()
         pos_by_cat = {p.instrument_category: p for p in positions}
-        limits_q = db.execute(select(CDULimit).where(CDULimit.cdu_id == cdu.id)).scalars().all()
-        limits_map = {l.instrument_category: (l.min_limit_pct, l.max_limit_pct) for l in limits_q}
+        # same limit set as the calculator (version in force on the date) —
+        # statuses are evaluated live, so an edited limit shows at once
+        limit_specs = _load_limit_specs(db, cdu.id, position_date)
 
         report_imported = bool(positions) and all(
             (p.notes == "rr_report_import") for p in positions
@@ -134,7 +140,9 @@ def dashboard_summary(
         rows: List[CategoryRow] = []
         for cat in category_order:
             p = pos_by_cat.get(cat)
-            mn, mx = limits_map.get(cat, DEFAULT_LIMITS.get(cat, (0.0, 1.0)))
+            spec = limit_specs.get(cat) or LimitSpec(*DEFAULT_LIMITS.get(cat, (0.0, 1.0)), *(DEFAULT_LIMITS.get(cat, (0.0, 1.0))[1],) * 2)
+            mn, mx = spec.min_pct, spec.max_pct
+            hard_st, soft_st = check_limit_spec(p.pct_of_total or 0.0, spec) if p else ("ok", "ok")
             rows.append(CategoryRow(
                 category=cat,
                 label=CATEGORY_LABELS[cat],
@@ -146,14 +154,22 @@ def dashboard_summary(
                 duration=p.duration if p else None,
                 min_limit_pct=mn,
                 max_limit_pct=mx,
-                hard_limit=p.hard_limit_status if p else "ok",
-                soft_limit=p.soft_limit_status if p else "ok",
-                free_limit_mln=p.free_limit_mln if p else None,
+                hard_limit=hard_st,
+                soft_limit=soft_st,
+                free_limit_mln=((s.total_mv_current or 0.0) * spec.hard_pct - (p.market_value_current or 0.0)) / 1_000_000.0
+                if p else None,
             ))
-            if p and p.hard_limit_status == "breach":
+            if p and hard_st == "breach":
                 breaches += 1
 
-        bd = s.benchmark_duration
+        # benchmark: MBM ModDuration published for the date (KASE), else the stored one
+        bd = _benchmark_for(db, position_date)
+        if bd is None:
+            bd = s.benchmark_duration
+        dur_status = s.duration_status
+        if bd is not None:
+            lo_b, hi_b = duration_band(bd)
+            dur_status = "ok" if lo_b <= (s.duration_weighted or 0.0) <= hi_b else "breach"
         block = CDUBlock(
             cdu_id=cdu.id,
             cdu_name=cdu.name,
@@ -166,19 +182,33 @@ def dashboard_summary(
             ytm_weighted=s.ytm_weighted,
             duration_weighted=s.duration_weighted,
             benchmark_duration=bd,
-            duration_lower=(bd + DURATION_LOWER_OFFSET) if bd is not None else None,
-            duration_upper=(bd + DURATION_UPPER_OFFSET) if bd is not None else None,
-            duration_status=s.duration_status,
+            duration_lower=duration_band(bd)[0],
+            duration_upper=duration_band(bd)[1],
+            duration_status=dur_status,
             cdu_share_pct=s.cdu_share_pct,
+            as_of_date=s.summary_date,
+            is_stale=s.summary_date < requested_date,
         )
         blocks.append(block)
 
         fund_total += s.total_mv_current
         fund_total_prev += s.total_mv_prev
         fund_change += s.total_daily_change
-        fund_ytm_w += s.ytm_weighted * s.total_mv_current
-        fund_dur_w += s.duration_weighted * s.total_mv_current
-        weight_total += s.total_mv_current
+        # YTM and duration exclude cash and receivables. Weighting a CDU by
+        # its total MV would dilute managers with larger cash balances and
+        # does not reproduce the Risk Report methodology.
+        eligible_categories = {
+            "GOV_BONDS", "REVERSE_REPO", "MFO_BONDS", "AGENCY_BONDS",
+            "FOREIGN_BONDS", "DEPOSIT",
+        }
+        instrument_weight = sum(
+            float(p.market_value_current or 0.0)
+            for p in positions
+            if p.instrument_category in eligible_categories
+        )
+        fund_ytm_w += s.ytm_weighted * instrument_weight
+        fund_dur_w += s.duration_weighted * instrument_weight
+        weight_total += instrument_weight
 
     blocks.sort(key=lambda block: block.total_mv_current, reverse=True)
 
@@ -205,7 +235,7 @@ def dashboard_summary(
         fund_ytm_weighted=(fund_ytm_w / weight_total) if weight_total else 0.0,
         fund_duration_weighted=(fund_dur_w / weight_total) if weight_total else 0.0,
         benchmark_ytm=mbm.ytm_value if mbm else None,
-        benchmark_duration=mbm.duration if mbm else None,
+        benchmark_duration=((mbm.mod_duration if mbm.mod_duration is not None else mbm.duration) if mbm else None),
         breaches_count=breaches,
         pending_approvals_count=pending_approvals_count,
         flagged_prices_count=flagged_prices_count,
@@ -282,6 +312,40 @@ def instrument_details(
         if last_date and (row["last_date"] is None or last_date > row["last_date"]):
             row["last_date"] = last_date
         row["operations"] += operations
+
+    # Preferred path: the same portfolio engine that produced the category
+    # totals (Risk Report slice rolled forward + revalued on ``to_``), so the
+    # drill-down always sums up to the dashboard row.
+    if category not in ("CASH", "RECEIVABLES"):
+        from services.portfolio.engine import build_portfolio
+        state = build_portfolio(db, cdu_id, to_)
+        if category in ("REVERSE_REPO", "DEPOSIT"):
+            items = state.repos if category == "REVERSE_REPO" else state.deposits
+            for m in items:
+                acc(
+                    (m.deal_id or m.identifier or category) if category == "REVERSE_REPO"
+                    else (m.identifier or m.deal_id or category),
+                    isin=m.collateral if category == "REVERSE_REPO" else None,
+                    name=("Обратное REPO" if category == "REVERSE_REPO" else "Депозит")
+                    + (f" {m.collateral}" if m.collateral else "")
+                    + (f" до {m.close_date:%d.%m.%Y}" if m.close_date else ""),
+                    quantity=m.quantity if m.quantity else m.open_amount, face_value=m.open_amount,
+                    amount=m.market_value, ytm=m.ytm, duration=m.duration,
+                    first_date=m.open_date, last_date=m.close_date or to_, operations=0,
+                )
+        else:
+            for b in state.bonds:
+                if b.category != category:
+                    continue
+                acc(
+                    b.ticker or b.isin, isin=b.isin, name=None,
+                    quantity=(b.face_value / b.unit_nominal) if b.unit_nominal else b.face_value,
+                    face_value=b.face_value,
+                    amount=b.total_value_kzt, ytm=b.ytm, duration=b.duration,
+                    first_date=b.trade_date, last_date=to_, operations=0,
+                )
+        if details:
+            return _details_response(details, cdu_id, category, from_, to_)
 
     position_rows_found = False
     trade_rows_found = False
@@ -368,7 +432,7 @@ def instrument_details(
                     name=lot.notes,
                     quantity=qty,
                     face_value=lot.face_value_current,
-                    amount=lot.market_value or lot.total_value or lot.face_value_current,
+                    amount=lot.total_value or lot.market_value or lot.face_value_current,
                     ytm=lot.ytm,
                     duration=lot.duration,
                     first_date=lot.trade_date,
@@ -483,7 +547,7 @@ def instrument_details(
                 name=lot.notes,
                 quantity=qty,
                 face_value=lot.face_value_current,
-                amount=lot.market_value or lot.total_value or lot.face_value_current,
+                amount=lot.total_value or lot.market_value or lot.face_value_current,
                 ytm=lot.ytm,
                 duration=lot.duration,
                 first_date=lot.trade_date,
@@ -491,6 +555,10 @@ def instrument_details(
                 operations=0,
             )
 
+    return _details_response(details, cdu_id, category, from_, to_)
+
+
+def _details_response(details: dict, cdu_id: int, category: str, from_: date, to_: date) -> dict:
     out = []
     for row in details.values():
         if (

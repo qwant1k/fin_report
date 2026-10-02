@@ -1,0 +1,109 @@
+// Пример интеграции DayProcessTimeline в Workday.tsx.
+// Не является частью сборки (.example) — иллюстрация того, как замапить
+// существующий ответ /workday/summary на модель шагов.
+
+import { UploadCloud, FileSearch, GitCompare, ShieldAlert, FileText } from 'lucide-react'
+import type { DayProcessStep, StepStatus } from './DayProcessTimeline'
+
+// Предполагаемое расширение WorkdaySummary на бэкенде:
+// reconciliation: { checked: boolean; mismatches: number }
+// breaches: { total: number; unresolved: number }
+interface WorkdaySummaryExt {
+  active_cdus: number
+  loaded_cdus: number
+  ready_cdus: number
+  cdus: { status: 'ready' | 'loaded' | 'missing' }[]
+  reconciliation?: { checked: boolean; mismatches: number }
+  breaches?: { total: number; unresolved: number }
+  reports: { status: string }[]
+}
+
+export function buildDaySteps(
+  data: WorkdaySummaryExt | undefined,
+  actions: {
+    goUpload: () => void
+    goReconciliation: () => void
+    goAlerts: () => void
+    recalc: () => void
+    exportReport: () => void
+  },
+): DayProcessStep[] {
+  if (!data) return []
+
+  const missing = data.cdus.filter((c) => c.status === 'missing').length
+  const uploadStatus: StepStatus = missing === 0 ? 'done' : data.loaded_cdus > 0 ? 'in_progress' : 'pending'
+
+  const parsingStatus: StepStatus = data.loaded_cdus === data.active_cdus ? 'done' : 'in_progress'
+
+  const reconciliationStatus: StepStatus = !data.reconciliation
+    ? 'blocked'
+    : data.reconciliation.mismatches > 0
+      ? 'error'
+      : data.reconciliation.checked
+        ? 'done'
+        : 'pending'
+
+  const alertsStatus: StepStatus = !data.breaches
+    ? 'blocked'
+    : data.breaches.unresolved > 0
+      ? 'error'
+      : data.breaches.total > 0
+        ? 'warning'
+        : 'done'
+
+  const reportReady = reconciliationStatus === 'done' && (alertsStatus === 'done' || alertsStatus === 'warning')
+  const reportsStatus: StepStatus = data.reports.some((r) => r.status === 'approved')
+    ? 'done'
+    : !reportReady
+      ? 'blocked'
+      : data.reports.length > 0
+        ? 'in_progress'
+        : 'pending'
+
+  return [
+    {
+      id: 'upload',
+      title: 'Загрузка',
+      icon: UploadCloud,
+      status: uploadStatus,
+      meta: `${data.loaded_cdus}/${data.active_cdus} ЧДУ загружено`,
+      action: uploadStatus !== 'done' ? { label: 'Загрузить документы', onClick: actions.goUpload } : undefined,
+    },
+    {
+      id: 'parsing',
+      title: 'Парсинг',
+      icon: FileSearch,
+      status: parsingStatus,
+      meta: 'KASE/MBM обновляются по расписанию',
+    },
+    {
+      id: 'reconciliation',
+      title: 'Сверка',
+      icon: GitCompare,
+      status: reconciliationStatus,
+      issuesCount: data.reconciliation?.mismatches,
+      blockedReason: reconciliationStatus === 'blocked' ? 'Дождитесь завершения парсинга по всем ЧДУ' : undefined,
+      action:
+        reconciliationStatus !== 'blocked'
+          ? { label: reconciliationStatus === 'error' ? 'Разобрать расхождения' : 'Запустить сверку', onClick: actions.goReconciliation }
+          : undefined,
+    },
+    {
+      id: 'alerts',
+      title: 'Алерты / лимиты',
+      icon: ShieldAlert,
+      status: alertsStatus,
+      issuesCount: data.breaches?.unresolved,
+      blockedReason: alertsStatus === 'blocked' ? 'Недоступно до завершения сверки' : undefined,
+      action: alertsStatus === 'error' ? { label: 'Просмотреть нарушения', onClick: actions.goAlerts } : undefined,
+    },
+    {
+      id: 'report',
+      title: 'Генерация отчёта',
+      icon: FileText,
+      status: reportsStatus,
+      blockedReason: reportsStatus === 'blocked' ? 'Сначала закройте сверку и критические нарушения' : undefined,
+      action: reportReady ? { label: 'Сформировать отчёт', onClick: actions.exportReport } : undefined,
+    },
+  ]
+}

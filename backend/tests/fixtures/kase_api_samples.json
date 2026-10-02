@@ -1,0 +1,72 @@
+{
+  "coupon-payments/MUM108_0013": [
+    {"fixation_date": null, "start_date": "2021-03-31", "end_date": "2021-03-31", "rate": 11, "index_rate": null, "total_rate": 11},
+    {"fixation_date": null, "start_date": "2022-03-31", "end_date": "2022-03-31", "rate": 11, "index_rate": null, "total_rate": 11},
+    {"fixation_date": null, "start_date": "2023-03-31", "end_date": "2023-03-31", "rate": 11, "index_rate": null, "total_rate": 11},
+    {"fixation_date": null, "start_date": "2024-03-31", "end_date": "2024-04-01", "rate": 11, "index_rate": null, "total_rate": 11},
+    {"fixation_date": null, "start_date": "2025-03-31", "end_date": "2025-03-31", "rate": 11, "index_rate": null, "total_rate": 11},
+    {"fixation_date": null, "start_date": "2026-03-31", "end_date": "2026-03-31", "rate": 11, "index_rate": null, "total_rate": 11},
+    {"fixation_date": null, "start_date": "2027-03-31", "end_date": "2027-03-31", "rate": 11, "index_rate": null, "total_rate": 11},
+    {"fixation_date": null, "start_date": "2028-03-31", "end_date": "2028-03-31", "rate": 11, "index_rate": null, "total_rate": 11},
+    {"fixation_date": null, "start_date": "2029-03-31", "end_date": "2029-03-31", "rate": 11, "index_rate": null, "total_rate": 11}
+  ],
+  "coupon-payments/KFUSb46": [
+    {"fixation_date": "2023-05-24", "start_date": "2023-05-25", "end_date": "2023-06-08", "rate": 2.4, "index_rate": 16.97, "total_rate": 19.37},
+    {"fixation_date": "2023-11-24", "start_date": "2023-11-25", "end_date": "2023-12-09", "rate": 2.4, "index_rate": 17.35, "total_rate": 19.75},
+    {"fixation_date": "2024-05-24", "start_date": "2024-05-25", "end_date": "2024-06-08", "rate": 2.4, "index_rate": 14.96, "total_rate": 17.36},
+    {"fixation_date": "2024-11-24", "start_date": "2024-11-25", "end_date": "2024-12-09", "rate": 2.4, "index_rate": 13.91, "total_rate": 16.31},
+    {"fixation_date": "2025-05-24", "start_date": "2025-05-25", "end_date": "2025-06-08", "rate": 2.4, "index_rate": 15.72, "total_rate": 18.12},
+    {"fixation_date": "2025-11-24", "start_date": "2025-11-25", "end_date": "2025-12-09", "rate": 2.4, "index_rate": 16.55, "total_rate": 18.95},
+    {"fixation_date": "2026-05-24", "start_date": "2026-05-25", "end_date": "2026-06-08", "rate": 2.4, "index_rate": 18.26, "total_rate": 20.66},
+    {"fixation_date": "2026-11-24", "start_date": "2026-11-25", "end_date": "2026-12-09", "rate": 2.4, "index_rate": 17.1, "total_rate": 19.5},
+    {"fixation_date": "2027-05-24", "start_date": "2027-05-25", "end_date": "2027-06-08", "rate": 2.4, "index_rate": 17.1, "total_rate": 19.5},
+    {"fixation_date": "2027-11-24", "start_date": "2027-11-25", "end_date": "2027-12-09", "rate": 2.4, "index_rate": 17.1, "total_rate": 19.5}
+  ],
+  "coupon-payments/NTK092_2889": [],
+  "gsecs/MUM108_0013/characteristics": {
+    "478": {"label": "Наименование облигации", "value": "купонные МЕУКАМ"},
+    "479": {"label": "Валюта выпуска и обслуживания", "value": "KZT"},
+    "482": {"label": "Номинальная стоимость в валюте выпуска", "value": "1 000,00"},
+    "541": {"label": "Текущая купонная ставка, % годовых", "value": "11,000"},
+    "552": {"label": "Расчетный базис (дней в месяце / дней в году)", "value": "30/360"},
+    "554": {"label": "Дата начала обращения", "value": "31.03.20"},
+    "561": {"label": "Дата погашения", "value": "31.03.29"},
+    "575": {"label": "Код бумаги", "value": "MUM108_0013"},
+    "581": {"label": "Предмет котирования", "value": "чистая цена"},
+    "848": {"label": "ISIN", "value": "KZKD00001087"},
+    "coupon_prev_date": {"label": "Дата предыдущей купонной выплаты", "value": "31.03.26"},
+    "coupon_near_pay_date": {"label": "Дата ближайшей купонной выплаты", "value": "31.03.27"}
+  },
+  "bonds/KFUSb46/characteristics": {
+    "478": {"label": "Наименование облигации", "value": "индексированные купонные облигации"},
+    "479": {"label": "Валюта выпуска и обслуживания", "value": "KZT"},
+    "482": {"label": "Номинальная стоимость в валюте выпуска", "value": "1 000,00"},
+    "485": {"label": "ISIN", "value": "KZ2C00008928"},
+    "529": {"label": "Вид купонной ставки", "value": "плавающая"},
+    "541": {"label": "Последняя купонная ставка, % годовых (фиксированная маржа + индекс)", "value": "2,400 + 17,100"},
+    "552": {"label": "Расчетный базис (дней в месяце / дней в году)", "value": "actual/365"},
+    "554": {"label": "Дата начала обращения", "value": "25.11.22"},
+    "560": {"label": "Дата фиксации реестра при погашении", "value": "24.11.27"},
+    "561": {"label": "Период погашения", "value": "25.11.27&ndash;09.12.27"},
+    "575": {"label": "Код бумаги", "value": "KFUSb46"},
+    "848": {"label": "ISIN", "value": "KZ2C00008928"},
+    "coupon_prev_date": {"label": "Дата предыдущей купонной выплаты", "value": "25.05.26"},
+    "coupon_near_pay_date": {"label": "Период ближайшей купонной выплаты", "value": "25.11.26 &ndash; 09.12.26"}
+  },
+  "gsecs/NTK092_2889/characteristics": {
+    "478": {"label": "Наименование облигации", "value": "дисконтные ноты"},
+    "479": {"label": "Валюта выпуска и обслуживания", "value": "KZT"},
+    "482": {"label": "Номинальная стоимость в валюте выпуска", "value": "100,00"},
+    "485": {"label": "ISIN", "value": "KZW100014551"},
+    "552": {"label": "Расчетный базис (дней в месяце / дней в году)", "value": "actual/365"},
+    "554": {"label": "Дата начала обращения", "value": "16.09.26"},
+    "557": {"label": "Срок обращения, дней", "value": "92"},
+    "561": {"label": "Дата погашения", "value": "17.12.26"},
+    "575": {"label": "Код бумаги", "value": "NTK092_2889"},
+    "848": {"label": "ISIN", "value": "KZW100014551"}
+  },
+  "securities/MUM108_0013": {"code": "MUM108_0013", "sec_type": "gsec", "org_name_ru": "Министерство финансов Республики Казахстан", "currency_type": "KZT", "ticker": {"nin": "KZKD00001087"}},
+  "securities/KFUSb46": {"code": "KFUSb46", "sec_type": "bond", "org_name_ru": "АО \"Казахстанский фонд устойчивости\"", "currency_type": "KZT", "ticker": {"nin": "KZ2C00008928"}},
+  "securities/NTK092_2889": {"code": "NTK092_2889", "sec_type": "gsec", "org_name_ru": "ГУ \"Национальный Банк Республики Казахстан\"", "currency_type": "KZT", "ticker": {"nin": "KZW100014551"}},
+  "securities?search=KZKD00001087": [{"code": "MUM108_0013", "sec_type": "gsec", "ticker": {"nin": "KZKD00001087"}}]
+}

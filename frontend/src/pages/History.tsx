@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Download, Calendar } from 'lucide-react'
 
 import { api } from '@/lib/api'
+import { downloadBlob, filenameFromPath } from '@/lib/download'
 import { formatDate, formatNumber, formatPct } from '@/lib/format'
 
 interface Row {
@@ -25,6 +26,11 @@ export default function HistoryPage() {
     queryKey: ['reports'],
     queryFn: async () => (await api.get('/reports/')).data,
   })
+
+  const handleDownloadReport = async (report: any) => {
+    const resp = await api.get(`/reports/${report.id}/download`, { responseType: 'blob' })
+    downloadBlob(resp.data, filenameFromPath(report.file_path, `report_${report.id}`))
+  }
 
   return (
     <div className="space-y-6">
@@ -99,9 +105,9 @@ export default function HistoryPage() {
                   <td>{formatDate(r.generated_at)}</td>
                   <td className="text-xs text-slate-500">{r.file_path}</td>
                   <td>
-                    <a href={`/api/reports/${r.id}/download`} className="btn-secondary px-2 py-1">
+                    <button type="button" onClick={() => { void handleDownloadReport(r) }} className="btn-secondary px-2 py-1">
                       <Download className="w-4 h-4" />
-                    </a>
+                    </button>
                   </td>
                 </tr>
               ))}

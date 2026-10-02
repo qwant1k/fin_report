@@ -77,6 +77,7 @@ from models.db_models import (
 
 # Trade operations that increase/decrease the net position. Anything outside
 # these sets contributes only to metadata (name, category, etc.).
+_BOND_CATEGORIES = {"GOV_BONDS", "AGENCY_BONDS", "MFO_BONDS", "FOREIGN_BONDS"}
 _QTY_IN = {"BUY", "REPO_OPEN"}
 _QTY_OUT = {"SELL", "REPO_CLOSE", "REDEMPTION"}
 _EPS = 1e-9
@@ -265,7 +266,10 @@ def _aggregate_positions(
     baseline_dates = _latest_baseline_dates(db, cdu_id, source_doc_types)
     positions = _load_baseline_positions(db, cdu_id, baseline_dates, source_doc_types)
 
-    stmt = select(Trade).where(Trade.is_active == True)  # noqa: E712
+    stmt = select(Trade).where(
+        Trade.is_active == True,  # noqa: E712
+        Trade.workflow_status.in_(("APPROVED", "PENDING_CANCELLATION")),
+    )
     if cdu_id is not None:
         stmt = stmt.where(Trade.cdu_id == cdu_id)
     stmt = stmt.order_by(Trade.value_date.asc(), Trade.trade_date.asc(), Trade.id.asc())
@@ -289,7 +293,13 @@ def _aggregate_positions(
         if t.isin:
             pos["has_real_isin"] = True
 
-        qty = float(t.quantity or 0)
+        # Units: Risk Report lots are kept in face value (номинал, KZT), so
+        # bond trades must be counted in face value too — «Кол-во бумаг» from
+        # a Trade Report is a number of securities and would mix units.
+        is_bond = (t.instrument_category or "") in _BOND_CATEGORIES or t.operation_type in ("BUY", "SELL", "REDEMPTION")
+        qty = float((t.face_value if (is_bond and t.face_value) else t.quantity) or 0)
+        if is_bond and (t.instrument_category or "") != "REVERSE_REPO":
+            pos["price_is_pct"] = True
         signed_qty = 0.0
         if qty and t.operation_type in _QTY_IN:
             signed_qty = qty

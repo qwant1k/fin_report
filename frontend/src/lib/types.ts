@@ -30,6 +30,10 @@ export interface CDUBlock {
   duration_upper: number | null
   duration_status: string | null
   cdu_share_pct: number
+  /** date of the slice shown for this manager */
+  as_of_date?: string | null
+  /** true when the slice is older than the requested report date */
+  is_stale?: boolean
 }
 
 export interface DashboardResponse {

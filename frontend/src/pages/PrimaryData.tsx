@@ -12,23 +12,35 @@ interface SourceDoc {
   imported_at: string
   imported_by: string | null
   source_cdu: string | null
+  doc_date?: string | null
 }
 
+interface CduOption {
+  id: number
+  name: string
+  short_name?: string
+}
+
+// Реальные коды, которые хранит backend (см. api/routes/primary_data_routes.py::_to_doc_type
+// и Workday.tsx::DOC_LABEL) — раньше здесь были lowercase-ключи, которые никогда не совпадали
+// с приходящими от API значениями, поэтому тип документа всегда показывался как "неизвестно".
 const FILE_TYPE_LABELS: Record<string, string> = {
-  trade_report: 'Trade Report',
-  holdings: 'Holdings',
-  reconciliation: 'Сверка',
-  exchange_certificate: 'Биржевое свидетельство',
-  pdf_statement: 'Выписка PDF',
-  unknown: 'Неизвестно',
+  TRADE_REPORT: 'Trade Report',
+  HOLDINGS: 'Holdings',
+  RECONCILIATION: 'Сверка',
+  CERTIFICATE: 'Биржевое свидетельство',
+  STATEMENT_PDF: 'Выписка PDF',
+  RISK_REPORT_XLSM: 'Risk Report',
+  OTHER: 'Прочее',
 }
 
 const FILE_TYPE_ICONS: Record<string, ReactNode> = {
-  trade_report: <FileSpreadsheet className="w-4 h-4 text-emerald-600" />,
-  holdings: <FileSpreadsheet className="w-4 h-4 text-blue-600" />,
-  reconciliation: <FileText className="w-4 h-4 text-amber-600" />,
-  exchange_certificate: <FileText className="w-4 h-4 text-purple-600" />,
-  pdf_statement: <FileText className="w-4 h-4 text-red-600" />,
+  TRADE_REPORT: <FileSpreadsheet className="w-4 h-4 text-emerald-600" />,
+  HOLDINGS: <FileSpreadsheet className="w-4 h-4 text-blue-600" />,
+  RECONCILIATION: <FileText className="w-4 h-4 text-amber-600" />,
+  CERTIFICATE: <FileText className="w-4 h-4 text-purple-600" />,
+  STATEMENT_PDF: <FileText className="w-4 h-4 text-red-600" />,
+  RISK_REPORT_XLSM: <FileText className="w-4 h-4 text-emerald-600" />,
 }
 
 export default function PrimaryDataPage() {
@@ -39,7 +51,26 @@ export default function PrimaryDataPage() {
   const [error, setError] = useState<string | null>(null)
   const [docs, setDocs] = useState<SourceDoc[]>([])
   const [docsLoading, setDocsLoading] = useState(false)
+  const [cdus, setCdus] = useState<CduOption[]>([])
+  const [uploadCdu, setUploadCdu] = useState<string>('')
+  const [uploadDate, setUploadDate] = useState<string>('')
   const canUpload = useAuthStore((s) => s.can('primary_data.upload'))
+
+  useEffect(() => {
+    api.get('/settings/cdus').then((r) => setCdus(r.data)).catch(() => {})
+  }, [])
+
+  // Statements name the fund (КФГД) as the client, not the manager: the first
+  // statement of an account has to be bound to a manager once by hand.
+  const bindDocument = async (docId: number, cduId: string) => {
+    if (!cduId) return
+    try {
+      await api.put(`/primary-data/documents/${docId}`, { cdu_id: Number(cduId) })
+      fetchDocs()
+    } catch {
+      // toast is shown by the api interceptor
+    }
+  }
 
   const fetchDocs = async () => {
     setDocsLoading(true)
@@ -77,6 +108,8 @@ export default function PrimaryDataPage() {
     setResult(null)
     const form = new FormData()
     form.append('file', file)
+    if (uploadCdu) form.append('cdu_id', uploadCdu)
+    if (uploadDate) form.append('doc_date', uploadDate)
     try {
       const res = await api.post('/primary-data/upload', form, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -92,9 +125,8 @@ export default function PrimaryDataPage() {
   }
 
   const statusColor = (s: string) => {
-    if (s === 'completed') return 'text-emerald-600 bg-emerald-50 border-emerald-200'
-    if (s === 'error') return 'text-red-600 bg-red-50 border-red-200'
-    if (s === 'skipped') return 'text-slate-600 bg-slate-50 border-slate-200'
+    if (s === 'OK') return 'text-emerald-600 bg-emerald-50 border-emerald-200'
+    if (s === 'ERROR') return 'text-red-600 bg-red-50 border-red-200'
     return 'text-amber-600 bg-amber-50 border-amber-200'
   }
 
@@ -141,7 +173,7 @@ export default function PrimaryDataPage() {
             Перетащите файл сюда или <span className="text-emerald-700 font-medium">нажмите для выбора</span>
           </p>
           <p className="text-xs text-slate-400 mt-1">
-            Trade Report XLSX, Holdings, Сверка, Биржевые свидетельства (PDF/PNG/DOCX), Выписки PDF
+            Trade Report XLSX, Holdings, Сверка, Биржевые свидетельства (PDF/PNG/DOCX), Выписки PDF, файлы НБ РК КФГД_ГГГГММДД (CSV)
           </p>
           <input
             type="file"
@@ -161,9 +193,29 @@ export default function PrimaryDataPage() {
                 <div className="text-xs text-slate-500">{formatSize(file.size)}</div>
               </div>
             </div>
-            <button onClick={handleUpload} disabled={loading} className="btn btn-primary">
-              {loading ? 'Импорт…' : 'Импортировать'}
-            </button>
+            <div className="flex items-center gap-2">
+              <select
+                value={uploadCdu}
+                onChange={(e) => setUploadCdu(e.target.value)}
+                className="input text-sm"
+                title="Необязательно: ЧДУ определяется автоматически по содержимому"
+              >
+                <option value="">ЧДУ — авто</option>
+                {cdus.map((c) => (
+                  <option key={c.id} value={c.id}>{c.short_name || c.name}</option>
+                ))}
+              </select>
+              <input
+                type="date"
+                value={uploadDate}
+                onChange={(e) => setUploadDate(e.target.value)}
+                className="input text-sm"
+                title="Необязательно: дата документа (по умолчанию — из содержимого)"
+              />
+              <button onClick={handleUpload} disabled={loading} className="btn btn-primary">
+                {loading ? 'Импорт…' : 'Импортировать'}
+              </button>
+            </div>
           </div>
         )}
 
@@ -175,10 +227,20 @@ export default function PrimaryDataPage() {
         )}
 
         {result && (
-          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-1">
-            <div className="flex items-center gap-2 text-emerald-700 font-semibold text-sm">
-              <CheckCircle className="w-4 h-4" />
-              {result.status === 'skipped' ? 'Пропущено (дубликат)' : 'Импорт завершён'}
+          // backend отвечает HTTP 200 даже при ошибке импорта, со status="FAILED" в теле —
+          // без этой проверки неудачный импорт выглядел бы как успешный (зелёный блок).
+          <div
+            className={`rounded-lg border p-3 space-y-1 ${
+              result.status === 'FAILED' ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50'
+            }`}
+          >
+            <div
+              className={`flex items-center gap-2 font-semibold text-sm ${
+                result.status === 'FAILED' ? 'text-red-700' : 'text-emerald-700'
+              }`}
+            >
+              {result.status === 'FAILED' ? <AlertTriangle className="w-4 h-4" /> : <CheckCircle className="w-4 h-4" />}
+              {result.status === 'FAILED' ? 'Импорт не выполнен' : result.status === 'SKIPPED' ? 'Пропущено (дубликат)' : 'Импорт завершён'}
             </div>
             <div className="text-xs text-slate-600">{result.message}</div>
           </div>
@@ -210,6 +272,7 @@ export default function PrimaryDataPage() {
                 <th className="px-4 py-2 text-left text-slate-600 font-medium">Тип</th>
                 <th className="px-4 py-2 text-left text-slate-600 font-medium">Статус</th>
                 <th className="px-4 py-2 text-left text-slate-600 font-medium">ЧДУ</th>
+                <th className="px-4 py-2 text-left text-slate-600 font-medium">Дата док.</th>
                 <th className="px-4 py-2 text-right text-slate-600 font-medium">Размер</th>
                 <th className="px-4 py-2 text-left text-slate-600 font-medium">Загружен</th>
               </tr>
@@ -237,9 +300,24 @@ export default function PrimaryDataPage() {
                         <Building2 className="w-3 h-3" />
                         {d.source_cdu}
                       </span>
+                    ) : canUpload ? (
+                      <select
+                        defaultValue=""
+                        onChange={(e) => bindDocument(d.id, e.target.value)}
+                        className="input text-xs py-0.5"
+                        title="Привязать документ к ЧДУ"
+                      >
+                        <option value="">— привязать —</option>
+                        {cdus.map((c) => (
+                          <option key={c.id} value={c.id}>{c.short_name || c.name}</option>
+                        ))}
+                      </select>
                     ) : (
                       <span className="text-slate-400">—</span>
                     )}
+                  </td>
+                  <td className="px-4 py-2 text-slate-600 text-xs">
+                    {d.doc_date ? new Date(d.doc_date).toLocaleDateString('ru-RU') : '—'}
                   </td>
                   <td className="px-4 py-2 text-right text-slate-600 text-xs">{formatSize(d.file_size)}</td>
                   <td className="px-4 py-2 text-slate-600 text-xs">{formatDate(d.imported_at)}</td>

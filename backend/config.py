@@ -8,9 +8,16 @@ from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_BACKEND_DIR = Path(__file__).resolve().parent
+
+
 class Settings(BaseSettings):
+    # ``.env`` is looked up both in the project root (where .env.example and
+    # docker-compose expect it) and in backend/ (current working directory of
+    # «uvicorn main:app»); the later file wins.  Previously only ./.env was
+    # read, so running from backend/ silently used the insecure defaults.
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(str(_BACKEND_DIR.parent / ".env"), str(_BACKEND_DIR / ".env"), ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -22,6 +29,7 @@ class Settings(BaseSettings):
     app_port: int = 8000
     app_tz: str = "Asia/Almaty"
     secret_key: str = "change-me-please-32chars-min-1234567890"
+    initial_data_mode: str = "full"
 
     # Database
     database_url: str = "sqlite:///./data/fund_reporting.db"
@@ -36,7 +44,15 @@ class Settings(BaseSettings):
     kase_bonds_url: str = "https://kase.kz/ru/markets/markets-valuation/market-prices"
     kase_repo_url: str = "https://kase.kz/ru/repo/"
     kase_indices_url: str = "https://kase.kz/ru/indices/"
+    kase_risk_params_url: str = "https://kase.kz/ru/app-gateway/documents/risk"
     kase_cache_ttl_seconds: int = 1800
+    # KASE public JSON API used by kase.kz itself (Angular SSR):
+    #   /api/instruments/coupon-payments/{code}
+    #   /api/instruments/{gsecs|bonds}/{code}/characteristics
+    #   /api/instruments/securities/{code} · /api/instruments/securities?search={isin}
+    kase_api_base_url: str = "https://kase.kz/api"
+    # refresh coupon schedules of held instruments with the daily KASE job
+    kase_coupon_refresh_daily: bool = True
 
     # Price reconciliation tolerance vs KASE (fraction, 0.0001 = 0.01% = 1 bp).
     # If |price_cdu - price_kase| / price_kase > tolerance, Trade.price_flag is
@@ -68,10 +84,20 @@ class Settings(BaseSettings):
 
     # CORS
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    cors_origin_regex: str = ""
 
     @property
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def cors_origin_regex_value(self) -> str | None:
+        explicit = self.cors_origin_regex.strip()
+        if explicit:
+            return explicit
+        if self.app_env == "development":
+            return r"https?://(localhost|127\.0\.0\.1):\d+"
+        return None
 
     @property
     def upload_path(self) -> Path:
@@ -93,3 +119,14 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+_INSECURE_DEFAULTS = {
+    "jwt_secret": "please-change-me-jwt-secret-32-chars",
+    "secret_key": "change-me-please-32chars-min-1234567890",
+    "admin_password": "admin",
+}
+
+
+def insecure_settings() -> List[str]:
+    """Names of security settings still equal to the published defaults."""
+    return [name for name, value in _INSECURE_DEFAULTS.items() if getattr(settings, name) == value]

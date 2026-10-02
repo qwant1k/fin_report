@@ -15,14 +15,14 @@ from sqlalchemy.orm import Session
 from auth import require_permission, require_user
 from config import settings
 from database import get_db
-from models.db_models import CDU, CDUFileFormat, RawTrade, SourceDocument, Trade, TradeFile, User
+from models.db_models import CashMovement, CDU, SourceDocument, Trade, TradeFile, User
 from models.schemas import TradeFileBrief, UploadResponse
 from services.audit import write_audit
 from services.calculator.constants import normalize_cdu_name
 from services.kase import apply_kase_prices_to_trades
 from services.holdings_sync import sync_holdings
-from services.parser import TradeReportParser
 from services.parser.trade_importer import import_trades_from_parsed
+from services.parser.trade_ingest import ingest_trade_report, parse_with_cdu_overrides, resolve_cdu
 
 router = APIRouter(
     prefix="/api/upload",
@@ -40,23 +40,34 @@ def _safe_unlink(path: Path) -> None:
         logger.warning(f"Could not unlink temp upload {path}")
 
 
-def _resolve_cdu(
-    db: Session,
-    *,
-    cdu_id: Optional[int] = None,
-    cdu_prefix: Optional[str] = None,
-    cdu_name: Optional[str] = None,
-) -> Optional[CDU]:
-    if cdu_id:
-        return db.get(CDU, cdu_id)
-    if cdu_prefix:
-        cdu = db.query(CDU).filter_by(participant_code_prefix=cdu_prefix).first()
-        if cdu:
-            return cdu
-    canonical = normalize_cdu_name(cdu_name)
-    if canonical:
-        return db.query(CDU).filter_by(name=canonical).first()
-    return None
+def _resolve_cdu(db: Session, **kwargs) -> Optional[CDU]:
+    return resolve_cdu(db, **kwargs)
+
+
+def _deactivate_file_trades(db: Session, tf: TradeFile) -> None:
+    """Deactivate ledger rows (and their cash legs) imported from ``tf``."""
+    doc_ids = [
+        d.id for d in db.query(SourceDocument).filter_by(doc_type="TRADE_REPORT", sha256=tf.sha256).all()
+    ] if tf.sha256 else []
+    if not doc_ids:
+        return
+    trade_ids = [t.id for t in db.query(Trade).filter(
+        Trade.source_doc_id.in_(doc_ids),
+        Trade.is_manual == False,  # noqa: E712
+        Trade.is_active == True,  # noqa: E712
+    ).all()]
+    if not trade_ids:
+        return
+    db.execute(
+        sa_update(Trade).where(Trade.id.in_(trade_ids))
+        .values(is_active=False, updated_at=datetime.utcnow())
+    )
+    db.execute(
+        sa_update(CashMovement).where(
+            CashMovement.related_trade_id.in_(trade_ids),
+            CashMovement.is_manual == False,  # noqa: E712
+        ).values(is_active=False)
+    )
 
 
 @router.post("/trade-report", response_model=UploadResponse)
@@ -132,16 +143,7 @@ async def upload_trade_report(
         if on_duplicate == "replace":
             # Soft-deactivate previous Trade rows so calculations re-build
             # cleanly from the new upload.
-            if duplicate.cdu_id and duplicate.trade_date:
-                db.execute(
-                    sa_update(Trade)
-                    .where(
-                        Trade.cdu_id == duplicate.cdu_id,
-                        Trade.trade_date == duplicate.trade_date,
-                        Trade.is_active == True,
-                    )
-                    .values(is_active=False, updated_at=datetime.utcnow())
-                )
+            _deactivate_file_trades(db, duplicate)
             # Wipe the previous on-disk file and related SourceDocument(s).
             try:
                 if duplicate.raw_file_path:
@@ -161,21 +163,7 @@ async def upload_trade_report(
             )
         # on "new_version" we simply continue — both files coexist.
 
-    # ── identify CDU ──
-    cdu = _resolve_cdu(
-        db,
-        cdu_id=cdu_id,
-        cdu_prefix=parsed.cdu_prefix,
-        cdu_name=parsed.cdu_name,
-    )
-
-    if cdu is None:
-        parsed.warnings.append("Не удалось определить ЧДУ автоматически — выберите его вручную.")
-
-    if cdu is not None and not parsed.cdu_name:
-        parsed.cdu_name = cdu.name
-
-    parsed_date: Optional[date] = parsed.trade_date
+    parsed_date: Optional[date] = None
     if trade_date:
         try:
             parsed_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
@@ -183,151 +171,34 @@ async def upload_trade_report(
             _safe_unlink(target_path)
             raise HTTPException(400, "trade_date должен быть в формате YYYY-MM-DD")
 
-    if not parsed_date:
-        parsed.warnings.append("Не удалось определить дату — задайте её явно.")
-        parsed_date = date.today()
-
-    # ── persist (single transaction) ──
-    tf = TradeFile(
-        cdu_id=cdu.id if cdu else None,
-        trade_date=parsed_date,
-        filename=file.filename,
-        raw_file_path=str(target_path),
-        status="PARSED",
-        rows_parsed=parsed.rows_parsed,
-        rows_skipped=parsed.rows_skipped,
-        parse_errors_json=json.dumps(
-            {"warnings": parsed.warnings, "skipped": parsed.skipped[:50]},
-            ensure_ascii=False,
-        ),
-        sha256=parsed.sha256,
-        uploaded_by=actor,
-    )
-
+    # ── persist + import (single transaction) ──
     try:
-        db.add(tf)
-        db.flush()
-
-        source_doc = SourceDocument(
-            doc_type="TRADE_REPORT",
-            cdu_id=cdu.id if cdu else None,
-            doc_date=parsed_date,
-            file_name=file.filename,
-            file_path=str(target_path),
-            sha256=parsed.sha256,
-            file_size=target_path.stat().st_size if target_path.exists() else None,
-            uploaded_by=actor,
-            parsed_at=datetime.utcnow(),
-            parse_status="OK",
-            parse_meta_json=json.dumps(
-                {"trade_file_id": tf.id, "warnings": parsed.warnings, "skipped": parsed.skipped[:50]},
-                ensure_ascii=False,
-            ),
-            rows_imported=parsed.rows_parsed,
+        result = ingest_trade_report(
+            db,
+            path=target_path,
+            original_name=file.filename,
+            actor=actor,
+            cdu_id=cdu_id,
+            trade_date=parsed_date,
+            parsed=parsed if not cdu_id else None,
         )
-        db.add(source_doc)
-        db.flush()
-
-        for pr in parsed.rows:
-            f = pr.fields
-            db.add(RawTrade(
-                file_id=tf.id,
-                cdu_id=cdu.id if cdu else None,
-                trade_date=f.get("trade_date") or parsed_date,
-                deal_number=f.get("deal_number"),
-                order_number=f.get("order_number"),
-                trade_time=f.get("trade_time"),
-                kp=f.get("kp"),
-                operation_type=f.get("operation_type"),
-                participant_code=f.get("participant_code"),
-                firm_code=f.get("firm_code"),
-                partner_code=f.get("partner_code"),
-                trade_account=f.get("trade_account"),
-                regime_code=f.get("regime_code"),
-                instrument_code=f.get("instrument_code"),
-                instrument_category=f.get("instrument_category"),
-                price=f.get("price"),
-                lots=f.get("lots"),
-                volume=f.get("volume"),
-                settlement_date=f.get("settlement_date"),
-                accrued_interest_volume=f.get("accrued_interest_volume"),
-                yield_pct=f.get("yield_pct"),
-                period_code=f.get("period_code"),
-                redemption_price=f.get("redemption_price"),
-                settlement_code=f.get("settlement_code"),
-                type_code=f.get("type_code"),
-                commission_total=f.get("commission_total"),
-                repo_rate_pct=f.get("repo_rate_pct"),
-                accrued_interest_volume_repo=f.get("accrued_interest_volume_repo"),
-                repo_sum=f.get("repo_sum"),
-                repo_buyback_sum=f.get("repo_buyback_sum"),
-                repo_term_days=f.get("repo_term_days"),
-                initial_discount_pct=f.get("initial_discount_pct"),
-                discount_lower_pct=f.get("discount_lower_pct"),
-                discount_upper_pct=f.get("discount_upper_pct"),
-                commission_clearing=f.get("commission_clearing"),
-                commission_trading=f.get("commission_trading"),
-                commission_tech=f.get("commission_tech"),
-                client_code=f.get("client_code"),
-                currency_code=f.get("currency_code"),
-                system_link=f.get("system_link"),
-                settlement_org=f.get("settlement_org"),
-                trading_date=f.get("trading_date"),
-                clearing_firm_code=f.get("clearing_firm_code"),
-                activity_flag=f.get("activity_flag"),
-                status=f.get("status"),
-                nominal_volume=f.get("nominal_volume"),
-                clearing_account=f.get("clearing_account"),
-                placement_price=f.get("placement_price"),
-                placement_amount=f.get("placement_amount"),
-                placement_price_kzt=f.get("placement_price_kzt"),
-                redemption_price_kzt=f.get("redemption_price_kzt"),
-                securities_to_execute=f.get("securities_to_execute"),
-            ))
-
-        # ── import into Trade ledger (atomic with the rest) ──
-        if not parsed.cdu_name and cdu:
-            parsed.cdu_name = cdu.name
-        import_counters = import_trades_from_parsed(
-            db, parsed,
-            uploaded_by=actor,
-            source_doc_id=source_doc.id,
-            commit=False,
-        )
-        tf.status = "IMPORTED"
-
-        # ── price reconciliation vs KASE (within same transaction) ──
-        price_check: Optional[dict] = None
-        if cdu is not None and import_counters.get("trades", 0) > 0:
-            price_check = apply_kase_prices_to_trades(
-                db, cdu_id=cdu.id, trade_date=parsed_date, actor=actor,
-            )
-
-        # ── refresh aggregated SecurityHoldings for this CDU ──
-        if cdu is not None:
-            try:
-                sync_holdings(db, cdu_id=cdu.id, actor=actor)
-            except Exception as exc:  # noqa: BLE001
-                # Holdings sync is non-critical for the upload itself; log and
-                # continue so the user still sees a successful import.
-                logger.warning(f"Holdings sync failed for cdu={cdu.id}: {exc!r}")
-
+        tf, cdu = result.trade_file, result.cdu
         write_audit(
             db, user=actor, action="UPLOAD_TRADE_REPORT",
             entity="TradeFile", entity_id=tf.id,
             details={
                 "filename": file.filename,
                 "cdu_id": cdu.id if cdu else None,
-                "trade_date": parsed_date.isoformat(),
-                "rows_parsed": parsed.rows_parsed,
-                "rows_skipped": parsed.rows_skipped,
-                "trades_imported": import_counters.get("trades", 0),
+                "trade_date": result.trade_date.isoformat(),
+                "rows_parsed": result.parsed.rows_parsed,
+                "rows_skipped": result.parsed.rows_skipped,
+                "trades_imported": result.counters.get("trades", 0),
+                "superseded_files": result.superseded_file_ids,
                 "on_duplicate": on_duplicate,
-                "sha256": parsed.sha256,
-                "price_check": price_check,
+                "sha256": result.parsed.sha256,
+                "price_check": result.price_check,
             },
         )
-
         db.commit()
     except HTTPException:
         db.rollback()
@@ -339,18 +210,23 @@ async def upload_trade_report(
         logger.exception("Trade report upload failed")
         raise HTTPException(500, f"Ошибка обработки файла: {exc}") from exc
 
-    if import_counters.get("trades", 0) == 0 and not parsed.warnings:
+    parsed = result.parsed
+    if result.counters.get("trades", 0) == 0 and not parsed.warnings:
         parsed.warnings.append("Не удалось импортировать сделки в Trade (возможно, ЧДУ не определён)")
+    if result.superseded_file_ids:
+        parsed.warnings.append(
+            f"Предыдущие файлы этого ЧДУ за ту же дату помечены как заменённые: {result.superseded_file_ids}"
+        )
 
     return UploadResponse(
         file_id=tf.id,
         cdu_id=cdu.id if cdu else None,
         cdu_name=cdu.name if cdu else parsed.cdu_name,
-        trade_date=parsed_date,
+        trade_date=result.trade_date,
         rows_parsed=parsed.rows_parsed,
         rows_skipped=parsed.rows_skipped,
         warnings=parsed.warnings,
-        price_check=price_check,
+        price_check=result.price_check,
     )
 
 
@@ -439,6 +315,7 @@ def set_file_cdu(
             uploaded_by=actor,
             source_doc_id=source_doc.id,
             commit=False,
+            cdu_id=cdu.id,
         )
         source_doc.rows_imported = import_counters.get("trades", 0)
         source_doc.parse_status = "OK"
@@ -502,11 +379,14 @@ def import_file_to_trades(
             )
             db.add(source_doc)
             db.flush()
+        if tf.trade_date:
+            parsed.trade_date = tf.trade_date
         counters = import_trades_from_parsed(
             db, parsed,
             uploaded_by=actor,
             source_doc_id=source_doc.id,
             commit=False,
+            cdu_id=tf.cdu_id,
         )
         source_doc.rows_imported = counters.get("trades", 0)
         tf.status = "IMPORTED"
@@ -532,13 +412,9 @@ def delete_file(
     tf = db.get(TradeFile, file_id)
     if not tf:
         raise HTTPException(404, "Файл не найден")
-    # soft-delete related Trade ledger rows
-    if tf.cdu_id and tf.trade_date:
-        db.execute(
-            sa_update(Trade)
-            .where(Trade.cdu_id == tf.cdu_id, Trade.trade_date == tf.trade_date, Trade.is_active == True)
-            .values(is_active=False, updated_at=datetime.utcnow())
-        )
+    # soft-delete the Trade ledger rows imported from this file only
+    # (manual operations and system coupon/redemption events are untouched)
+    _deactivate_file_trades(db, tf)
     try:
         Path(tf.raw_file_path).unlink(missing_ok=True)
     except Exception:
@@ -562,61 +438,4 @@ def _parse_with_cdu_overrides(
     db: Session,
     known_cdu_id: Optional[int] = None,
 ) -> Any:
-    """Parse trade report, applying per-CDU column-mapping overrides if present.
-
-    1. First pass without overrides to detect CDU (if not known).
-    2. Lookup ``CDUFileFormat`` for that CDU.
-    3. If active overrides exist → second pass with ``alias_overrides``.
-    """
-    # First pass — identify CDU prefix.
-    first = TradeReportParser(file_path, original_name=original_name).parse()
-    cdu_id = known_cdu_id
-
-    if cdu_id is None and first.cdu_prefix:
-        cdu = (
-            db.query(CDU)
-            .filter(CDU.participant_code_prefix == first.cdu_prefix)
-            .first()
-        )
-        if cdu:
-            cdu_id = cdu.id
-            first.cdu_name = first.cdu_name or cdu.name
-
-    # No overrides possible without a known CDU.
-    if cdu_id is None:
-        return first
-
-    # Lookup CDU-specific format overrides.
-    fmt = (
-        db.query(CDUFileFormat)
-        .filter(CDUFileFormat.cdu_id == cdu_id, CDUFileFormat.is_active.is_(True))
-        .first()
-    )
-    if not fmt or not fmt.field_aliases:
-        return first
-
-    try:
-        raw_aliases: dict[str, Any] = json.loads(fmt.field_aliases)
-        alias_overrides: dict[str, tuple[str, ...]] = {}
-        for key, aliases in raw_aliases.items():
-            if isinstance(aliases, list):
-                alias_overrides[key] = tuple(str(a) for a in aliases if a)
-            elif isinstance(aliases, str):
-                alias_overrides[key] = (aliases,)
-        if alias_overrides:
-            second = TradeReportParser(
-                file_path,
-                original_name=original_name,
-                alias_overrides=alias_overrides,
-            ).parse()
-            # Preserve CDU metadata from first pass.
-            if first.cdu_prefix:
-                second.cdu_prefix = first.cdu_prefix
-            if first.cdu_name:
-                second.cdu_name = first.cdu_name
-            return second
-    except Exception as exc:
-        logger.warning(
-            f"Failed to apply CDU format overrides for CDU {cdu_id}: {exc!r}"
-        )
-    return first
+    return parse_with_cdu_overrides(file_path, original_name, db, known_cdu_id=known_cdu_id)

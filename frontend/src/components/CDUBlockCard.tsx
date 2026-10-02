@@ -32,10 +32,23 @@ export default function CDUBlockCard({ block, periodFrom, periodTo }: Props) {
 
   return (
     <div className="card overflow-hidden">
-      <div className="bg-kdif-green text-white px-4 py-3 font-semibold flex items-center justify-between">
-        <span>{block.cdu_name}</span>
-        <span className="text-xs font-normal opacity-80">
-          Доля в Фонде: {formatPct(block.cdu_share_pct)}
+      <div className="flex items-center justify-between gap-3 bg-brand-gradient px-4 py-3 font-semibold text-white">
+        <span className="flex items-center gap-2">
+          <span className="inline-flex h-2 w-2 rounded-full bg-white/70" />
+          {block.cdu_name}
+        </span>
+        <span className="flex items-center gap-2">
+          {block.is_stale && block.as_of_date && (
+            <span
+              className="rounded-full bg-amber-400 px-2.5 py-0.5 text-xs font-semibold text-amber-950"
+              title="Для этого ЧДУ нет расчёта на выбранную дату — показан последний доступный срез"
+            >
+              Данные на {new Date(block.as_of_date).toLocaleDateString('ru-RU')}
+            </span>
+          )}
+          <span className="rounded-full bg-white/15 px-2.5 py-0.5 text-xs font-medium backdrop-blur">
+            Доля в Фонде: {formatPct(block.cdu_share_pct)}
+          </span>
         </span>
       </div>
       <div className="table-wrap">

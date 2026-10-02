@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   ChevronDown,
@@ -22,12 +21,14 @@ import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/lib/auth'
+import { useConfirm } from '@/lib/confirm'
 
 // ─────────────── types ───────────────
 
 interface TableInfo {
   name: string
   label: string
+  read_only?: boolean
 }
 
 interface ColumnMeta {
@@ -41,6 +42,7 @@ interface TableMeta {
   name: string
   label: string
   columns: ColumnMeta[]
+  read_only?: boolean
 }
 
 interface ListResponse {
@@ -91,7 +93,8 @@ function coercePayload(value: unknown, colType: string): unknown {
 
 export default function DataEditorPage() {
   const queryClient = useQueryClient()
-  const canWrite = useAuthStore((s) => s.can('data_editor.edit'))
+  const confirm = useConfirm()
+  const canEditTables = useAuthStore((s) => s.can('data_editor.edit'))
 
   const [selectedTable, setSelectedTable] = useState<string>('')
   const [search, setSearch] = useState('')
@@ -103,7 +106,6 @@ export default function DataEditorPage() {
 
   const [editingRow, setEditingRow] = useState<Record<string, unknown> | null>(null)
   const [creating, setCreating] = useState(false)
-  const [deletingId, setDeletingId] = useState<number | null>(null)
 
   // Fetch table list
   const tablesQ = useQuery<TableInfo[]>({
@@ -124,6 +126,10 @@ export default function DataEditorPage() {
     },
     enabled: !!selectedTable,
   })
+
+  // Imported snapshots, calculated results, users and approved reports are
+  // read-only here (the backend enforces it too).
+  const canWrite = canEditTables && !metaQ.data?.read_only
 
   // Build query params for list
   const listParams = useMemo(() => {
@@ -189,11 +195,26 @@ export default function DataEditorPage() {
     },
     onSuccess: () => {
       toast.success('Запись удалена')
-      setDeletingId(null)
       queryClient.invalidateQueries({ queryKey: ['data-editor', 'rows', selectedTable] })
     },
     onError: () => toast.error('Ошибка удаления'),
   })
+
+  const handleDelete = async (id: number) => {
+    const { confirmed } = await confirm({
+      title: 'Удалить запись?',
+      description: (
+        <>
+          Запись <span className="font-mono font-semibold">id={id}</span> из таблицы{' '}
+          <span className="font-mono font-semibold">{selectedTable}</span> будет удалена безвозвратно. Это
+          прямое изменение базы данных — оно не проходит через бизнес-валидацию системы.
+        </>
+      ),
+      tone: 'danger',
+      confirmLabel: 'Удалить',
+    })
+    if (confirmed) deleteM.mutate(id)
+  }
 
   // Select first table on load
   useEffect(() => {
@@ -236,7 +257,7 @@ export default function DataEditorPage() {
             }}
             className={`flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition ${
               selectedTable === t.name
-                ? 'bg-emerald-50 font-semibold text-emerald-700 ring-1 ring-emerald-200'
+                ? 'bg-brand-gradient font-semibold text-white shadow-sm shadow-emerald-900/20'
                 : 'text-slate-600 hover:bg-slate-50'
             }`}
           >
@@ -272,10 +293,7 @@ export default function DataEditorPage() {
               <RefreshCw className={`h-3.5 w-3.5 ${rowsQ.isFetching ? 'animate-spin' : ''}`} />
             </button>
             {canWrite && (
-              <button
-                onClick={() => setCreating(true)}
-                className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
-              >
+              <button onClick={() => setCreating(true)} className="btn-primary px-3 py-1.5 text-sm">
                 <Plus className="h-3.5 w-3.5" /> Добавить
               </button>
             )}
@@ -379,7 +397,7 @@ export default function DataEditorPage() {
                             <Edit3 className="h-3.5 w-3.5" />
                           </button>
                           <button
-                            onClick={() => setDeletingId(Number(row.id))}
+                            onClick={() => handleDelete(Number(row.id))}
                             className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
                             title="Удалить"
                           >
@@ -465,34 +483,7 @@ export default function DataEditorPage() {
         />
       )}
 
-      {/* ─── Delete Confirm ─── */}
-      {deletingId !== null && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl">
-            <div className="mb-3 flex items-center gap-2 text-red-600">
-              <AlertTriangle className="h-5 w-5" />
-              <h3 className="font-bold">Удалить запись?</h3>
-            </div>
-            <p className="mb-4 text-sm text-slate-600">
-              Запись <span className="font-mono font-bold">id={deletingId}</span> будет удалена безвозвратно.
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setDeletingId(null)}
-                className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
-              >
-                Отмена
-              </button>
-              <button
-                onClick={() => deleteM.mutate(deletingId)}
-                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
-              >
-                Удалить
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+
     </div>
   )
 }

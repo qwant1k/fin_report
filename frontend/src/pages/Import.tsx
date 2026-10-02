@@ -1,10 +1,11 @@
-import { FormEvent, useState } from 'react'
+import { FormEvent, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   FileSpreadsheet,
   FolderOpen,
   RefreshCw,
   CheckCircle2,
+  ChevronDown,
   XCircle,
   Clock,
   ListTree,
@@ -69,7 +70,21 @@ export default function ImportPage() {
   const [pattern, setPattern] = useState('**/*.xlsm')
   const [password, setPassword] = useState('7')
   const [activeJobId, setActiveJobId] = useState<number | null>(null)
+  const [refreshedJobId, setRefreshedJobId] = useState<number | null>(null)
+  const [bulkOpen, setBulkOpen] = useState(false)
   const canRunImport = useAuthStore((s) => s.can('import.run'))
+
+  const invalidatePortfolioViews = () => {
+    qc.invalidateQueries({ queryKey: ['import-jobs'] })
+    qc.invalidateQueries({ queryKey: ['workday'] })
+    qc.invalidateQueries({ queryKey: ['dashboard'] })
+    qc.invalidateQueries({ queryKey: ['dashboard-history-meta'] })
+    qc.invalidateQueries({ queryKey: ['analytics-meta'] })
+    qc.invalidateQueries({ queryKey: ['analytics-workbench'] })
+    qc.invalidateQueries({ queryKey: ['positions'] })
+    qc.invalidateQueries({ queryKey: ['rr-dates'] })
+    qc.invalidateQueries({ queryKey: ['rr-snapshot'] })
+  }
 
   // ───── Список последних job-ов ─────
   const jobs = useQuery<ImportJobItem[]>({
@@ -94,12 +109,19 @@ export default function ImportPage() {
     },
   })
 
+  useEffect(() => {
+    const job = jobDetail.data
+    if (!job || job.status === 'RUNNING' || refreshedJobId === job.id) return
+    invalidatePortfolioViews()
+    setRefreshedJobId(job.id)
+  }, [jobDetail.data?.id, jobDetail.data?.status, refreshedJobId])
+
   // ───── Single-file upload ─────
   const singleUpload = useMutation({
     mutationFn: async (file: File) => {
       const fd = new FormData()
       fd.append('file', file)
-      fd.append('skip_if_imported', 'true')
+      fd.append('skip_if_imported', 'false')
       if (password.trim()) fd.append('password', password.trim())
       return (
         await api.post('/import/risk-report', fd, {
@@ -124,7 +146,7 @@ export default function ImportPage() {
           `Импортировано: cash=${r.rows.cash} mv=${r.rows.mv} лоты=${r.rows.bond_lots} repo=${r.rows.repo_lots} dep=${r.rows.deposit_lots} ar=${r.rows.accounts_receivable} • всего: ${total}`,
         )
       }
-      qc.invalidateQueries({ queryKey: ['import-jobs'] })
+      invalidatePortfolioViews()
     },
     onError: (err: any) => {
       toast.error(err?.response?.data?.detail || 'Не удалось импортировать Risk Report')
@@ -138,6 +160,7 @@ export default function ImportPage() {
         folder_path: folder,
         pattern,
         password: password.trim() || undefined,
+        skip_if_imported: false,
       })).data,
     onSuccess: (r) => {
       toast.success(`Запущен job #${r.job_id} — папка: ${r.folder}`)
@@ -213,56 +236,63 @@ export default function ImportPage() {
       </div>
 
       {/* ───── Панель Bulk-import ───── */}
-      <div className="card p-4">
-        <h2 className="font-semibold mb-3 flex items-center gap-2">
-          <FolderOpen className="w-4 h-4 text-emerald-600" /> Bulk-импорт из папки на сервере
-        </h2>
-        <form onSubmit={submitBulk} className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
-          <div className="md:col-span-2">
-            <label className="label">Абсолютный путь к папке</label>
-            <input
-              className="input"
-              value={folder}
-              onChange={(e) => setFolder(e.target.value)}
-              placeholder={SUGGESTED_FOLDER}
-            />
-            <p className="text-xs text-slate-500 mt-1">
-              Папка должна быть доступна на сервере; рекурсивный поиск по шаблону.
-            </p>
-          </div>
-          <div>
-            <label className="label">Шаблон</label>
-            <input
-              className="input"
-              value={pattern}
-              onChange={(e) => setPattern(e.target.value)}
-              placeholder="**/*.xlsm"
-            />
-          </div>
-          <div>
-            <label className="label">Пароль файла</label>
-            <input
-              className="input"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="По умолчанию 7"
-              autoComplete="off"
-            />
-          </div>
-          <div className="md:col-span-3 flex justify-end">
-            <button
-              type="submit"
-              className="btn-primary"
-              disabled={bulkImport.isPending}
-            >
-              <RefreshCw
-                className={`w-4 h-4 ${bulkImport.isPending ? 'animate-spin' : ''}`}
-              />{' '}
-              {bulkImport.isPending ? 'Запускаем…' : 'Запустить bulk-импорт'}
-            </button>
-          </div>
-        </form>
+      <div className="card overflow-visible">
+        <button
+          type="button"
+          onClick={() => setBulkOpen((open) => !open)}
+          className="flex w-full items-center justify-between gap-3 p-4 text-left"
+          aria-expanded={bulkOpen}
+        >
+          <span className="flex items-center gap-2 font-semibold">
+            <FolderOpen className="w-4 h-4 text-emerald-600" /> Bulk-импорт из папки на сервере
+          </span>
+          <ChevronDown className={`h-5 w-5 text-slate-400 transition-transform ${bulkOpen ? 'rotate-180' : ''}`} />
+        </button>
+        {bulkOpen && (
+          <form onSubmit={submitBulk} className="grid grid-cols-1 gap-3 border-t border-slate-100 p-4 md:grid-cols-3 items-end">
+            <div className="md:col-span-2">
+              <label className="label">Абсолютный путь к папке</label>
+              <input
+                className="input"
+                value={folder}
+                onChange={(e) => setFolder(e.target.value)}
+                placeholder={SUGGESTED_FOLDER}
+              />
+            </div>
+            <div>
+              <label className="label">Шаблон</label>
+              <input
+                className="input"
+                value={pattern}
+                onChange={(e) => setPattern(e.target.value)}
+                placeholder="**/*.xlsm"
+              />
+            </div>
+            <div>
+              <label className="label">Пароль файла</label>
+              <input
+                className="input"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="По умолчанию 7"
+                autoComplete="off"
+              />
+            </div>
+            <div className="md:col-span-3 flex justify-end">
+              <button
+                type="submit"
+                className="btn-primary"
+                disabled={bulkImport.isPending}
+              >
+                <RefreshCw
+                  className={`w-4 h-4 ${bulkImport.isPending ? 'animate-spin' : ''}`}
+                />{' '}
+                {bulkImport.isPending ? 'Запускаем…' : 'Запустить bulk-импорт'}
+              </button>
+            </div>
+          </form>
+        )}
       </div>
       </>
 

@@ -27,6 +27,27 @@ def seed_initial_data(db: Session) -> None:
     _seed_formulas(db)
 
 
+def seed_startup_data(db: Session, mode: str = "full") -> None:
+    """Populate a new database according to the deployment seed policy.
+
+    ``admin_only`` is intended for clean production installations: it creates
+    the configured administrator and leaves every business/reference table
+    empty. ``full`` preserves the historical development behaviour.
+    """
+    normalized = (mode or "full").strip().lower()
+    if normalized == "admin_only":
+        _seed_admin(db)
+        return
+    if normalized == "none":
+        return
+    if normalized == "full":
+        seed_initial_data(db)
+        return
+    raise ValueError(
+        f"Unsupported INITIAL_DATA_MODE={mode!r}; expected full, admin_only or none"
+    )
+
+
 def _seed_roles(db: Session) -> None:
     for spec in role_specs():
         obj = db.query(RoleDefinition).filter_by(code=spec["code"]).first()
@@ -116,14 +137,15 @@ def _seed_rules(db: Session) -> None:
     rules = [
         # Reverse REPO режимы — расширенный список (EBRP/REPO/REPS — KASE)
         ("Reverse REPO", 10, "EBRP,REPO,REPS,Reverse,REVR", None, None, "REVERSE_REPO"),
-        # ГЦБ — Министерство финансов РК (KZ-MTS, KZTS, KZ-MGB)
-        ("ГЦБ МФ РК", 20, None, "KFUS,MGB,MOM,MUM,MKM,KZ_MGB", None, "GOV_BONDS"),
+        # ГЦБ — Минфин РК (МЕОКАМ/МЕУКАМ/МЕККАМ), ноты НБ РК, МИО.
+        ("ГЦБ МФ РК / НБ РК / МИО", 20, None, "MUM,MOM,MKM,MEU,MUJ,MTM,MTC,NTK,KZ_MGB", None, "GOV_BONDS"),
         # Агентские (KEGOC, БРК, Отбасы, КФУ, ҚТЖ, Байтерек, Самрук-Қазына)
         ("Агентские", 30, None,
-         "EABR,EAB,KEGC,BRKZ,DBKZ,KZAR,SMRK,SAMR,SKZ,BAIT,KZBN,OFKZ,OFK,KFUS_AG",
+         "KFUS,BTRK,BRKZ,KEGC,ZHSS,TMJL,SKKZ,AGKK,DAMU",
          None, "AGENCY_BONDS"),
-        # МФО (ЕБРР, АБР, ЕАБР, IFC и др.)
-        ("МФО", 40, None, "MFO,EBRR,EBR,EABR,IFC,ADB,WBI,ABRD", None, "MFO_BONDS"),
+        # МФО = международные финансовые организации (ЕАБР, АБР, ЕБРР, IFC).
+        # Тикеры KASE MFO*/MF* — микрофинансовые организации, сюда НЕ входят.
+        ("МФО", 40, None, "EABR,ASDB,EBRD,IFCN,IBRD", None, "MFO_BONDS"),
         # Иностранные ЦБ (USD) — обычно US Treasuries (US**)
         ("Ин. ЦБ (USD)", 50, None, "US,UST,USTRES", r"^US[0-9A-Z]{6,}", "FOREIGN_BONDS"),
         # Депозиты (используется только для НБ РК)

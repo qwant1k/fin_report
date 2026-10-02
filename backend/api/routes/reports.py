@@ -41,6 +41,7 @@ router = APIRouter(
 def list_generated(
     status: Optional[str] = Query(None),
     report_type: Optional[str] = Query(None),
+    report_date: Optional[date] = Query(None),
     db: Session = Depends(get_db),
 ):
     q = db.query(GeneratedReport)
@@ -48,6 +49,8 @@ def list_generated(
         q = q.filter(GeneratedReport.status == status)
     if report_type:
         q = q.filter(GeneratedReport.report_type == report_type)
+    if report_date:
+        q = q.filter(GeneratedReport.report_date == report_date)
     return q.order_by(GeneratedReport.generated_at.desc()).limit(500).all()
 
 

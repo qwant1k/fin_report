@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Save, Shield, Trash2, UserPlus } from 'lucide-react'
+import { AlertTriangle, Plus, Save, Shield, Trash2, UserPlus } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/lib/auth'
+import { useConfirm } from '@/lib/confirm'
 import { formatDate } from '@/lib/format'
 
 interface User {
@@ -58,6 +59,8 @@ interface RoleForm {
 
 type AdminTab = 'users' | 'roles' | 'audit'
 
+const PURGE_PHRASE = 'ОЧИСТИТЬ ВСЁ'
+
 const emptyRoleForm: RoleForm = {
   id: null,
   code: '',
@@ -70,6 +73,7 @@ const emptyRoleForm: RoleForm = {
 
 export default function AdminPage() {
   const qc = useQueryClient()
+  const confirm = useConfirm()
   const token = useAuthStore((s) => s.token)
   const setSession = useAuthStore((s) => s.setSession)
   const canManageUsers = useAuthStore((s) => s.can('admin.users.manage'))
@@ -80,6 +84,9 @@ export default function AdminPage() {
   const [newUser, setNewUser] = useState({
     username: '', password: '', full_name: '', email: '', role: 'viewer',
   })
+  const [purgeModal, setPurgeModal] = useState(false)
+  const [purgeInput, setPurgeInput] = useState('')
+  const canPurge = useAuthStore((s) => s.can('admin.purge'))
 
   const canLoadRoles = canManageUsers || canManageRoles
 
@@ -213,6 +220,41 @@ export default function AdminPage() {
     },
   })
 
+  const handleRemoveUser = async (u: User) => {
+    const { confirmed } = await confirm({
+      title: 'Удалить пользователя?',
+      description: `«${u.full_name ?? u.username}» (${u.username}) потеряет доступ к системе немедленно.`,
+      tone: 'danger',
+      confirmLabel: 'Удалить',
+    })
+    if (confirmed) removeUser.mutate(u.id)
+  }
+
+  const handleRemoveRole = async () => {
+    if (!roleForm.id) return
+    const { confirmed } = await confirm({
+      title: 'Удалить роль?',
+      description: `Роль «${roleForm.name}» будет удалена. Пользователи с этой ролью потеряют связанные права доступа.`,
+      tone: 'danger',
+      confirmLabel: 'Удалить',
+    })
+    if (confirmed) removeRole.mutate(roleForm.id)
+  }
+
+  const purgeData = useMutation({
+    mutationFn: async () =>
+      (await api.post('/admin/purge-data', { confirm: PURGE_PHRASE })).data,
+    onSuccess: () => {
+      toast.success('База данных очищена')
+      setPurgeModal(false)
+      setPurgeInput('')
+      qc.invalidateQueries()
+    },
+    onError: (e: any) => {
+      toast.error(e?.response?.data?.detail ?? 'Ошибка очистки')
+    },
+  })
+
   const togglePermission = (code: string) => {
     setRoleForm((form) => ({
       ...form,
@@ -285,7 +327,7 @@ export default function AdminPage() {
                       </td>
                       <td>{formatDate(u.created_at)}</td>
                       <td>
-                        <button onClick={() => removeUser.mutate(u.id)} className="btn-secondary px-2 py-1 text-red-600">
+                        <button onClick={() => handleRemoveUser(u)} className="btn-secondary px-2 py-1 text-red-600">
                           <Trash2 className="h-4 w-4" />
                         </button>
                       </td>
@@ -336,7 +378,7 @@ export default function AdminPage() {
               </div>
               <div className="flex gap-2">
                 {roleForm.id && !roleForm.is_system && (
-                  <button className="btn-secondary text-red-600" onClick={() => removeRole.mutate(roleForm.id!)}>
+                  <button className="btn-secondary text-red-600" onClick={handleRemoveRole}>
                     <Trash2 className="h-4 w-4" /> Удалить
                   </button>
                 )}
@@ -432,6 +474,64 @@ export default function AdminPage() {
                 {!audit.data?.length && <tr><td colSpan={6} className="py-6 text-center text-slate-400">Лог пуст</td></tr>}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+      {canPurge && (
+        <div className="rounded-lg border-2 border-red-200 bg-red-50 p-5">
+          <div className="mb-3 flex items-center gap-2">
+            <AlertTriangle className="h-5 w-5 text-red-600" />
+            <h2 className="font-semibold text-red-700">Опасная зона</h2>
+          </div>
+          <p className="mb-4 text-sm text-red-700">
+            Полная очистка удалит <strong>все бизнес-данные</strong>: сделки, портфели, цены, отчёты, справочники ЧДУ.
+            Пользователи, роли и аудит-лог <strong>сохранятся</strong>.
+          </p>
+          <button
+            className="rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+            onClick={() => { setPurgeInput(''); setPurgeModal(true) }}
+          >
+            <Trash2 className="mr-1.5 inline h-4 w-4" />
+            Очистить все данные
+          </button>
+        </div>
+      )}
+
+      {purgeModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-2xl">
+            <div className="mb-4 flex items-center gap-2">
+              <AlertTriangle className="h-6 w-6 text-red-600" />
+              <h3 className="text-lg font-bold text-red-700">Подтверждение очистки</h3>
+            </div>
+            <p className="mb-4 text-sm text-slate-700">
+              Это действие <strong>необратимо</strong>. Все сделки, портфели, цены, отчёты и справочники ЧДУ будут удалены.
+            </p>
+            <p className="mb-2 text-sm font-medium text-slate-800">
+              Введите <span className="rounded bg-slate-100 px-1 font-mono">{PURGE_PHRASE}</span> для подтверждения:
+            </p>
+            <input
+              className="input mb-4 w-full font-mono"
+              value={purgeInput}
+              onChange={(e) => setPurgeInput(e.target.value)}
+              placeholder={PURGE_PHRASE}
+              autoFocus
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                className="btn-secondary"
+                onClick={() => { setPurgeModal(false); setPurgeInput('') }}
+              >
+                Отмена
+              </button>
+              <button
+                className="rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+                disabled={purgeInput !== PURGE_PHRASE || purgeData.isPending}
+                onClick={() => purgeData.mutate()}
+              >
+                {purgeData.isPending ? 'Очистка...' : 'Подтвердить очистку'}
+              </button>
+            </div>
           </div>
         </div>
       )}

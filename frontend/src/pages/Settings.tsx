@@ -7,12 +7,14 @@ import { api } from '@/lib/api'
 import { CDU, CDULimit } from '@/lib/types'
 import { formatPct } from '@/lib/format'
 import { useAuthStore } from '@/lib/auth'
+import { useConfirm } from '@/lib/confirm'
 
 const CATS = ['CASH', 'GOV_BONDS', 'REVERSE_REPO', 'MFO_BONDS', 'AGENCY_BONDS', 'RECEIVABLES', 'OTHER']
 
 export default function SettingsPage() {
   const qc = useQueryClient()
   const can = useAuthStore((s) => s.can)
+  const confirm = useConfirm()
   const canEdit = can('settings.edit')
   const canEditFormats = can('cdu_formats.edit')
   const [tab, setTab] = useState<'cdus' | 'limits' | 'formats'>('cdus')
@@ -45,6 +47,16 @@ export default function SettingsPage() {
       qc.invalidateQueries({ queryKey: ['cdus'] })
     },
   })
+
+  const handleDeleteCdu = async (c: CDU) => {
+    const { confirmed } = await confirm({
+      title: 'Удалить ЧДУ?',
+      description: `«${c.name}» (${c.short_name}) будет удалён из справочника. Это затронет фильтры и отчёты, ссылающиеся на этот ЧДУ.`,
+      tone: 'danger',
+      confirmLabel: 'Удалить',
+    })
+    if (confirmed) delCdu.mutate(c.id)
+  }
 
   const saveLimit = useMutation({
     mutationFn: async (l: CDULimit) =>
@@ -88,7 +100,7 @@ export default function SettingsPage() {
               </thead>
               <tbody>
                 {(cdus.data ?? []).map((c) => (
-                  <CduRow key={c.id} cdu={c} canEdit={canEdit} onSave={(u) => saveCdu.mutate(u)} onDelete={() => delCdu.mutate(c.id)} />
+                  <CduRow key={c.id} cdu={c} canEdit={canEdit} onSave={(u) => saveCdu.mutate(u)} onDelete={() => handleDeleteCdu(c)} />
                 ))}
               </tbody>
             </table>

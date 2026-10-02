@@ -155,10 +155,84 @@ def _apply_common_filters(
     return out
 
 
+def _load_portfolio_trend_rows(
+    db: Session,
+    start: date,
+    end: date,
+    *,
+    cdu_ids: Optional[str] = None,
+    portfolio_type: Optional[str] = None,
+) -> list[dict]:
+    cdu_ids = cdu_ids if isinstance(cdu_ids, str) else None
+    portfolio_type = portfolio_type if isinstance(portfolio_type, str) else None
+    ids = [int(x) for x in cdu_ids.split(",") if x.strip().isdigit()] if cdu_ids else []
+    out: list[dict] = []
+    summary_keys: set[tuple[int, date]] = set()
+
+    summary_q = select(PortfolioSummary, CDU).join(CDU, PortfolioSummary.cdu_id == CDU.id).where(
+        PortfolioSummary.summary_date >= start,
+        PortfolioSummary.summary_date <= end,
+    )
+    if ids:
+        summary_q = summary_q.where(PortfolioSummary.cdu_id.in_(ids))
+    if portfolio_type:
+        summary_q = summary_q.where(CDU.portfolio_type == portfolio_type)
+
+    for s, cdu in db.execute(summary_q).all():
+        summary_keys.add((s.cdu_id, s.summary_date))
+        return_pct = None
+        if s.total_mv_prev:
+            return_pct = (s.total_daily_change or 0.0) / s.total_mv_prev
+        out.append({
+            "date": s.summary_date,
+            "cdu_id": s.cdu_id,
+            "cdu_name": cdu.name,
+            "cdu_short": cdu.short_name,
+            "portfolio_type": cdu.portfolio_type,
+            "market_value_total": s.total_mv_current,
+            "cash_flow": s.total_daily_change,
+            "return_pct": return_pct,
+            "ytm_weighted": s.ytm_weighted,
+            "duration_weighted": s.duration_weighted,
+        })
+
+    mv_q = select(MVSnapshot, CDU).join(CDU, MVSnapshot.cdu_id == CDU.id).where(
+        MVSnapshot.snapshot_date >= start,
+        MVSnapshot.snapshot_date <= end,
+    )
+    if ids:
+        mv_q = mv_q.where(MVSnapshot.cdu_id.in_(ids))
+    if portfolio_type:
+        mv_q = mv_q.where(CDU.portfolio_type == portfolio_type)
+
+    for s, cdu in db.execute(mv_q).all():
+        if (s.cdu_id, s.snapshot_date) in summary_keys:
+            continue
+        out.append({
+            "date": s.snapshot_date,
+            "cdu_id": s.cdu_id,
+            "cdu_name": cdu.name,
+            "cdu_short": cdu.short_name,
+            "portfolio_type": cdu.portfolio_type,
+            "market_value_total": s.market_value_total,
+            "cash_flow": s.cash_flow,
+            "return_pct": s.return_pct,
+            "ytm_weighted": s.ytm_weighted,
+            "duration_weighted": s.duration_weighted,
+        })
+
+    return sorted(out, key=lambda x: (x["date"], x["cdu_id"]))
+
+
 @router.get("/meta")
 def analytics_meta(db: Session = Depends(get_db)):
     min_date = _earliest_data_date(db)
     max_date = _latest_data_date(db)
+    latest_rr_date = db.execute(
+        select(func.max(PortfolioPosition.position_date)).where(
+            PortfolioPosition.notes == "rr_report_import",
+        )
+    ).scalar_one_or_none()
     cdus = db.execute(select(CDU).order_by(CDU.portfolio_type, CDU.name)).scalars().all()
     categories = sorted({
         "TOTAL",
@@ -176,6 +250,7 @@ def analytics_meta(db: Session = Depends(get_db)):
     return {
         "min_date": min_date.isoformat() if min_date else None,
         "max_date": max_date.isoformat() if max_date else None,
+        "latest_rr_date": latest_rr_date.isoformat() if latest_rr_date else None,
         "sources": [
             {"value": "summary", "label": "Итоги ЧДУ"},
             {"value": "positions", "label": "Категории Report"},
@@ -344,7 +419,7 @@ def _load_workbench_rows(db: Session, source: str, start: date, end: date) -> li
                 "category": lot.category,
                 "instrument": lot.instrument_code or lot.isin,
                 "isin": lot.isin,
-                "market_value": lot.market_value or lot.total_value or lot.face_value_current or 0.0,
+                "market_value": lot.total_value or lot.market_value or lot.face_value_current or 0.0,
                 "ytm": lot.ytm,
                 "duration": lot.duration,
             })
@@ -487,33 +562,27 @@ def portfolio_trend(
     """История MV по ЧДУ за период из MVSnapshot."""
     start, end = _resolve_period_for_db(db, from_, to_, days)
 
-    q = select(MVSnapshot, CDU).join(CDU, MVSnapshot.cdu_id == CDU.id).where(
-        MVSnapshot.snapshot_date >= start,
-        MVSnapshot.snapshot_date <= end,
-    ).order_by(MVSnapshot.snapshot_date.asc())
-
-    if cdu_ids:
-        ids = [int(x) for x in cdu_ids.split(",") if x.strip().isdigit()]
-        if ids:
-            q = q.where(MVSnapshot.cdu_id.in_(ids))
-    if portfolio_type:
-        q = q.where(CDU.portfolio_type == portfolio_type)
-
-    rows = db.execute(q).all()
+    rows = _load_portfolio_trend_rows(
+        db,
+        start,
+        end,
+        cdu_ids=cdu_ids,
+        portfolio_type=portfolio_type,
+    )
     return [
         {
-            "date": s.snapshot_date.isoformat(),
-            "cdu_id": s.cdu_id,
-            "cdu_name": cdu.name,
-            "cdu_short": cdu.short_name,
-            "portfolio_type": cdu.portfolio_type,
-            "market_value_total": s.market_value_total,
-            "cash_flow": s.cash_flow,
-            "return_pct": s.return_pct,
-            "ytm_weighted": s.ytm_weighted,
-            "duration_weighted": s.duration_weighted,
+            "date": row["date"].isoformat(),
+            "cdu_id": row["cdu_id"],
+            "cdu_name": row["cdu_name"],
+            "cdu_short": row["cdu_short"],
+            "portfolio_type": row["portfolio_type"],
+            "market_value_total": row["market_value_total"],
+            "cash_flow": row["cash_flow"],
+            "return_pct": row["return_pct"],
+            "ytm_weighted": row["ytm_weighted"],
+            "duration_weighted": row["duration_weighted"],
         }
-        for s, cdu in rows
+        for row in rows
     ]
 
 
@@ -529,32 +598,42 @@ def fund_trend(
     """Агрегированный тренд по всему Фонду = Σ MV всех ЧДУ за дату."""
     start, end = _resolve_period_for_db(db, from_, to_, days)
 
-    base = select(
-        MVSnapshot.snapshot_date.label("d"),
-        func.sum(MVSnapshot.market_value_total).label("mv_total"),
-        func.avg(MVSnapshot.ytm_weighted).label("ytm_avg"),
-        func.avg(MVSnapshot.duration_weighted).label("dur_avg"),
-        func.count(MVSnapshot.id).label("cdu_count"),
-    ).where(
-        MVSnapshot.snapshot_date >= start,
-        MVSnapshot.snapshot_date <= end,
-    ).group_by(MVSnapshot.snapshot_date).order_by(MVSnapshot.snapshot_date.asc())
+    rows = _load_portfolio_trend_rows(
+        db,
+        start,
+        end,
+        portfolio_type=portfolio_type,
+    )
+    buckets: dict[date, dict] = {}
+    for row in rows:
+        bucket = buckets.setdefault(row["date"], {
+            "market_value_total": 0.0,
+            "ytm_values": [],
+            "duration_values": [],
+            "cdu_count": 0,
+        })
+        bucket["market_value_total"] += row["market_value_total"] or 0.0
+        bucket["cdu_count"] += 1
+        if row["ytm_weighted"] is not None:
+            bucket["ytm_values"].append(row["ytm_weighted"])
+        if row["duration_weighted"] is not None:
+            bucket["duration_values"].append(row["duration_weighted"])
 
-    if portfolio_type:
-        base = base.join(CDU, MVSnapshot.cdu_id == CDU.id).where(
-            CDU.portfolio_type == portfolio_type
-        )
-
-    rows = db.execute(base).all()
     return [
         {
-            "date": r.d.isoformat(),
-            "market_value_total": float(r.mv_total or 0),
-            "ytm_weighted": float(r.ytm_avg) if r.ytm_avg is not None else None,
-            "duration_weighted": float(r.dur_avg) if r.dur_avg is not None else None,
-            "cdu_count": int(r.cdu_count),
+            "date": d.isoformat(),
+            "market_value_total": float(bucket["market_value_total"] or 0),
+            "ytm_weighted": (
+                float(sum(bucket["ytm_values"]) / len(bucket["ytm_values"]))
+                if bucket["ytm_values"] else None
+            ),
+            "duration_weighted": (
+                float(sum(bucket["duration_values"]) / len(bucket["duration_values"]))
+                if bucket["duration_values"] else None
+            ),
+            "cdu_count": int(bucket["cdu_count"]),
         }
-        for r in rows
+        for d, bucket in sorted(buckets.items())
     ]
 
 
@@ -685,22 +764,13 @@ def period_summary(
     """Сводка за период: начальное/конечное MV, изменение, средняя YTM/Duration."""
     start, end = _resolve_period_for_db(db, from_, to_, days)
 
-    base = select(
-        MVSnapshot.snapshot_date.label("d"),
-        func.sum(MVSnapshot.market_value_total).label("mv_total"),
-        func.avg(MVSnapshot.ytm_weighted).label("ytm_avg"),
-        func.avg(MVSnapshot.duration_weighted).label("dur_avg"),
-    ).where(
-        MVSnapshot.snapshot_date >= start,
-        MVSnapshot.snapshot_date <= end,
-    ).group_by(MVSnapshot.snapshot_date).order_by(MVSnapshot.snapshot_date.asc())
-
-    if portfolio_type:
-        base = base.join(CDU, MVSnapshot.cdu_id == CDU.id).where(
-            CDU.portfolio_type == portfolio_type
-        )
-
-    rows = db.execute(base).all()
+    rows = fund_trend(
+        from_=start,
+        to_=end,
+        days=None,
+        portfolio_type=portfolio_type,
+        db=db,
+    )
     if not rows:
         return {
             "from": start.isoformat(),
@@ -708,19 +778,19 @@ def period_summary(
             "data_points": 0,
         }
 
-    first_mv = float(rows[0].mv_total or 0)
-    last_mv = float(rows[-1].mv_total or 0)
+    first_mv = float(rows[0]["market_value_total"] or 0)
+    last_mv = float(rows[-1]["market_value_total"] or 0)
     delta = last_mv - first_mv
     delta_pct = (delta / first_mv) if first_mv else 0.0
 
     # Best/worst day deltas
     daily_deltas = []
     for i in range(1, len(rows)):
-        prev = float(rows[i - 1].mv_total or 0)
-        cur = float(rows[i].mv_total or 0)
+        prev = float(rows[i - 1]["market_value_total"] or 0)
+        cur = float(rows[i]["market_value_total"] or 0)
         if prev > 0:
             daily_deltas.append({
-                "date": rows[i].d.isoformat(),
+                "date": rows[i]["date"],
                 "delta": cur - prev,
                 "delta_pct": (cur - prev) / prev,
             })
@@ -728,12 +798,12 @@ def period_summary(
     best = max(daily_deltas, key=lambda x: x["delta_pct"]) if daily_deltas else None
     worst = min(daily_deltas, key=lambda x: x["delta_pct"]) if daily_deltas else None
 
-    avg_ytm = sum(float(r.ytm_avg) for r in rows if r.ytm_avg is not None) / max(
-        sum(1 for r in rows if r.ytm_avg is not None), 1
-    ) if any(r.ytm_avg is not None for r in rows) else None
-    avg_dur = sum(float(r.dur_avg) for r in rows if r.dur_avg is not None) / max(
-        sum(1 for r in rows if r.dur_avg is not None), 1
-    ) if any(r.dur_avg is not None for r in rows) else None
+    avg_ytm = sum(float(r["ytm_weighted"]) for r in rows if r["ytm_weighted"] is not None) / max(
+        sum(1 for r in rows if r["ytm_weighted"] is not None), 1
+    ) if any(r["ytm_weighted"] is not None for r in rows) else None
+    avg_dur = sum(float(r["duration_weighted"]) for r in rows if r["duration_weighted"] is not None) / max(
+        sum(1 for r in rows if r["duration_weighted"] is not None), 1
+    ) if any(r["duration_weighted"] is not None for r in rows) else None
 
     return {
         "from": start.isoformat(),

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Any, Optional
 
@@ -202,16 +203,20 @@ def _parse_wide_metric_sheet(
 
     fund_row = date_row
     fund_anchors = _scan_funds(fund_row)
-    if len(fund_anchors) < 2:
-        for delta in (1, 2, 3):
-            candidate = date_row - delta
-            if candidate < 1:
-                break
-            anchors = _scan_funds(candidate)
-            if len(anchors) >= 2:
-                fund_row = candidate
-                fund_anchors = anchors
-                break
+    candidates: list[tuple[tuple[int, int], int, list[tuple[int, str]]]] = []
+    for candidate in (date_row, date_row - 1, date_row - 2, date_row - 3):
+        if candidate < 1:
+            continue
+        anchors = _scan_funds(candidate)
+        if not anchors:
+            continue
+        unique_funds = len({name for _, name in anchors})
+        # Some Risk Report sheets have two header rows above Date: one with
+        # portfolio owner labels ("KFGD own/spec") and one with actual CDUs.
+        # Prefer the row with more distinct canonical CDU names.
+        candidates.append(((unique_funds, len(anchors)), candidate, anchors))
+    if candidates:
+        _, fund_row, fund_anchors = max(candidates, key=lambda item: item[0])
     if not fund_anchors:
         return []
 
@@ -306,7 +311,7 @@ def _find_date_anchor(ws: Worksheet, *, max_scan: int = 30) -> tuple[Optional[in
 # ──────────────────────────────────────────────────────────────────────────
 # Справочник — instrument reference
 # ──────────────────────────────────────────────────────────────────────────
-def parse_reference_sheet(ws: Worksheet) -> list[dict]:
+def _parse_reference_sheet_legacy(ws: Worksheet) -> list[dict]:
     """Лист `Справочник` — каталог выпусков ЦБ."""
     header_row = find_header_row(ws, must_contain=("isin",))
     if header_row is None:
@@ -355,6 +360,181 @@ def parse_reference_sheet(ws: Worksheet) -> list[dict]:
 # ──────────────────────────────────────────────────────────────────────────
 # FX rates — Нацбанк Казахстана, Доллар США
 # ──────────────────────────────────────────────────────────────────────────
+_ISSUER_TYPE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ГЦБ", (
+        "министерство финансов республики казахстан",
+        "министерство финансов",
+        "национальный банк республики казахстан",
+        "национальный банк",
+    )),
+    ("Агентские", (
+        "kegoc",
+        "банк развития казахстана",
+        "жилищный строительный сберегательный банк казахстана",
+        "отбасы банк",
+        "казахстанский фонд устойчивости",
+        "қазақстан темір жолы",
+        "казахстан темир жолы",
+        "байтерек",
+        "самрук-казына",
+        "самрук-қазына",
+    )),
+    ("МФО", (
+        "евразийский банк развития",
+        "азиатский банк развития",
+        "европейский банк реконструкции",
+        "международная финансовая корпорация",
+    )),
+    ("Бумаги местных исполнительных органов", (
+        "акимат г. алматы",
+        "акимат города алматы",
+    )),
+    ("Ин. ЦБ", (
+        "usa",
+        "united states",
+        "treasury",
+        "treasuries",
+    )),
+)
+
+
+def _find_reference_col(
+    headers: dict[str, int],
+    *aliases: str,
+    excludes: tuple[str, ...] = (),
+) -> Optional[int]:
+    excluded = tuple(e.lower() for e in excludes)
+    for alias in aliases:
+        a = alias.lower()
+        if a in headers and not any(e in a for e in excluded):
+            return headers[a]
+    for h, c in headers.items():
+        if any(e in h for e in excluded):
+            continue
+        for alias in aliases:
+            if alias.lower() in h:
+                return c
+    return None
+
+
+def _normalize_lookup(value: Optional[str]) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().lower().replace("ё", "е"))
+
+
+def _infer_issuer_type(issuer: Optional[str], isin: Optional[str]) -> Optional[str]:
+    isin_norm = (isin or "").strip().upper()
+    if isin_norm.startswith("US"):
+        return "Ин. ЦБ"
+    haystack = _normalize_lookup(issuer)
+    if not haystack:
+        return None
+    for issuer_type, needles in _ISSUER_TYPE_RULES:
+        if any(needle in haystack for needle in needles):
+            return issuer_type
+    return None
+
+
+def _coupon_rate_pct(value: Any) -> Optional[float]:
+    raw = cell_str(value)
+    if raw and "%" in raw:
+        return cell_float(raw.replace("%", ""))
+    parsed = cell_float(value)
+    if parsed is not None and isinstance(value, (int, float)) and 0 < abs(parsed) <= 1:
+        return parsed * 100
+    return parsed
+
+
+def parse_reference_sheet(ws: Worksheet) -> list[dict]:
+    """Лист `Справочник` — паспорт выпуска ЦБ по ISIN."""
+    header_row = find_header_row(ws, must_contain=("isin",))
+    if header_row is None:
+        return []
+
+    headers = header_index_map(ws, header_row)
+    col_isin = find_col(headers, "isin")
+    if not col_isin:
+        return []
+
+    col_ticker = find_col(headers, "ticker of kase", "ticker", "тикер", "код ценной бумаги")
+    col_name = find_col(headers, "name", "наименование", "название")
+    col_security_type = _find_reference_col(
+        headers,
+        "тип ценной бумаги", "security type", "instrument type", "вид ценной бумаги", "fin sec",
+    )
+    col_issuer = find_col(headers, "issuer", "эмитент")
+    col_issuer_type = _find_reference_col(headers, "тип эмитента", "issuer type")
+    # Колонка «TYPE» (ГЦБ/Агентские/МФО/Ин. ЦБ) — класс бумаги по п. 6.2.2 D.
+    # В шаблоне есть и «Bond type», но там хранится описание купона
+    # («Фикс», «инфляция + 0,5%…»), поэтому TYPE приоритетнее.
+    col_class = headers.get("type") or _find_reference_col(headers, "тип выпуска", "категория", "category", "класс")
+    col_btype = _find_reference_col(headers, "bond type")
+    col_coupon_type = _find_reference_col(
+        headers,
+        "тип купонной ставки", "coupon type", "coupon rate type", "тип купона",
+    )
+    col_coupon = _find_reference_col(
+        headers,
+        "размер купонной ставки", "coupon rate", "coupon pct", "купонная ставка", "coupon", "купон",
+        excludes=(
+            "тип купон", "coupon type", "frequency", "периодичность",
+            "last coupon", "next coupon", "дата последней", "дата следующей",
+        ),
+    )
+    col_freq = find_col(headers, "frequency", "частота", "периодичность выплаты купона")
+    col_base = find_col(headers, "base", "базис", "база расчета")
+    col_nominal = find_col(headers, "nominal", "номинал")
+    col_start = find_col(headers, "start date", "дата начала обращения", "дата выпуска")
+    col_maturity = find_col(headers, "maturity", "дата погашения")
+    col_last_coupon = find_col(headers, "last coupon date", "дата последней выплаты купона")
+    col_next_coupon = find_col(headers, "next coupon date", "дата следующей выплаты купона")
+    col_quotation = _find_reference_col(headers, "предмет котирования", "quotation", "quote subject")
+    col_currency = find_col(headers, "currency", "валюта", "валюта выпуска")
+    col_rating = _find_reference_col(headers, "рейтинг эмитента", "issuer rating", "rating")
+    col_rating_source = _find_reference_col(headers, "источник рейтинга", "rating source")
+    col_rating_agency = _find_reference_col(
+        headers,
+        "рейтинговое агентство", "рейтинговое агенство", "rating agency",
+    )
+
+    out: list[dict] = []
+    for r in iter_data_rows(ws, header_row + 1):
+        isin = cell_str(ws.cell(r, col_isin).value)
+        if not isin or len(isin) < 6:
+            continue
+        issuer = cell_str(ws.cell(r, col_issuer).value) if col_issuer else None
+        issuer_type = cell_str(ws.cell(r, col_issuer_type).value) if col_issuer_type else None
+        issuer_type = issuer_type or _infer_issuer_type(issuer, isin)
+        coupon_raw = ws.cell(r, col_coupon).value if col_coupon else None
+        bond_type = cell_str(ws.cell(r, col_class).value) if col_class else None
+        coupon_descr = cell_str(ws.cell(r, col_btype).value) if col_btype else None
+        out.append({
+            "isin": isin,
+            "ticker_kase": cell_str(ws.cell(r, col_ticker).value) if col_ticker else None,
+            "instrument_name": cell_str(ws.cell(r, col_name).value) if col_name else None,
+            "security_type": cell_str(ws.cell(r, col_security_type).value) if col_security_type else None,
+            "issuer": issuer,
+            "issuer_type": bond_type or issuer_type,
+            "bond_type": bond_type or issuer_type,
+            "coupon_rate_pct": _coupon_rate_pct(coupon_raw),
+            "coupon_rate_text": coupon_descr or cell_str(coupon_raw),
+            "coupon_type": cell_str(ws.cell(r, col_coupon_type).value) if col_coupon_type else None,
+            "frequency": cell_int(ws.cell(r, col_freq).value) if col_freq else None,
+            "base": cell_str(ws.cell(r, col_base).value) if col_base else None,
+            "nominal": cell_float(ws.cell(r, col_nominal).value) if col_nominal else None,
+            "start_date": cell_date(ws.cell(r, col_start).value) if col_start else None,
+            "maturity_date": cell_date(ws.cell(r, col_maturity).value) if col_maturity else None,
+            "last_coupon_date": cell_date(ws.cell(r, col_last_coupon).value) if col_last_coupon else None,
+            "next_coupon_date": cell_date(ws.cell(r, col_next_coupon).value) if col_next_coupon else None,
+            "quotation_type": cell_str(ws.cell(r, col_quotation).value) if col_quotation else None,
+            "currency": (cell_str(ws.cell(r, col_currency).value) or "KZT").upper()[:8] if col_currency else "KZT",
+            "rating": cell_str(ws.cell(r, col_rating).value) if col_rating else None,
+            "rating_source": cell_str(ws.cell(r, col_rating_source).value) if col_rating_source else None,
+            "rating_agency": cell_str(ws.cell(r, col_rating_agency).value) if col_rating_agency else None,
+            "src_row": r,
+        })
+    return out
+
+
 def parse_fx_sheet(ws: Worksheet) -> list[dict]:
     """Лист курсов USD/KZT от НБ РК. Ожидаемые колонки: Дата, Курс."""
     header_row = find_header_row(ws, must_contain=("дата",))
@@ -440,9 +620,14 @@ def parse_bond_lots_sheet(ws: Worksheet, *, category: str,
     col_weight = find_col(headers, "weight", "вес")
     col_ytm = find_col(headers, "ytm", "доходность")
     col_dur = find_col(headers, "duration", "дюрация")
-    col_maturity = find_col(headers, "maturity", "дата погашения")
+    col_maturity = headers.get("maturity") or find_col(headers, "дата погашения")
     col_lastcoupon = find_col(headers, "last coupon date")
+    col_prevcoupon = find_col(headers, "previous coupon date")
     col_status = find_col(headers, "maturity status", "статус")
+    col_coupon = headers.get("coupon rate") or find_col(headers, "ставка купона")
+    col_freq = find_col(headers, "coupon frequence", "coupon frequency", "frequency")
+    col_base = headers.get("base")
+    col_issuer = headers.get("issuer")
 
     if not col_isin or not col_sub:
         return []
@@ -483,6 +668,11 @@ def parse_bond_lots_sheet(ws: Worksheet, *, category: str,
             "maturity_date": cell_date(ws.cell(r, col_maturity).value) if col_maturity else None,
             "last_coupon_date": cell_date(ws.cell(r, col_lastcoupon).value) if col_lastcoupon else None,
             "maturity_status": cell_str(ws.cell(r, col_status).value) if col_status else None,
+            "coupon_rate": cell_float(ws.cell(r, col_coupon).value) if col_coupon else None,
+            "frequency": cell_int(ws.cell(r, col_freq).value) if col_freq else None,
+            "base": cell_str(ws.cell(r, col_base).value) if col_base else None,
+            "previous_coupon_date": cell_date(ws.cell(r, col_prevcoupon).value) if col_prevcoupon else None,
+            "issuer": cell_str(ws.cell(r, col_issuer).value) if col_issuer else None,
             "src_row": r,
         })
     return out
@@ -492,9 +682,13 @@ def parse_bond_lots_sheet(ws: Worksheet, *, category: str,
 # REPO open positions
 # ──────────────────────────────────────────────────────────────────────────
 def parse_repo_sheet(ws: Worksheet, *, fallback_date: Optional[date] = None) -> list[dict]:
-    header_row = find_header_row(ws, must_contain=("close date",))
-    if header_row is None:
-        header_row = find_header_row(ws, must_contain=("face value",))
+    """Лист «Repo» — открытые сделки обратного РЕПО на дату снимка.
+
+    В реальном шаблоне колонка даты закрытия подписана с опечаткой
+    («Clouse date»), ставка — «Interest rate», а биржевой номер сделки лежит в
+    колонке A без заголовка (в A2 стоит дата отчёта).
+    """
+    header_row = find_header_row(ws, must_contain=("face value",))
     if header_row is None:
         return []
 
@@ -504,39 +698,60 @@ def parse_repo_sheet(ws: Worksheet, *, fallback_date: Optional[date] = None) -> 
     col_isin = find_col(headers, "isin")
     col_trade = find_col(headers, "trade date")
     col_val = find_col(headers, "valuation date")
-    col_close = find_col(headers, "close date")
+    col_close = find_col(headers, "close date", "clouse date", "closing date", "дата закрытия")
     col_face = find_col(headers, "face value")
     col_closeval = find_col(headers, "close value")
-    col_rate = find_col(headers, "repo rate", "ставка репо")
+    col_rate = find_col(headers, "repo rate", "ставка репо", "interest rate")
+    col_base = find_col(headers, "base")
     col_acc = find_col(headers, "accrued interest")
-    col_term = find_col(headers, "term", "срок")
+    col_term = headers.get("term") or headers.get("срок")
     col_mv = find_col(headers, "market value")
+    col_ytm = headers.get("ytm")
+    col_dur = find_col(headers, "modified duration")
+    col_status = find_col(headers, "maturity status")
 
     if not col_sub or not col_face:
         return []
 
     out: list[dict] = []
-    for r in iter_data_rows(ws, header_row + 1):
+    for r in iter_data_rows(ws, header_row + 1, key_col=col_sub):
         sub = normalize_subfund_name(ws.cell(r, col_sub).value)
         if not sub:
             continue
         face = cell_float(ws.cell(r, col_face).value) or 0.0
         if abs(face) < 0.01:
             continue
+        deal_raw = ws.cell(r, 1).value if col_sub != 1 else None
+        deal_id = None
+        if isinstance(deal_raw, (int, float)) and not isinstance(deal_raw, bool):
+            deal_id = str(int(deal_raw))
+        elif isinstance(deal_raw, str) and deal_raw.strip():
+            deal_id = deal_raw.strip()
+        trade_date = cell_date(ws.cell(r, col_trade).value) if col_trade else None
+        close_date = cell_date(ws.cell(r, col_close).value) if col_close else None
+        term = cell_int(ws.cell(r, col_term).value) if col_term else None
+        if term is None and trade_date and close_date:
+            term = (close_date - trade_date).days
+        rate = cell_float(ws.cell(r, col_rate).value) if col_rate else None
         out.append({
             "cdu_name": sub,
+            "deal_id": deal_id,
             "instrument_code": cell_str(ws.cell(r, col_code).value) if col_code else None,
             "isin": cell_str(ws.cell(r, col_isin).value) if col_isin else None,
-            "trade_date": cell_date(ws.cell(r, col_trade).value) if col_trade else fallback_date,
+            "trade_date": trade_date or fallback_date,
             # valuation_date = report_date (дата снимка), не xlsx 'Valuation date' (= settle date).
             "valuation_date": fallback_date or (cell_date(ws.cell(r, col_val).value) if col_val else None),
-            "close_date": cell_date(ws.cell(r, col_close).value) if col_close else None,
+            "close_date": close_date,
             "face_value": face,
             "close_value": cell_float(ws.cell(r, col_closeval).value) if col_closeval else None,
-            "repo_rate_pct": cell_float(ws.cell(r, col_rate).value) if col_rate else None,
+            "repo_rate_pct": rate,
+            "base": cell_int(ws.cell(r, col_base).value) if col_base else None,
             "accrued_interest": cell_float(ws.cell(r, col_acc).value) if col_acc else None,
-            "term_days": cell_int(ws.cell(r, col_term).value) if col_term else None,
+            "term_days": term,
             "market_value": cell_float(ws.cell(r, col_mv).value) if col_mv else None,
+            "ytm": cell_float(ws.cell(r, col_ytm).value) if col_ytm else None,
+            "duration": cell_float(ws.cell(r, col_dur).value) if col_dur else None,
+            "maturity_status": cell_str(ws.cell(r, col_status).value) if col_status else None,
             "src_row": r,
         })
     return out
@@ -706,6 +921,12 @@ def parse_report_sheet(ws: Worksheet, *, fallback_date: Optional[date] = None) -
         col_hard = col_by_alias(r, "hard limit")
         col_soft = col_by_alias(r, "soft limit")
         col_free = col_by_alias(r, "свободный остаток", "free limit")
+
+        # Some Risk Report files repeat a compact helper table on the right
+        # side of the sheet. It has Instruments/MV columns but no YTM/Duration
+        # or limits, so using it doubles rows and can overwrite rich totals.
+        if instr_col > 5 or col_ytm is None or col_duration is None:
+            continue
 
         empty_streak = 0
         block_positions = 0

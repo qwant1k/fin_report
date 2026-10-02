@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { CheckCircle, AlertTriangle, XCircle, Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/lib/auth'
+import { useWorkContextStore } from '@/lib/workContext'
 
 interface ReconItem {
   id: number
@@ -20,7 +21,9 @@ interface ReconItem {
 export default function ReconciliationPage() {
   const [items, setItems] = useState<ReconItem[]>([])
   const [loading, setLoading] = useState(false)
-  const [runDate, setRunDate] = useState(() => new Date().toISOString().slice(0, 10))
+  // По умолчанию берём общую рабочую дату (см. lib/workContext.ts), совпадающую с
+  // Рабочим днём, Позициями, KASE и Отчётами.
+  const [runDate, setRunDate] = useState(() => useWorkContextStore.getState().workDate)
   const [runLoading, setRunLoading] = useState(false)
   const canRun = useAuthStore((s) => s.can('reconciliation.run'))
 

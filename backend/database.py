@@ -32,6 +32,21 @@ engine = create_engine(
     connect_args=connect_args,
 )
 
+if settings.database_url.startswith("sqlite"):
+    from sqlalchemy import event
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_connection, _record):  # pragma: no cover - driver hook
+        # WAL lets the scheduler write while users read; busy_timeout avoids
+        # «database is locked» errors on concurrent writes.
+        cursor = dbapi_connection.cursor()
+        try:
+            if ":memory:" not in settings.database_url:
+                cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=10000")
+        finally:
+            cursor.close()
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
@@ -101,6 +116,17 @@ def _apply_dev_migrations() -> None:
             ("source_doc_id",       "INTEGER"),
             ("notes",               "TEXT"),
             ("updated_at",          "DATETIME"),
+            ("workflow_status",     "VARCHAR(24) DEFAULT 'APPROVED'"),
+            ("is_manual",           "BOOLEAN DEFAULT 0"),
+            ("is_active",           "BOOLEAN DEFAULT 1"),
+            ("created_by",          "VARCHAR(80)"),
+            ("updated_by",          "VARCHAR(80)"),
+            ("approved_by",         "VARCHAR(80)"),
+            ("approved_at",         "DATETIME"),
+            ("rejected_by",         "VARCHAR(80)"),
+            ("rejected_at",         "DATETIME"),
+            ("decision_comment",    "TEXT"),
+            ("change_reason",       "TEXT"),
         ]:
             if col not in ar_cols:
                 additions.append((
@@ -179,11 +205,46 @@ def _apply_dev_migrations() -> None:
             ("price_flag",       "BOOLEAN DEFAULT 0"),
             ("price_diff_pct",   "FLOAT"),
             ("price_checked_at", "DATETIME"),
+            ("workflow_status",  "VARCHAR(24) DEFAULT 'APPROVED'"),
+            ("updated_by",       "VARCHAR(80)"),
+            ("approved_by",      "VARCHAR(80)"),
+            ("approved_at",      "DATETIME"),
+            ("rejected_by",      "VARCHAR(80)"),
+            ("rejected_at",      "DATETIME"),
+            ("decision_comment", "TEXT"),
+            ("change_reason",    "TEXT"),
         ]:
             if col not in trade_cols:
                 additions.append((
                     "trades", col,
                     f"ALTER TABLE trades ADD COLUMN {col} {ddl}",
+                ))
+
+    # bond_lots — record which source priced each lot (market | risk_parameters)
+    if "bond_lots" in inspector.get_table_names():
+        bl_cols = {c["name"] for c in inspector.get_columns("bond_lots")}
+        if "price_source" not in bl_cols:
+            additions.append((
+                "bond_lots", "price_source",
+                "ALTER TABLE bond_lots ADD COLUMN price_source VARCHAR(20)",
+            ))
+
+    if "instrument_reference" in inspector.get_table_names():
+        ref_cols = {c["name"] for c in inspector.get_columns("instrument_reference")}
+        for col, ddl in [
+            ("security_type",     "VARCHAR(80)"),
+            ("issuer_type",       "VARCHAR(80)"),
+            ("coupon_rate_text",  "VARCHAR(120)"),
+            ("quotation_type",    "VARCHAR(80)"),
+            ("rating_source",     "VARCHAR(300)"),
+            ("rating_agency",     "VARCHAR(80)"),
+            ("source",            "VARCHAR(80)"),
+            ("source_updated_at", "DATETIME"),
+        ]:
+            if col not in ref_cols:
+                additions.append((
+                    "instrument_reference", col,
+                    f"ALTER TABLE instrument_reference ADD COLUMN {col} {ddl}",
                 ))
 
     # Phase 3 — CDU-specific file format overrides
@@ -204,6 +265,31 @@ def _apply_dev_migrations() -> None:
             """))
         logger.info("[migrate] cdu_file_formats created")
 
+    # KasePrice.duration used to be filled with KASE «dtm» (days to maturity),
+    # which then polluted weighted durations.  Clear those values once.
+    if "kase_prices" in inspector.get_table_names():
+        with engine.begin() as conn:
+            fixed = conn.execute(text(
+                "UPDATE kase_prices SET duration = NULL "
+                "WHERE duration IS NOT NULL AND (duration = dtm OR duration > 100)"
+            )).rowcount
+            if fixed:
+                logger.info(f"[migrate] kase_prices.duration cleared for {fixed} rows (was dtm)")
+
+    if "coupon_schedule" in inspector.get_table_names():
+        cs_cols = {c["name"] for c in inspector.get_columns("coupon_schedule")}
+        for col in ("margin_pct", "index_rate_pct"):
+            if col not in cs_cols:
+                additions.append(("coupon_schedule", col, f"ALTER TABLE coupon_schedule ADD COLUMN {col} FLOAT"))
+
+    if "cash_movements" in inspector.get_table_names():
+        cm_cols = {c["name"] for c in inspector.get_columns("cash_movements")}
+        if "account" not in cm_cols:
+            additions.append((
+                "cash_movements", "account",
+                "ALTER TABLE cash_movements ADD COLUMN account VARCHAR(40)",
+            ))
+
     if not additions:
         return
 
@@ -223,3 +309,38 @@ def init_db() -> None:
     _apply_dev_migrations()
     # 2) Create any missing tables
     Base.metadata.create_all(bind=engine)
+    # 3) Table rebuilds SQLite cannot do with ALTER
+    _rebuild_nullable_columns()
+
+
+def _rebuild_nullable_columns() -> None:
+    """security_holdings.cdu_id became optional (instrument of the reference
+    book without a manager).  SQLite cannot drop NOT NULL, so the table is
+    rebuilt once, keeping all rows."""
+    if not settings.database_url.startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if "security_holdings" not in inspector.get_table_names():
+        return
+    cols = {c["name"]: c for c in inspector.get_columns("security_holdings")}
+    if "cdu_id" not in cols or cols["cdu_id"].get("nullable", True):
+        return
+    from models import db_models
+    table = db_models.SecurityHolding.__table__
+    with engine.begin() as conn:
+        conn.execute(text("PRAGMA foreign_keys=OFF"))
+        for (name,) in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='security_holdings' "
+            "AND name NOT LIKE 'sqlite_autoindex%'"
+        )).fetchall():
+            conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+        conn.execute(text("ALTER TABLE security_holdings RENAME TO security_holdings_old"))
+        table.create(bind=conn)
+        new_cols = [c.name for c in table.columns]
+        common = [c for c in new_cols if c in cols]
+        col_list = ", ".join(f'"{c}"' for c in common)
+        conn.execute(text(
+            f"INSERT INTO security_holdings ({col_list}) SELECT {col_list} FROM security_holdings_old"
+        ))
+        conn.execute(text("DROP TABLE security_holdings_old"))
+    logger.info("[migrate] security_holdings.cdu_id is now optional")

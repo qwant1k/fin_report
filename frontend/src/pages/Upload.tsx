@@ -11,12 +11,17 @@ import {
   FilePlus2,
   RefreshCw,
   Loader2,
+  SlidersHorizontal,
   X,
 } from 'lucide-react'
+import { AnimatePresence, motion } from 'framer-motion'
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
+import { cn } from '@/lib/cn'
+import { Modal, PageHeader } from '@/components/ui'
 import { useAuthStore } from '@/lib/auth'
+import { useConfirm } from '@/lib/confirm'
 import { TradeFile, CDU } from '@/lib/types'
 import { formatDate } from '@/lib/format'
 
@@ -79,12 +84,15 @@ async function postTradeReport(
 
 export default function UploadPage() {
   const qc = useQueryClient()
+  const confirm = useConfirm()
   const [pendingCdu, setPendingCdu] = useState<number | ''>('')
   const [pendingDate, setPendingDate] = useState<string>('')
   const [duplicate, setDuplicate] = useState<DuplicatePrompt | null>(null)
   const [duplicateBusy, setDuplicateBusy] = useState<DuplicateAction | null>(null)
   const [jobs, setJobs] = useState<UploadJob[]>([])
+  const [showOptions, setShowOptions] = useState(false)
   const canUpload = useAuthStore((s) => s.can('upload.trade_report'))
+  const hasUploadOptions = Boolean(pendingCdu || pendingDate)
 
   const updateJob = (id: string, patch: Partial<UploadJob>) =>
     setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, ...patch } : j)))
@@ -256,36 +264,84 @@ export default function UploadPage() {
 
   return (
     <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-bold">Загрузка отчётов от ЧДУ</h1>
-        <p className="text-sm text-slate-500">XLSX выгрузка KASE-сделок (TradeReport)</p>
-      </header>
+      <PageHeader
+        icon={UploadCloud}
+        title="Загрузка отчётов от ЧДУ"
+        subtitle="XLSX выгрузка KASE-сделок (TradeReport)"
+      />
 
       {canUpload && (
       <div className="card p-4 space-y-3">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div>
-            <label className="label">ЧДУ (опционально, иначе авто)</label>
-            <select className="input" value={pendingCdu} onChange={(e) => setPendingCdu(e.target.value ? Number(e.target.value) : '')}>
-              <option value="">Авто-определение</option>
-              {cdus.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="label">Дата торгов (опционально)</label>
-            <input type="date" className="input" value={pendingDate} onChange={(e) => setPendingDate(e.target.value)} />
-          </div>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {hasUploadOptions && !showOptions && (
+            <span className="badge-info">Параметры заданы</span>
+          )}
+          <button
+            type="button"
+            onClick={() => setShowOptions((open) => !open)}
+            className={cn('btn-secondary h-9 px-3 text-xs', showOptions && 'border-emerald-200 bg-emerald-50 text-emerald-800')}
+            aria-expanded={showOptions}
+          >
+            <SlidersHorizontal className="h-4 w-4" />
+            Параметры
+          </button>
         </div>
+        {showOptions && (
+          <div className="grid grid-cols-1 gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3 md:grid-cols-3">
+            <div>
+              <label className="label">ЧДУ</label>
+              <select className="input" value={pendingCdu} onChange={(e) => setPendingCdu(e.target.value ? Number(e.target.value) : '')}>
+                <option value="">Автоопределение</option>
+                {cdus.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="label">Дата торгов</label>
+              <input type="date" className="input" value={pendingDate} onChange={(e) => setPendingDate(e.target.value)} />
+            </div>
+            {hasUploadOptions && (
+              <div className="flex items-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingCdu('')
+                    setPendingDate('')
+                  }}
+                  className="btn-ghost h-10 px-3 text-xs"
+                >
+                  <X className="h-4 w-4" />
+                  Сбросить
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         <div
           {...getRootProps()}
-          className={`border-2 border-dashed rounded-lg p-10 text-center cursor-pointer transition ${
-            isDragActive ? 'border-kdif-green bg-emerald-50' : 'border-slate-300 hover:border-kdif-green'
-          }`}
+          className={cn(
+            'group relative cursor-pointer overflow-hidden rounded-2xl border-2 border-dashed p-10 text-center transition-all duration-300',
+            isDragActive
+              ? 'border-emerald-500 bg-emerald-50/80 ring-4 ring-emerald-500/10'
+              : 'border-slate-300 hover:border-emerald-400 hover:bg-emerald-50/40',
+          )}
         >
           <input {...getInputProps()} />
-          <UploadCloud className="w-10 h-10 mx-auto mb-2 text-slate-400" />
-          <div className="font-medium">Перетащите XLSX/XLSM сюда или кликните для выбора</div>
-          <div className="text-xs text-slate-500 mt-1">Можно загружать несколько файлов одновременно</div>
+          <div
+            className={cn(
+              'mx-auto mb-3 flex h-16 w-16 items-center justify-center rounded-2xl bg-brand-gradient text-white shadow-soft transition-transform duration-300',
+              isDragActive ? 'scale-110' : 'group-hover:scale-105',
+            )}
+          >
+            <UploadCloud className="h-8 w-8" />
+          </div>
+          <div className="font-semibold text-slate-800">
+            {isDragActive ? 'Отпустите файлы для загрузки' : 'Перетащите XLSX/XLSM сюда или кликните'}
+          </div>
+          <div className="mt-1 text-xs text-slate-500">Можно загружать несколько файлов одновременно</div>
+          <div className="mt-3 flex items-center justify-center gap-2">
+            <span className="badge-neutral">.xlsx</span>
+            <span className="badge-neutral">.xlsm</span>
+          </div>
         </div>
       </div>
       )}
@@ -303,9 +359,11 @@ export default function UploadPage() {
             </button>
           </div>
           <div className="space-y-2">
-            {jobs.map((job) => (
-              <UploadJobCard key={job.id} job={job} onDismiss={() => removeJob(job.id)} />
-            ))}
+            <AnimatePresence initial={false}>
+              {jobs.map((job) => (
+                <UploadJobCard key={job.id} job={job} onDismiss={() => removeJob(job.id)} />
+              ))}
+            </AnimatePresence>
           </div>
         </div>
       )}
@@ -329,7 +387,7 @@ export default function UploadPage() {
             </thead>
             <tbody>
               {(files.data ?? []).map((f) => (
-                <tr key={f.id}>
+                <tr key={f.id} className="group">
                   <td>{f.id}</td>
                   <td className="flex items-center gap-2">
                     <FileSpreadsheet className="w-4 h-4 text-emerald-600" /> {f.filename}
@@ -356,7 +414,20 @@ export default function UploadPage() {
                   </td>
                   <td>
                     {canUpload && (
-                      <button onClick={() => remove.mutate(f.id)} className="btn-secondary text-red-600 px-2 py-1">
+                      <button
+                        onClick={async () => {
+                          const { confirmed } = await confirm({
+                            title: 'Удалить файл Trade Report?',
+                            description: `«${f.filename}» и связанные с ним сделки будут удалены безвозвратно.`,
+                            tone: 'danger',
+                            confirmLabel: 'Удалить',
+                          })
+                          if (confirmed) remove.mutate(f.id)
+                        }}
+                        className="btn-secondary px-2 py-1 text-red-600 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"
+                        title="Удалить файл"
+                        aria-label="Удалить файл"
+                      >
                         <Trash2 className="w-4 h-4" />
                       </button>
                     )}
@@ -365,7 +436,9 @@ export default function UploadPage() {
               ))}
               {!files.data?.length && (
                 <tr>
-                  <td colSpan={9} className="text-center text-slate-400 py-6">Файлов пока нет</td>
+                  <td colSpan={9} className="py-10 text-center text-slate-400">
+                    Файлов пока нет — загрузите первый отчёт выше
+                  </td>
                 </tr>
               )}
             </tbody>
@@ -373,20 +446,25 @@ export default function UploadPage() {
         </div>
       </div>
 
-      {duplicate && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="card w-full max-w-lg p-5 space-y-4 bg-white shadow-xl">
-            <div className="flex items-start gap-3">
-              <AlertCircle className="w-6 h-6 text-amber-500 shrink-0 mt-0.5" />
-              <div>
-                <h2 className="text-lg font-semibold">Файл уже загружен</h2>
-                <p className="text-sm text-slate-500 mt-1">
-                  Контрольная сумма совпадает с существующим файлом. Выберите действие.
-                </p>
-              </div>
-            </div>
-
-            <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm space-y-1">
+      <Modal
+        open={!!duplicate}
+        onClose={() => { if (!duplicateBusy) setDuplicate(null) }}
+        size="lg"
+        title={
+          <span className="flex items-center gap-2">
+            <AlertCircle className="h-5 w-5 text-amber-500" /> Файл уже загружен
+          </span>
+        }
+        description="Контрольная сумма совпадает с существующим файлом. Выберите действие."
+        footer={
+          <button disabled={!!duplicateBusy} onClick={() => setDuplicate(null)} className="btn-secondary">
+            Отменить
+          </button>
+        }
+      >
+        {duplicate && (
+          <div className="space-y-4">
+            <div className="space-y-1 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">
               <div><span className="text-slate-500">Файл:</span> <b>{duplicate.existing.filename}</b></div>
               <div><span className="text-slate-500">Дата торгов:</span> {duplicate.existing.trade_date ?? '—'}</div>
               <div><span className="text-slate-500">Загружено:</span> {formatDate(duplicate.existing.uploaded_at) || '—'}</div>
@@ -394,40 +472,22 @@ export default function UploadPage() {
               <div><span className="text-slate-500">Строк:</span> {duplicate.existing.rows_parsed}</div>
               <div><span className="text-slate-500">Статус:</span> {duplicate.existing.status}</div>
             </div>
-
             <div className="grid grid-cols-1 gap-2">
-              <button
-                disabled={!!duplicateBusy}
-                onClick={() => resolveDuplicate('replace')}
-                className="btn btn-primary justify-center"
-              >
-                <RefreshCw className="w-4 h-4" />
+              <button disabled={!!duplicateBusy} onClick={() => resolveDuplicate('replace')} className="btn-primary justify-center">
+                <RefreshCw className="h-4 w-4" />
                 {duplicateBusy === 'replace' ? 'Замена…' : 'Заменить существующий'}
               </button>
-              <button
-                disabled={!!duplicateBusy}
-                onClick={() => resolveDuplicate('new_version')}
-                className="btn btn-secondary justify-center"
-              >
-                <FilePlus2 className="w-4 h-4" />
+              <button disabled={!!duplicateBusy} onClick={() => resolveDuplicate('new_version')} className="btn-secondary justify-center">
+                <FilePlus2 className="h-4 w-4" />
                 {duplicateBusy === 'new_version' ? 'Загрузка…' : 'Загрузить как новую версию'}
               </button>
-              <button
-                disabled={!!duplicateBusy}
-                onClick={() => setDuplicate(null)}
-                className="btn btn-secondary justify-center"
-              >
-                Отменить
-              </button>
             </div>
-
             <p className="text-xs text-slate-500">
-              «Заменить» — старый файл и связанные сделки переписываются. «Новая версия» — оба файла остаются в истории
-              с разными отметками времени.
+              «Заменить» — старый файл и связанные сделки переписываются. «Новая версия» — оба файла остаются в истории с разными отметками времени.
             </p>
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
     </div>
   )
 }
@@ -463,7 +523,14 @@ function UploadJobCard({ job, onDismiss }: { job: UploadJob; onDismiss: () => vo
   const widthPct = job.phase === 'processing' ? 100 : job.percent
 
   return (
-    <div className="rounded-md border border-slate-200 bg-white p-3">
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, x: 24 }}
+      transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+      className="rounded-xl border border-slate-200 bg-white p-3"
+    >
       <div className="flex items-center gap-3">
         <FileSpreadsheet className="h-4 w-4 shrink-0 text-emerald-600" />
         <div className="min-w-0 flex-1">
@@ -516,6 +583,6 @@ function UploadJobCard({ job, onDismiss }: { job: UploadJob; onDismiss: () => vo
           </div>
         </div>
       </div>
-    </div>
+    </motion.div>
   )
 }

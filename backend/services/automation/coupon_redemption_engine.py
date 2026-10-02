@@ -1,46 +1,54 @@
-"""Auto-coupon and auto-redemption engine — Phase C1/C2.
+"""Coupon and redemption events — business process 6.1.6–6.1.7, 7.1.7–7.1.10.
 
-Rules:
-  - last_coupon_date = T → synthetic Trade "COUPON" + AR if value_date > T
-  - maturity_date = T → synthetic Trade "REDEMPTION" + AR
-    If coupon_rate > 0 → separate Trade "COUPON" from last_coupon_date to maturity
-      with day-count basis (30/360, act/360, act/act).
+For every CDU and every bond held at the end of T−1 (portfolio engine):
 
-Idempotent: upsert by (cdu_id, isin, event_date, operation_type, is_synthetic=True).
+* **Coupon** — when T is a coupon date of the issue (schedule from the
+  Справочник: start of circulation, frequency, maturity).  Amount = the full
+  coupon of the period (RR «Accrued interest (debet)») computed with the
+  issue day-count basis (30/360 = 30E/360, actual/360, actual/365,
+  actual/actual split by calendar year as described in the process).
+* **Redemption** — when maturity = T: face value of the position.  The coupon
+  of the last period is the coupon event of the same day (no double count).
+
+Settlement:
+* ГЦБ — cash on T (Value date = T, synthetic Trade + cash movement).
+* Агентские / МФО / Ин. ЦБ — the payment window ends after T (KASE schedule),
+  so the amount is booked as a receivable («Сумма вознаграждения в пути по
+  ISIN …» / «Сумма погашения в пути по ISIN …») and becomes cash when the
+  receivable is repaid.  No cash is invented before it arrives.
+
+Idempotent: re-running T updates the same synthetic trades / events / AR and
+deactivates synthetic rows of T that are no longer justified (e.g. the bond
+was sold before the record date).  Historical Risk Report lots are never
+modified.
 """
 from __future__ import annotations
-from datetime import date, timedelta
+
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
 from models.db_models import (
     AccountReceivable,
-    BondLot,
+    CashMovement,
     CDU,
     CouponEvent,
-    InstrumentReference,
     RedemptionEvent,
     Trade,
 )
+from services.portfolio import bond_math as bm
+from services.portfolio.engine import MarketData, build_portfolio
+from services.portfolio.reference import ReferenceBook
+
+CASH_ON_T_CATEGORIES = {"GOV_BONDS"}
 
 
 def _day_count(start: date, end: date, base: str) -> float:
-    if base in ("30/360", "30/360E"):
-        # 30/360 bond basis
-        d1 = min(start.day, 30)
-        d2 = end.day if d1 < 30 else min(end.day, 30)
-        return (360 * (end.year - start.year)
-                + 30 * (end.month - start.month)
-                + (d2 - d1))
-    if base in ("act/360", "ACT/360"):
-        return (end - start).days
-    if base in ("act/act", "ACT/ACT"):
-        # Simplified: actual days in year
-        year_days = 366 if (start.year % 4 == 0 and (start.year % 100 != 0 or start.year % 400 == 0)) else 365
-        return (end - start).days
-    # Default fallback
-    return (end - start).days
+    """Kept for backward compatibility (used by older callers/tests)."""
+    return bm.day_count(start, end, bm.normalize_basis(base))
 
 
 def _calc_coupon_amount(
@@ -67,46 +75,74 @@ def _upsert_synthetic_trade(
     quantity: Optional[float] = None,
     face_value: Optional[float] = None,
     notes: str = "",
+    instrument_code: Optional[str] = None,
+    book_cash: bool = True,
 ) -> Trade:
-    """Idempotent synthetic trade upsert."""
+    """Idempotent synthetic trade upsert (key: CDU, T, operation, ISIN)."""
     existing = db.execute(select(Trade).where(
         Trade.cdu_id == cdu_id,
         Trade.trade_date == trade_date,
         Trade.operation_type == operation_type,
         Trade.isin == isin,
-        Trade.is_synthetic == True,
+        Trade.is_synthetic == True,  # noqa: E712
     )).scalars().first()
-    if existing:
-        existing.value_date = value_date
-        existing.amount_kzt = amount_kzt
-        existing.amount_ccy = amount_ccy
-        existing.currency = currency
-        existing.quantity = quantity
-        existing.face_value = face_value
-        existing.instrument_category = instrument_category
-        existing.notes = notes
-        db.flush()
-        return existing
-
-    t = Trade(
-        cdu_id=cdu_id,
-        trade_date=trade_date,
+    values = dict(
         value_date=value_date,
-        operation_type=operation_type,
-        instrument_kind="BOND",
-        instrument_category=instrument_category,
-        isin=isin,
         amount_kzt=amount_kzt,
         amount_ccy=amount_ccy,
         currency=currency,
         quantity=quantity,
         face_value=face_value,
-        is_synthetic=True,
+        instrument_kind="BOND",
+        instrument_category=instrument_category,
+        instrument_code=instrument_code,
         notes=notes,
+        description=notes,
+        workflow_status="APPROVED",
+        approved_by="SYSTEM",
+        approved_at=datetime.utcnow(),
+        is_active=True,
     )
-    db.add(t)
+    if existing:
+        for key, value in values.items():
+            setattr(existing, key, value)
+        trade = existing
+    else:
+        trade = Trade(
+            cdu_id=cdu_id, trade_date=trade_date, operation_type=operation_type,
+            isin=isin, is_synthetic=True, is_manual=False, created_by="SYSTEM",
+            direction="Продажа", **values,
+        )
+        db.add(trade)
     db.flush()
-    return t
+    _upsert_cash_movement(db, trade, active=book_cash)
+    return trade
+
+
+def _upsert_cash_movement(db: Session, trade: Trade, *, active: bool = True) -> None:
+    movement = db.execute(select(CashMovement).where(
+        CashMovement.related_trade_id == trade.id,
+    )).scalars().first()
+    values = {
+        "cdu_id": trade.cdu_id,
+        "operation_date": trade.value_date,
+        "amount": trade.amount_ccy if trade.amount_ccy is not None else trade.amount_kzt,
+        "amount_kzt": trade.amount_kzt,
+        "currency": trade.currency,
+        "movement_type": trade.operation_type,
+        "basis": trade.notes or f"Автоматически по операции {trade.operation_type}",
+        "related_isin": trade.isin,
+        "is_manual": False,
+        "workflow_status": "APPROVED",
+        "is_active": bool(active and trade.is_active),
+        "approved_by": "SYSTEM",
+        "created_by": "SYSTEM",
+    }
+    if movement:
+        for key, value in values.items():
+            setattr(movement, key, value)
+    elif active:
+        db.add(CashMovement(**values, related_trade_id=trade.id))
 
 
 def _upsert_ar(
@@ -120,20 +156,29 @@ def _upsert_ar(
     related_event_type: str,
     related_trade_id: int,
     due_date: Optional[date] = None,
+    amount_kzt: Optional[float] = None,
+    description: Optional[str] = None,
 ) -> AccountReceivable:
     existing = db.execute(select(AccountReceivable).where(
         AccountReceivable.cdu_id == cdu_id,
         AccountReceivable.isin == isin,
         AccountReceivable.record_date == record_date,
         AccountReceivable.related_event_type == related_event_type,
+        AccountReceivable.is_manual == False,  # noqa: E712
     )).scalars().first()
+    kzt = amount_kzt if amount_kzt is not None else amount
     if existing:
         existing.amount = amount
+        existing.amount_kzt = kzt
         existing.currency = currency
-        existing.balance_currency = amount
+        existing.balance_currency = amount if currency != "KZT" else None
+        existing.balance_kzt = kzt
         existing.due_date = due_date
         existing.related_trade_id = related_trade_id
-        existing.status = "OPEN"
+        existing.description = description or existing.description
+        existing.is_active = True
+        if existing.status not in ("CLOSED", "PARTIAL"):
+            existing.status = "OPEN"
         db.flush()
         return existing
 
@@ -142,258 +187,220 @@ def _upsert_ar(
         record_date=record_date,
         isin=isin,
         amount=amount,
+        amount_kzt=kzt,
         currency=currency,
-        balance_currency=amount,
-        balance_kzt=amount,  # simplification: KZT for KZT bonds; for USD use fx rate later
+        balance_currency=amount if currency != "KZT" else None,
+        balance_kzt=kzt,
         due_date=due_date,
+        description=description,
         related_event_type=related_event_type,
         related_trade_id=related_trade_id,
         status="OPEN",
+        workflow_status="APPROVED",
+        is_manual=False,
+        is_active=True,
+        created_by="SYSTEM",
+        approved_by="SYSTEM",
+        notes="Ожидается выписка",
     )
     db.add(ar)
     db.flush()
     return ar
 
 
-def generate_coupon_trades(db: Session, target_date: date) -> Dict[str, int]:
-    """For every ISIN with last_coupon_date == target_date, create synthetic COUPON trade + AR."""
-    counters = {"events": 0, "trades": 0, "ar_created": 0, "skipped": 0}
-
-    refs = db.execute(select(InstrumentReference).where(
-        InstrumentReference.last_coupon_date == target_date,
-        InstrumentReference.is_active == True,
-    )).scalars().all()
-
-    for ref in refs:
-        isin = ref.isin
-        # Find open lots per CDU
-        lots = db.execute(select(BondLot).where(
-            BondLot.isin == isin,
-            BondLot.quantity_current > 0,
-        )).scalars().all()
-
-        # Group by cdu_id
-        cdu_lots: Dict[int, List[BondLot]] = {}
-        for lot in lots:
-            cdu_lots.setdefault(lot.cdu_id, []).append(lot)
-
-        for cdu_id, lot_list in cdu_lots.items():
-            total_face = sum(l.face_value_current or 0 for l in lot_list)
-            if total_face <= 0:
-                continue
-
-            # Determine coupon amount
-            rate = ref.coupon_rate_pct or 0.0
-            # Assume coupon period = 1 year / frequency
-            freq = ref.frequency or 2
-            base_str = ref.base or "30/360"
-            days = _day_count(
-                target_date.replace(year=target_date.year - 1) if freq == 1 else
-                target_date - timedelta(days=180) if freq == 2 else
-                target_date - timedelta(days=90),
-                target_date,
-                base_str,
-            )
-            base_days = 360.0 if base_str in ("30/360", "act/360") else 365.0
-            coupon_amt = _calc_coupon_amount(total_face, rate, days, base_days)
-
-            if coupon_amt <= 0:
-                counters["skipped"] += 1
-                continue
-
-            # Upsert CouponEvent
-            ev = db.execute(select(CouponEvent).where(
-                CouponEvent.cdu_id == cdu_id,
-                CouponEvent.isin == isin,
-                CouponEvent.event_date == target_date,
-            )).scalars().first()
-            if not ev:
-                ev = CouponEvent(
-                    cdu_id=cdu_id,
-                    isin=isin,
-                    event_date=target_date,
-                    expected_amount=coupon_amt,
-                    coupon_rate_pct=rate,
-                    base=base_str,
-                    status="PLANNED",
-                )
-                db.add(ev)
-                db.flush()
-                counters["events"] += 1
-
-            # Trade
-            value_date = target_date  # KASE usually T+2, but we'll use T for simplicity; AR logic below
-            trade = _upsert_synthetic_trade(
-                db,
-                cdu_id=cdu_id,
-                trade_date=target_date,
-                value_date=value_date,
-                operation_type="COUPON",
-                isin=isin,
-                instrument_category=ref.bond_type or "OTHER",
-                amount_kzt=coupon_amt,
-                amount_ccy=coupon_amt,
-                currency=ref.currency or "KZT",
-                face_value=total_face,
-                notes=f"Auto-coupon {rate}% base={base_str}",
-            )
-            counters["trades"] += 1
-
-            # Update event trade_id
-            ev.trade_id = trade.id
-
-            # AR if value_date > target_date (rare for coupon, but per spec)
-            if value_date > target_date:
-                _upsert_ar(
-                    db,
-                    cdu_id=cdu_id,
-                    record_date=target_date,
-                    isin=isin,
-                    amount=coupon_amt,
-                    currency=ref.currency or "KZT",
-                    related_event_type="COUPON",
-                    related_trade_id=trade.id,
-                    due_date=value_date,
-                )
-                counters["ar_created"] += 1
-
-    db.commit()
-    logger.info(f"Coupon engine for {target_date}: {counters}")
-    return counters
+def _holdings_before(db: Session, cdu_id: int, target_date: date, refs: ReferenceBook,
+                     market: MarketData) -> Dict[str, dict]:
+    """Face value per ISIN held at the end of T−1 (record date)."""
+    state = build_portfolio(db, cdu_id, target_date - timedelta(days=1), refs=refs, market=market)
+    out: Dict[str, dict] = {}
+    for lot in state.bonds:
+        if lot.face_value <= 0.005:
+            continue
+        row = out.setdefault(lot.isin, {
+            "face": 0.0, "category": lot.category, "currency": lot.currency,
+            "ticker": lot.ticker,
+        })
+        row["face"] += lot.face_value
+    return out
 
 
-def generate_redemption_trades(db: Session, target_date: date) -> Dict[str, int]:
-    """For every ISIN with maturity_date == target_date, create REDEMPTION trade + optional COUPON + AR."""
-    counters = {"events": 0, "trades": 0, "ar_created": 0, "coupon_trades": 0, "skipped": 0}
-
-    refs = db.execute(select(InstrumentReference).where(
-        InstrumentReference.maturity_date == target_date,
-        InstrumentReference.is_active == True,
-    )).scalars().all()
-
-    for ref in refs:
-        isin = ref.isin
-        lots = db.execute(select(BondLot).where(
-            BondLot.isin == isin,
-            BondLot.quantity_current > 0,
-        )).scalars().all()
-
-        cdu_lots: Dict[int, List[BondLot]] = {}
-        for lot in lots:
-            cdu_lots.setdefault(lot.cdu_id, []).append(lot)
-
-        for cdu_id, lot_list in cdu_lots.items():
-            total_face = sum(l.face_value_current or 0 for l in lot_list)
-            if total_face <= 0:
-                continue
-
-            # Mark lots as matured (optional: set quantity_current = 0)
-            for lot in lot_list:
-                lot.quantity_current = 0
-                lot.face_value_current = 0
-                lot.maturity_status = "matured"
-
-            # Redemption Event
-            ev = db.execute(select(RedemptionEvent).where(
-                RedemptionEvent.cdu_id == cdu_id,
-                RedemptionEvent.isin == isin,
-                RedemptionEvent.event_date == target_date,
-            )).scalars().first()
-            if not ev:
-                ev = RedemptionEvent(
-                    cdu_id=cdu_id,
-                    isin=isin,
-                    event_date=target_date,
-                    face_value=total_face,
-                    status="PLANNED",
-                )
-                db.add(ev)
-                db.flush()
-                counters["events"] += 1
-
-            # Redemption Trade (face value back)
-            value_date = target_date
-            trade = _upsert_synthetic_trade(
-                db,
-                cdu_id=cdu_id,
-                trade_date=target_date,
-                value_date=value_date,
-                operation_type="REDEMPTION",
-                isin=isin,
-                instrument_category=ref.bond_type or "OTHER",
-                amount_kzt=total_face,
-                amount_ccy=total_face,
-                currency=ref.currency or "KZT",
-                face_value=total_face,
-                notes="Auto-redemption",
-            )
-            counters["trades"] += 1
-            ev.trade_id = trade.id
-
-            # AR for redemption principal
-            if value_date > target_date:
-                _upsert_ar(
-                    db,
-                    cdu_id=cdu_id,
-                    record_date=target_date,
-                    isin=isin,
-                    amount=total_face,
-                    currency=ref.currency or "KZT",
-                    related_event_type="REDEMPTION",
-                    related_trade_id=trade.id,
-                    due_date=value_date,
-                )
-                counters["ar_created"] += 1
-
-            # Separate coupon from last_coupon_date to maturity if coupon_rate > 0
-            rate = ref.coupon_rate_pct or 0.0
-            if rate > 0 and ref.last_coupon_date:
-                base_str = ref.base or "30/360"
-                days = _day_count(ref.last_coupon_date, target_date, base_str)
-                base_days = 360.0 if base_str in ("30/360", "act/360") else 365.0
-                coupon_amt = _calc_coupon_amount(total_face, rate, days, base_days)
-
-                if coupon_amt > 0:
-                    cp_trade = _upsert_synthetic_trade(
-                        db,
-                        cdu_id=cdu_id,
-                        trade_date=target_date,
-                        value_date=value_date,
-                        operation_type="COUPON",
-                        isin=isin,
-                        instrument_category=ref.bond_type or "OTHER",
-                        amount_kzt=coupon_amt,
-                        amount_ccy=coupon_amt,
-                        currency=ref.currency or "KZT",
-                        face_value=total_face,
-                        notes=f"Auto-coupon on redemption {rate}% base={base_str} days={days}",
-                    )
-                    counters["coupon_trades"] += 1
-                    ev.coupon_trade_id = cp_trade.id
-
-                    # AR for coupon on redemption
-                    if value_date > target_date:
-                        _upsert_ar(
-                            db,
-                            cdu_id=cdu_id,
-                            record_date=target_date,
-                            isin=isin,
-                            amount=coupon_amt,
-                            currency=ref.currency or "KZT",
-                            related_event_type="COUPON",
-                            related_trade_id=cp_trade.id,
-                            due_date=value_date,
-                        )
-                        counters["ar_created"] += 1
-
-    db.commit()
-    logger.info(f"Redemption engine for {target_date}: {counters}")
-    return counters
+def _fx(db: Session, currency: str, on: date) -> float:
+    if (currency or "KZT").upper() == "KZT":
+        return 1.0
+    from models.db_models import FXRate
+    row = db.execute(select(FXRate).where(
+        FXRate.currency == currency.upper(), FXRate.rate_date <= on,
+    ).order_by(FXRate.rate_date.desc())).scalars().first()
+    return float(row.rate) if row and row.rate else 1.0
 
 
 def run_daily_auto_events(db: Session, target_date: date) -> Dict[str, Dict[str, int]]:
-    """Run both coupon and redemption engines for target_date."""
-    return {
-        "coupons": generate_coupon_trades(db, target_date),
-        "redemptions": generate_redemption_trades(db, target_date),
-    }
+    """Generate coupon and redemption events of ``target_date`` for all CDUs."""
+    refs = ReferenceBook(db)
+    market = MarketData(db, target_date - timedelta(days=1))
+    coupons = {"events": 0, "trades": 0, "ar_created": 0, "skipped": 0, "deactivated": 0}
+    redemptions = {"events": 0, "trades": 0, "ar_created": 0, "coupon_trades": 0, "skipped": 0, "deactivated": 0}
+    touched: set[int] = set()
+
+    for cdu in db.query(CDU).filter_by(is_active=True).all():
+        holdings = _holdings_before(db, cdu.id, target_date, refs, market)
+        for isin, h in holdings.items():
+            ref = refs.get(isin) or refs.get(h.get("ticker"))
+            if ref is None or not ref.maturity_date:
+                continue
+            face = h["face"]
+            category = h["category"]
+            currency = (h["currency"] or "KZT").upper()
+            fx = _fx(db, currency, target_date)
+            cash_now = category in CASH_ON_T_CATEGORIES
+            rate = bm.rate_fraction(ref.coupon_rate_pct) or 0.0
+            freq = int(ref.frequency) if ref.frequency else None
+            basis = bm.normalize_basis(ref.base)
+
+            # ── coupon ──
+            # the schedule of the reference book (if maintained) has priority
+            schedule = refs.schedule(isin) or refs.schedule(h.get("ticker"))
+            sched_hit = None
+            if schedule:
+                from services.portfolio import coupon_schedule as cs
+                sched_hit = cs.coupon_on(schedule, target_date, face, basis,
+                                         start=ref.start_date, nominal=ref.nominal)
+            is_coupon_day = (sched_hit is not None) if schedule else (
+                rate > 0 and freq and bm.is_coupon_date(target_date, ref.maturity_date, freq, ref.start_date))
+            if is_coupon_day:
+                if sched_hit is not None:
+                    amount, prev, sched_rate = sched_hit
+                    rate = sched_rate if sched_rate is not None else rate
+                else:
+                    prev = bm.previous_coupon_date(target_date, ref.maturity_date, freq, ref.start_date)
+                    amount = bm.period_coupon_amount(face, rate, prev, target_date, basis) if prev else None
+                if prev is None or amount is None:
+                    coupons["skipped"] += 1
+                else:
+                    trade = _upsert_synthetic_trade(
+                        db, cdu_id=cdu.id, trade_date=target_date, value_date=target_date,
+                        operation_type="COUPON", isin=isin, instrument_category=category,
+                        amount_kzt=amount * fx, amount_ccy=amount, currency=currency,
+                        face_value=face, instrument_code=h.get("ticker"),
+                        notes=f"Купон {isin}: {face:,.2f} × {rate:.4%} за {prev:%d.%m.%Y}–{target_date:%d.%m.%Y} ({ref.base or '30/360'})",
+                        book_cash=cash_now,
+                    )
+                    touched.add(trade.id)
+                    coupons["trades"] += 1
+                    ev = db.execute(select(CouponEvent).where(
+                        CouponEvent.cdu_id == cdu.id, CouponEvent.isin == isin,
+                        CouponEvent.event_date == target_date,
+                    )).scalars().first()
+                    if ev is None:
+                        ev = CouponEvent(cdu_id=cdu.id, isin=isin, event_date=target_date,
+                                         expected_amount=amount, status="PLANNED")
+                        db.add(ev)
+                        coupons["events"] += 1
+                    ev.expected_amount = amount
+                    ev.coupon_rate_pct = rate * 100
+                    ev.base = ref.base
+                    ev.value_date = target_date
+                    ev.trade_id = trade.id
+                    if not cash_now:
+                        ar = _upsert_ar(
+                            db, cdu_id=cdu.id, record_date=target_date, isin=isin,
+                            amount=amount, amount_kzt=amount * fx, currency=currency,
+                            related_event_type="COUPON", related_trade_id=trade.id,
+                            description=f"Сумма вознаграждения в пути по ISIN {isin}",
+                        )
+                        ev.ar_id = ar.id
+                        ev.status = "PENDING"
+                        coupons["ar_created"] += 1
+                    else:
+                        ev.status = "PAID"
+
+            # ── redemption ──
+            if ref.maturity_date == target_date:
+                trade = _upsert_synthetic_trade(
+                    db, cdu_id=cdu.id, trade_date=target_date, value_date=target_date,
+                    operation_type="REDEMPTION", isin=isin, instrument_category=category,
+                    amount_kzt=face * fx, amount_ccy=face, currency=currency,
+                    face_value=face, instrument_code=h.get("ticker"),
+                    notes=f"Погашение {isin}: номинал {face:,.2f}",
+                    book_cash=cash_now,
+                )
+                touched.add(trade.id)
+                redemptions["trades"] += 1
+                ev = db.execute(select(RedemptionEvent).where(
+                    RedemptionEvent.cdu_id == cdu.id, RedemptionEvent.isin == isin,
+                    RedemptionEvent.event_date == target_date,
+                )).scalars().first()
+                if ev is None:
+                    ev = RedemptionEvent(cdu_id=cdu.id, isin=isin, event_date=target_date,
+                                         face_value=face, status="PLANNED")
+                    db.add(ev)
+                    redemptions["events"] += 1
+                ev.face_value = face
+                ev.value_date = target_date
+                ev.trade_id = trade.id
+                coupon_trade = db.execute(select(Trade).where(
+                    Trade.cdu_id == cdu.id, Trade.trade_date == target_date,
+                    Trade.operation_type == "COUPON", Trade.isin == isin,
+                    Trade.is_synthetic == True,  # noqa: E712
+                    Trade.is_active == True,  # noqa: E712
+                )).scalars().first()
+                if coupon_trade is not None:
+                    ev.coupon_trade_id = coupon_trade.id
+                    ev.coupon_amount = coupon_trade.amount_ccy
+                    redemptions["coupon_trades"] += 1
+                if not cash_now:
+                    ar = _upsert_ar(
+                        db, cdu_id=cdu.id, record_date=target_date, isin=isin,
+                        amount=face, amount_kzt=face * fx, currency=currency,
+                        related_event_type="REDEMPTION", related_trade_id=trade.id,
+                        description=f"Сумма погашения в пути по ISIN {isin}",
+                    )
+                    ev.ar_id = ar.id
+                    ev.status = "PENDING"
+                    redemptions["ar_created"] += 1
+                else:
+                    ev.status = "PAID"
+
+    # Synthetic rows of T that are no longer justified → deactivate.
+    stale = db.execute(select(Trade).where(
+        Trade.trade_date == target_date,
+        Trade.is_synthetic == True,  # noqa: E712
+        Trade.is_active == True,  # noqa: E712
+        Trade.operation_type.in_(("COUPON", "REDEMPTION")),
+    )).scalars().all()
+    for trade in stale:
+        if trade.id in touched:
+            continue
+        trade.is_active = False
+        _upsert_cash_movement(db, trade, active=False)
+        for ar in db.execute(select(AccountReceivable).where(
+            AccountReceivable.related_trade_id == trade.id,
+            AccountReceivable.is_manual == False,  # noqa: E712
+        )).scalars():
+            ar.is_active = False
+        (coupons if trade.operation_type == "COUPON" else redemptions)["deactivated"] += 1
+
+    db.commit()
+    logger.info(f"Auto events for {target_date}: coupons={coupons} redemptions={redemptions}")
+    return {"coupons": coupons, "redemptions": redemptions}
+
+
+def generate_coupon_trades(db: Session, target_date: date) -> Dict[str, int]:
+    return run_daily_auto_events(db, target_date)["coupons"]
+
+
+def generate_redemption_trades(db: Session, target_date: date) -> Dict[str, int]:
+    return run_daily_auto_events(db, target_date)["redemptions"]
+
+
+def run_auto_events_range(db: Session, date_from: date, date_to: date) -> Dict[str, int]:
+    """Catch-up helper: run the events for every calendar day of a period."""
+    totals = {"days": 0, "coupons": 0, "redemptions": 0}
+    d = date_from
+    while d <= date_to:
+        res = run_daily_auto_events(db, d)
+        totals["days"] += 1
+        totals["coupons"] += res["coupons"]["trades"]
+        totals["redemptions"] += res["redemptions"]["trades"]
+        d += timedelta(days=1)
+    return totals

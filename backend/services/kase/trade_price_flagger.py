@@ -157,6 +157,8 @@ def apply_kase_prices_to_trades(
 
         diff_pct = abs(price_original - kp.close_price) / abs(kp.close_price)
         trade.price_kase = kp.close_price
+        # BP 6.2.2 B: «Рыночная цена при покупке/продаже» = цена листа «Цены».
+        trade.market_price = kp.close_price
         trade.price_diff_pct = diff_pct
         counters["checked"] += 1
 

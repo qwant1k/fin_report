@@ -26,7 +26,7 @@ scheduler = AsyncIOScheduler(timezone=settings.app_tz)
 async def fetch_kase_job():
     logger.info("Scheduled KASE fetch starting…")
     client = KaseClient()
-    today = date.today()
+    today = _today()
     quotes = await client.fetch_bonds(today)
     with session_scope() as db:
         for q in quotes:
@@ -43,8 +43,30 @@ async def fetch_kase_job():
                 )
                 _apply_kase_quote(obj, q)
                 db.add(obj)
+        # risk-parameter prices («Расчетные цены_ФР») — the fallback valuation
+        # for bonds without a market price; must be loaded every day as well
+        risk_result = {"fetched": 0}
+        try:
+            from services.kase import KaseRiskClient
+            from services.kase.risk_store import store_risk_quotes
+            risk_quotes = await KaseRiskClient().fetch_risk_prices(today)
+            if risk_quotes:
+                risk_result = store_risk_quotes(db, today, risk_quotes, source="kase_gateway")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Scheduled KASE risk-params fetch failed: {exc!r}")
+        # coupon schedules of held bonds (floating coupons get a new index
+        # value every period) — KASE data, manual rows are kept
+        coupon_result = {}
+        if settings.kase_coupon_refresh_daily:
+            try:
+                from services.kase.coupon_sync import fetch_many, held_identifiers
+                coupon_result = await fetch_many(db, held_identifiers(db), "scheduler")
+                coupon_result = {"updated": len(coupon_result["updated"]), "failed": len(coupon_result["failed"])}
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Scheduled KASE coupon schedule refresh failed: {exc!r}")
         propagation = apply_kase_update(db, report_date=today, actor="scheduler")
-    logger.info(f"KASE fetch done: {len(quotes)} rows; propagation={propagation}")
+    logger.info(f"KASE fetch done: {len(quotes)} rows; risk={risk_result}; coupons={coupon_result}; "
+                f"propagation={propagation}")
 
 
 def _apply_kase_quote(obj: KasePrice, q) -> None:
@@ -104,14 +126,59 @@ async def fetch_mbm_job():
     )
 
 
+def _today() -> date:
+    """Business date in the configured time zone (server may run in UTC)."""
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import datetime
+        return datetime.now(ZoneInfo(settings.app_tz)).date()
+    except Exception:  # pragma: no cover - tz database missing
+        return date.today()
+
+
+def _last_automation_date(db) -> date | None:
+    from models.db_models import AuditLog
+    row = db.execute(select(AuditLog).where(
+        AuditLog.action == "DAILY_AUTOMATION",
+    ).order_by(AuditLog.ts.desc())).scalars().first()
+    if row and row.details:
+        try:
+            return date.fromisoformat(json.loads(row.details).get("target_date"))
+        except (ValueError, TypeError, AttributeError):
+            return None
+    return None
+
+
 async def daily_automation_job():
-    today = date.today()
+    """Coupons/redemptions → FIFO control → AR closing → portfolio for the day.
+
+    Events are generated for every calendar day since the last successful run
+    (max 31 days back), so a server that was down over a weekend does not
+    silently skip a coupon or a maturity (they are exact-date events).
+    """
+    from datetime import timedelta
+    from services.audit import write_audit
+    from services.calculator.portfolio_calculator import calculate_for_date
+
+    today = _today()
     logger.info(f"Scheduled daily automation starting for {today}…")
     with session_scope() as db:
-        events = run_daily_auto_events(db, today)
-        fifo = process_all_sell_fifo(db, today)
-        ar = close_ar_items(db, today)
-    logger.info(f"Daily automation done: events={events}, fifo={fifo}, ar={ar}")
+        last = _last_automation_date(db)
+        start = (last + timedelta(days=1)) if last else today
+        start = max(start, today - timedelta(days=31))
+        day = start
+        summary = {}
+        while day <= today:
+            events = run_daily_auto_events(db, day)
+            fifo = process_all_sell_fifo(db, day)
+            ar = close_ar_items(db, day)
+            calc = calculate_for_date(db, day)
+            summary[day.isoformat()] = {"events": events, "fifo": fifo, "ar": ar, "calc": calc}
+            write_audit(db, user="scheduler", action="DAILY_AUTOMATION", entity="Automation",
+                        details={"target_date": day.isoformat(), "calc": calc})
+            db.commit()
+            day += timedelta(days=1)
+    logger.info(f"Daily automation done: {summary}")
 
 
 def start_scheduler() -> None:

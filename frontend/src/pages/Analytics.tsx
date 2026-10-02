@@ -34,6 +34,7 @@ import {
 import clsx from 'clsx'
 
 import { api } from '@/lib/api'
+import { EmptyState, LoadingBlock } from '@/components/ui'
 import { formatDate, formatNumber, formatPct } from '@/lib/format'
 
 type ChartType = 'line' | 'area' | 'bar' | 'pie' | 'table'
@@ -154,6 +155,28 @@ function formatMetric(metric: string, value: number | null | undefined): string 
 
 function sameGroups(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((x, index) => x === b[index])
+}
+
+function ChartTooltipContent({ active, payload, label, metric }: any) {
+  if (!active || !payload?.length) return null
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white/95 p-3 shadow-card-hover backdrop-blur">
+      {label != null && label !== '' && (
+        <div className="mb-1.5 border-b border-slate-100 pb-1.5 text-xs font-semibold text-slate-500">{label}</div>
+      )}
+      <div className="space-y-1">
+        {payload.map((entry: any, i: number) => (
+          <div key={`${entry.dataKey}-${i}`} className="flex items-center justify-between gap-6 text-sm">
+            <span className="flex items-center gap-1.5">
+              <span className="h-2.5 w-2.5 rounded-full" style={{ background: entry.color ?? entry.payload?.fill }} />
+              <span className="max-w-[180px] truncate text-slate-600">{entry.name}</span>
+            </span>
+            <span className="font-semibold tabular-nums text-slate-900">{formatMetric(metric, entry.value)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 export default function AnalyticsPage() {
@@ -278,46 +301,66 @@ export default function AnalyticsPage() {
     metric === 'market_value' ? `${(Number(value) / 1e9).toFixed(1)} млрд` : formatMetric(metric, Number(value))
   )
 
+  const axisProps = {
+    tick: { fontSize: 11, fill: '#64748b' },
+    tickLine: false,
+  }
   const chart = (
     <ResponsiveContainer width="100%" height="100%">
       {chartType === 'area' ? (
-        <AreaChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-          <XAxis dataKey={groupBy.includes('date') ? 'date' : 'name'} tick={{ fontSize: 11, fill: '#64748b' }} />
-          <YAxis tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={yAxisFormatter} />
-          <Tooltip formatter={(v: number) => formatMetric(metric, v)} />
-          <Legend />
+        <AreaChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: 0 }}>
+          <defs>
+            {series.map((s, i) => (
+              <linearGradient key={s} id={`area-grad-${i}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={COLORS[i % COLORS.length]} stopOpacity={0.38} />
+                <stop offset="95%" stopColor={COLORS[i % COLORS.length]} stopOpacity={0.02} />
+              </linearGradient>
+            ))}
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+          <XAxis dataKey={groupBy.includes('date') ? 'date' : 'name'} {...axisProps} axisLine={{ stroke: '#e2e8f0' }} />
+          <YAxis {...axisProps} axisLine={false} tickFormatter={yAxisFormatter} width={64} />
+          <Tooltip content={<ChartTooltipContent metric={metric} />} cursor={{ stroke: '#cbd5e1', strokeDasharray: '4 4' }} />
+          <Legend iconType="circle" wrapperStyle={{ fontSize: 12, paddingTop: 8 }} />
           {series.map((s, i) => (
-            <Area key={s} type="monotone" dataKey={s} stroke={COLORS[i % COLORS.length]} fill={COLORS[i % COLORS.length]} fillOpacity={0.18} strokeWidth={2.5} />
+            <Area key={s} type="monotone" dataKey={s} stroke={COLORS[i % COLORS.length]} fill={`url(#area-grad-${i})`} strokeWidth={2.5} animationDuration={700} activeDot={{ r: 4 }} />
           ))}
         </AreaChart>
       ) : chartType === 'line' ? (
-        <LineChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-          <XAxis dataKey={groupBy.includes('date') ? 'date' : 'name'} tick={{ fontSize: 11, fill: '#64748b' }} />
-          <YAxis tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={yAxisFormatter} />
-          <Tooltip formatter={(v: number) => formatMetric(metric, v)} />
-          <Legend />
+        <LineChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+          <XAxis dataKey={groupBy.includes('date') ? 'date' : 'name'} {...axisProps} axisLine={{ stroke: '#e2e8f0' }} />
+          <YAxis {...axisProps} axisLine={false} tickFormatter={yAxisFormatter} width={64} />
+          <Tooltip content={<ChartTooltipContent metric={metric} />} cursor={{ stroke: '#cbd5e1', strokeDasharray: '4 4' }} />
+          <Legend iconType="circle" wrapperStyle={{ fontSize: 12, paddingTop: 8 }} />
           {series.map((s, i) => (
-            <Line key={s} type="monotone" dataKey={s} stroke={COLORS[i % COLORS.length]} strokeWidth={2.5} dot={false} />
+            <Line key={s} type="monotone" dataKey={s} stroke={COLORS[i % COLORS.length]} strokeWidth={2.5} dot={false} animationDuration={700} activeDot={{ r: 5 }} />
           ))}
         </LineChart>
       ) : chartType === 'pie' ? (
         <PieChart>
-          <Pie data={chartData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={126} innerRadius={56} paddingAngle={2} label={(entry) => entry.name}>
-            {chartData.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+          <Pie data={chartData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={128} innerRadius={64} paddingAngle={2} cornerRadius={6} label={(entry) => entry.name} animationDuration={700}>
+            {chartData.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} stroke="#fff" strokeWidth={2} />)}
           </Pie>
-          <Tooltip formatter={(v: number) => formatMetric(metric, v)} />
+          <Tooltip content={<ChartTooltipContent metric={metric} />} />
         </PieChart>
       ) : (
-        <BarChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-          <XAxis dataKey={groupBy.includes('date') ? 'date' : 'name'} tick={{ fontSize: 11, fill: '#64748b' }} />
-          <YAxis tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={yAxisFormatter} />
-          <Tooltip formatter={(v: number) => formatMetric(metric, v)} />
-          <Legend />
+        <BarChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: 0 }}>
+          <defs>
+            {(groupBy.includes('date') ? series : ['metric_value']).map((s, i) => (
+              <linearGradient key={s} id={`bar-grad-${i}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={COLORS[i % COLORS.length]} stopOpacity={1} />
+                <stop offset="100%" stopColor={COLORS[i % COLORS.length]} stopOpacity={0.55} />
+              </linearGradient>
+            ))}
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+          <XAxis dataKey={groupBy.includes('date') ? 'date' : 'name'} {...axisProps} axisLine={{ stroke: '#e2e8f0' }} />
+          <YAxis {...axisProps} axisLine={false} tickFormatter={yAxisFormatter} width={64} />
+          <Tooltip content={<ChartTooltipContent metric={metric} />} cursor={{ fill: 'rgba(16,185,129,0.06)' }} />
+          <Legend iconType="circle" wrapperStyle={{ fontSize: 12, paddingTop: 8 }} />
           {(groupBy.includes('date') ? series : ['metric_value']).map((s, i) => (
-            <Bar key={s} dataKey={s} fill={COLORS[i % COLORS.length]} radius={[4, 4, 0, 0]} />
+            <Bar key={s} dataKey={s} fill={`url(#bar-grad-${i})`} radius={[6, 6, 0, 0]} maxBarSize={56} animationDuration={700} />
           ))}
         </BarChart>
       )}
@@ -326,8 +369,10 @@ export default function AnalyticsPage() {
 
   return (
     <div className="space-y-5">
-      <header className="overflow-hidden rounded-lg border border-slate-800 bg-slate-950 text-white shadow-card">
-        <div className="flex flex-wrap items-start justify-between gap-4 p-5">
+      <header className="relative overflow-hidden rounded-2xl border border-emerald-900/40 bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950 text-white shadow-soft">
+        <div className="pointer-events-none absolute inset-0 bg-grid opacity-[0.05]" />
+        <div className="pointer-events-none absolute -right-16 -top-24 h-56 w-56 rounded-full bg-emerald-500/20 blur-3xl" />
+        <div className="relative flex flex-wrap items-start justify-between gap-4 p-5">
           <div>
             <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-semibold text-emerald-200">
               <Database className="h-3.5 w-3.5" />
@@ -343,7 +388,7 @@ export default function AnalyticsPage() {
             Обновить
           </button>
         </div>
-        <div className="grid grid-cols-2 border-t border-white/10 md:grid-cols-4">
+        <div className="relative grid grid-cols-2 border-t border-white/10 md:grid-cols-4">
           <HeaderStat label="Источник" value={meta.data?.sources.find((x) => x.value === source)?.label ?? source} />
           <HeaderStat label="Метрика" value={meta.data?.metrics.find((x) => x.value === metric)?.label ?? metric} />
           <HeaderStat label="Группировка" value={groupBy.length ? groupBy.join(', ') : 'нет'} />
@@ -527,8 +572,10 @@ export default function AnalyticsPage() {
                     title={label}
                     onClick={() => setChartType(type)}
                     className={clsx(
-                      'flex h-9 w-9 items-center justify-center rounded-md text-sm transition',
-                      chartType === type ? 'bg-slate-950 text-white shadow-sm' : 'text-slate-600 hover:bg-white hover:text-slate-950',
+                      'flex h-9 w-9 items-center justify-center rounded-lg text-sm transition active:scale-95',
+                      chartType === type
+                        ? 'bg-brand-gradient text-white shadow-sm'
+                        : 'text-slate-600 hover:bg-white hover:text-slate-950',
                     )}
                   >
                     <Icon className="h-4 w-4" />
@@ -538,9 +585,15 @@ export default function AnalyticsPage() {
             </div>
 
             {workbench.isLoading ? (
-              <div className="flex h-96 items-center justify-center text-sm font-medium text-slate-500">Загрузка...</div>
+              <LoadingBlock label="Загрузка данных…" className="h-96" />
             ) : rows.length === 0 ? (
-              <div className="flex h-96 items-center justify-center text-sm font-medium text-slate-500">Нет данных</div>
+              <div className="p-4">
+                <EmptyState
+                  icon={BarChart3}
+                  title="Нет данных"
+                  description="Измените период или фильтры, чтобы увидеть результаты."
+                />
+              </div>
             ) : chartType === 'table' ? (
               <AnalyticsTable rows={rows} metric={metric} cduTypeById={cduTypeById} />
             ) : (

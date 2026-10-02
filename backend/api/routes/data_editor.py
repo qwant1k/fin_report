@@ -66,9 +66,44 @@ _TABLE_REGISTRY: Dict[str, Type] = {
     "trade_files": db_models.TradeFile,
     "users": db_models.User,
     "formula_definitions": db_models.FormulaDefinition,
-    "cdU_file_formats": db_models.CDUFileFormat,
+    "cdu_file_formats": db_models.CDUFileFormat,
     "import_jobs": db_models.ImportJob,
 }
+
+# These business ledgers have a dedicated four-eyes workflow.  They remain
+# visible here for diagnostics but may not be mutated through the generic CRUD
+# escape hatch (which would bypass status/audit invariants).
+_WORKFLOW_TABLES = {"trades", "accounts_receivable", "cash_balances"}
+
+# Read-only through the generic editor:
+# * users / generated_reports — privilege escalation and bypass of the report
+#   approval (an approved report is immutable);
+# * imported snapshots, lots and calculated results — they are rebuilt by the
+#   importers / calculator; a manual change must go through «Операционный
+#   учёт» (maker-checker), as required by business process 8.2 E.
+_READ_ONLY_TABLES = {
+    "users", "generated_reports", "source_documents", "trade_files", "import_jobs",
+    "bond_lots", "repo_lots", "deposit_lots", "cash_snapshots", "mv_snapshots",
+    "portfolio_positions", "portfolio_summary", "security_holdings",
+    "coupon_events", "redemption_events", "price_reconciliation", "alerts",
+}
+
+# Columns never exposed by the generic editor.
+_HIDDEN_COLUMNS = {"password_hash"}
+
+
+def _ensure_generic_write_allowed(table: str) -> None:
+    if table in _WORKFLOW_TABLES:
+        raise HTTPException(
+            409,
+            "Таблица ведётся через раздел «Операционный учёт» и требует согласования",
+        )
+    if table in _READ_ONLY_TABLES:
+        raise HTTPException(
+            409,
+            "Таблица доступна только для просмотра: данные формируются импортом/расчётом "
+            "или защищены (пользователи, утверждённые отчёты)",
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -88,7 +123,7 @@ def _model_columns(model: Type) -> List[str]:
     return [
         col.key
         for col in mapper.column_attrs
-        if col.key != "id" and not col.key.startswith("_")
+        if col.key != "id" and not col.key.startswith("_") and col.key not in _HIDDEN_COLUMNS
     ]
 
 
@@ -215,11 +250,15 @@ def list_tables(
         "trade_files": "Файлы сделок",
         "users": "Пользователи",
         "formula_definitions": "Формулы",
-        "cdU_file_formats": "Форматы файлов ЧДУ",
+        "cdu_file_formats": "Форматы файлов ЧДУ",
         "import_jobs": "Импорты",
     }
     return [
-        {"name": k, "label": labels.get(k, k)}
+        {
+            "name": k,
+            "label": labels.get(k, k),
+            "read_only": k in _READ_ONLY_TABLES or k in _WORKFLOW_TABLES,
+        }
         for k in _TABLE_REGISTRY.keys()
     ]
 
@@ -235,7 +274,7 @@ def table_meta(
     mapper = inspect(model)
     columns: List[Dict[str, Any]] = []
     for attr in mapper.column_attrs:
-        if attr.key == "id":
+        if attr.key == "id" or attr.key in _HIDDEN_COLUMNS:
             continue
         col = attr.columns[0]
         col_type = col.type
@@ -258,7 +297,10 @@ def table_meta(
             "nullable": col.nullable,
             "default": str(col.default.arg) if col.default else None,
         })
-    return {"name": table, "label": table, "columns": columns}
+    return {
+        "name": table, "label": table, "columns": columns,
+        "read_only": table in _READ_ONLY_TABLES or table in _WORKFLOW_TABLES,
+    }
 
 
 @router.get("/tables/{table}")
@@ -337,6 +379,7 @@ def create_row(
     user: db_models.User = Depends(require_user),
 ) -> Dict[str, Any]:
     """Insert a new row. Unknown keys are ignored."""
+    _ensure_generic_write_allowed(table)
     model = _get_model(table)
     mapper = inspect(model)
     columns = _model_columns(model)
@@ -373,6 +416,7 @@ def update_row(
     user: db_models.User = Depends(require_user),
 ) -> Dict[str, Any]:
     """Partial update. Unknown keys are ignored."""
+    _ensure_generic_write_allowed(table)
     model = _get_model(table)
     row = db.get(model, row_id)
     if not row:
@@ -414,6 +458,7 @@ def delete_row(
     user: db_models.User = Depends(require_user),
 ) -> Dict[str, Any]:
     """Hard delete. Use with caution."""
+    _ensure_generic_write_allowed(table)
     model = _get_model(table)
     row = db.get(model, row_id)
     if not row:

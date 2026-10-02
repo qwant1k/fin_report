@@ -283,6 +283,37 @@ class KasePrice(Base):
     )
 
 
+class KaseRiskPrice(Base):
+    """Full "Расчетные цены_ФР" sheet from the KASE risk-parameter workbook.
+
+    Stored separately from market quotes (``kase_prices``) so the two price
+    families stay clearly distinguishable. Used as a fallback: when a security
+    has no market price, its расчетная цена from this table is applied instead.
+    """
+    __tablename__ = "kase_risk_prices"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    valuation_date: Mapped[Optional[date]] = mapped_column(Date)
+    instrument_code: Mapped[str] = mapped_column(String(40), index=True)
+    isin: Mapped[Optional[str]] = mapped_column(String(20), index=True)
+    algo: Mapped[Optional[str]] = mapped_column(String(120))
+    issuer_name: Mapped[Optional[str]] = mapped_column(String(300))
+    settlement_price: Mapped[Optional[float]] = mapped_column(Float)
+    settlement_dirty_price: Mapped[Optional[float]] = mapped_column(Float)
+    dohod: Mapped[Optional[float]] = mapped_column(Float)
+    ytm: Mapped[Optional[float]] = mapped_column(Float)
+    dtm: Mapped[Optional[float]] = mapped_column(Float)
+    unit_ru: Mapped[Optional[str]] = mapped_column(String(120))
+    raw_data_json: Mapped[Optional[str]] = mapped_column(Text)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    source: Mapped[str] = mapped_column(String(40), default="risk_parameters")
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "instrument_code", name="uq_kase_risk_price_date_code"),
+    )
+
+
 class PriceReconciliation(Base):
     __tablename__ = "price_reconciliation"
 
@@ -387,11 +418,99 @@ class AccountReceivable(Base):
     portfolio_code: Mapped[Optional[str]] = mapped_column(String(20))     # для НБ РК (собст/спец)
     source_doc_id: Mapped[Optional[int]] = mapped_column(ForeignKey("source_documents.id"))
     notes: Mapped[Optional[str]] = mapped_column(Text)
+    # Manual records participate in calculations only after four-eyes approval.
+    workflow_status: Mapped[str] = mapped_column(String(24), default="APPROVED", index=True)
+    is_manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(80))
+    updated_by: Mapped[Optional[str]] = mapped_column(String(80))
+    approved_by: Mapped[Optional[str]] = mapped_column(String(80))
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    rejected_by: Mapped[Optional[str]] = mapped_column(String(80))
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    decision_comment: Mapped[Optional[str]] = mapped_column(Text)
+    change_reason: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
         Index("ix_ar_cdu_isin_date", "cdu_id", "isin", "record_date"),
+    )
+
+
+class CashMovement(Base):
+    """Dated cash movement linked to a trade/security when applicable.
+
+    Imported movements are approved immediately.  Manually entered movements
+    use the PENDING_APPROVAL -> APPROVED/REJECTED/CANCELLED workflow and are
+    invisible to portfolio calculations until approved.
+    """
+    __tablename__ = "cash_movements"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cdu_id: Mapped[int] = mapped_column(ForeignKey("cdu_registry.id"), index=True)
+    operation_date: Mapped[date] = mapped_column(Date, index=True)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)  # signed: + receipt / - payment
+    currency: Mapped[str] = mapped_column(String(8), default="KZT")
+    amount_kzt: Mapped[Optional[float]] = mapped_column(Float)
+    movement_type: Mapped[str] = mapped_column(String(32), index=True)
+    basis: Mapped[str] = mapped_column(Text, nullable=False)
+    related_trade_id: Mapped[Optional[int]] = mapped_column(ForeignKey("trades.id"), index=True)
+    related_receivable_transaction_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("receivable_transactions.id"), unique=True, index=True,
+    )
+    related_isin: Mapped[Optional[str]] = mapped_column(String(20), index=True)
+    # bank / custody account of the manager (IBAN) the movement went through
+    account: Mapped[Optional[str]] = mapped_column(String(40), index=True)
+    comment: Mapped[Optional[str]] = mapped_column(Text)
+    source_doc_id: Mapped[Optional[int]] = mapped_column(ForeignKey("source_documents.id"))
+    is_manual: Mapped[bool] = mapped_column(Boolean, default=True)
+    workflow_status: Mapped[str] = mapped_column(String(24), default="PENDING_APPROVAL", index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(80))
+    updated_by: Mapped[Optional[str]] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    approved_by: Mapped[Optional[str]] = mapped_column(String(80))
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    rejected_by: Mapped[Optional[str]] = mapped_column(String(80))
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    decision_comment: Mapped[Optional[str]] = mapped_column(Text)
+    change_reason: Mapped[Optional[str]] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("ix_cash_movement_cdu_date_status", "cdu_id", "operation_date", "workflow_status"),
+    )
+
+
+class ReceivableTransaction(Base):
+    """Immutable history item changing an account-receivable balance."""
+    __tablename__ = "receivable_transactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    receivable_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts_receivable.id", ondelete="CASCADE"), index=True,
+    )
+    operation_date: Mapped[date] = mapped_column(Date, index=True)
+    # REPAYMENT / WRITE_OFF subtract an absolute amount; ADJUSTMENT is signed.
+    operation_type: Mapped[str] = mapped_column(String(24), index=True)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), default="KZT")
+    amount_kzt: Mapped[Optional[float]] = mapped_column(Float)
+    basis: Mapped[str] = mapped_column(Text, nullable=False)
+    comment: Mapped[Optional[str]] = mapped_column(Text)
+    workflow_status: Mapped[str] = mapped_column(String(24), default="PENDING_APPROVAL", index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    approved_by: Mapped[Optional[str]] = mapped_column(String(80))
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    rejected_by: Mapped[Optional[str]] = mapped_column(String(80))
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    decision_comment: Mapped[Optional[str]] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("ix_ar_tx_receivable_date", "receivable_id", "operation_date"),
     )
 
 
@@ -626,6 +745,14 @@ class Trade(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
     created_by: Mapped[Optional[str]] = mapped_column(String(80))
+    updated_by: Mapped[Optional[str]] = mapped_column(String(80))
+    workflow_status: Mapped[str] = mapped_column(String(24), default="APPROVED", index=True)
+    approved_by: Mapped[Optional[str]] = mapped_column(String(80))
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    rejected_by: Mapped[Optional[str]] = mapped_column(String(80))
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    decision_comment: Mapped[Optional[str]] = mapped_column(Text)
+    change_reason: Mapped[Optional[str]] = mapped_column(Text)
 
     __table_args__ = (
         Index("ix_trades_cdu_date_op", "cdu_id", "trade_date", "operation_type"),
@@ -699,11 +826,14 @@ class InstrumentReference(Base):
     nin: Mapped[Optional[str]] = mapped_column(String(20), index=True)
     ticker_kase: Mapped[Optional[str]] = mapped_column(String(40), index=True)
     instrument_name: Mapped[Optional[str]] = mapped_column(String(300))
+    security_type: Mapped[Optional[str]] = mapped_column(String(80))  # купонная/дисконтная/индексированная и т.п.
     issuer: Mapped[Optional[str]] = mapped_column(String(200))
+    issuer_type: Mapped[Optional[str]] = mapped_column(String(80))    # ГЦБ/Агентские/МФО/МИО/Ин.ЦБ
     bond_type: Mapped[Optional[str]] = mapped_column(String(40))    # ГЦБ/Агентские/МФО/Ин.ЦБ
     # Coupon
     coupon_rate_pct: Mapped[Optional[float]] = mapped_column(Float)
-    coupon_type: Mapped[Optional[str]] = mapped_column(String(20))  # fix/float/zero
+    coupon_rate_text: Mapped[Optional[str]] = mapped_column(String(120))  # FIX number or FLOAT formula, e.g. TONIA + 1.5%
+    coupon_type: Mapped[Optional[str]] = mapped_column(String(40))  # fix/float/zero/indexed
     frequency: Mapped[Optional[int]] = mapped_column(Integer)       # 1/2/4
     base: Mapped[Optional[str]] = mapped_column(String(20))         # 30/360, act/360, act/act
     base_code: Mapped[Optional[str]] = mapped_column(String(10))
@@ -714,13 +844,52 @@ class InstrumentReference(Base):
     last_coupon_date: Mapped[Optional[date]] = mapped_column(Date, index=True)
     next_coupon_date: Mapped[Optional[date]] = mapped_column(Date)
     # Misc
+    quotation_type: Mapped[Optional[str]] = mapped_column(String(80))  # чистая цена/грязная цена/доходность и т.п.
     currency: Mapped[str] = mapped_column(String(8), default="KZT")
-    rating: Mapped[Optional[str]] = mapped_column(String(10))
+    rating: Mapped[Optional[str]] = mapped_column(String(40))
+    rating_source: Mapped[Optional[str]] = mapped_column(String(300))
+    rating_agency: Mapped[Optional[str]] = mapped_column(String(80))
     coupon_history_json: Mapped[Optional[str]] = mapped_column(Text)
     notes: Mapped[Optional[str]] = mapped_column(Text)
+    source: Mapped[Optional[str]] = mapped_column(String(80))
+    source_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
     updated_by: Mapped[Optional[str]] = mapped_column(String(80))
+
+
+# ─────────────── График купонных выплат (по выпуску) ───────────────
+class CouponSchedule(Base):
+    """Coupon payment schedule of an issue (KASE «График купонных выплат»).
+
+    One row per payment: payment date (KASE «Дата начала купонной выплаты»),
+    register fixation date, end of payment, the annual rate of the period and,
+    when known, the coupon amount per security.  When a schedule exists it has
+    priority over the coupon parameters of the reference book (floating /
+    indexed coupons, irregular periods, shifted dates such as 01.04.24).
+    """
+    __tablename__ = "coupon_schedule"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    isin: Mapped[str] = mapped_column(String(20), index=True, nullable=False)
+    seq: Mapped[Optional[int]] = mapped_column(Integer)
+    period_start: Mapped[Optional[date]] = mapped_column(Date)
+    payment_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    record_date: Mapped[Optional[date]] = mapped_column(Date)
+    payment_end_date: Mapped[Optional[date]] = mapped_column(Date)
+    rate_pct: Mapped[Optional[float]] = mapped_column(Float)            # coupon rate of the period (total)
+    margin_pct: Mapped[Optional[float]] = mapped_column(Float)          # floating coupon: fixed margin
+    index_rate_pct: Mapped[Optional[float]] = mapped_column(Float)      # floating coupon: index value
+    amount_per_unit: Mapped[Optional[float]] = mapped_column(Float)
+    # MANUAL rows are kept when the schedule is refreshed from KASE
+    source: Mapped[str] = mapped_column(String(20), default="MANUAL")   # MANUAL / IMPORT / GENERATED / KASE
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_by: Mapped[Optional[str]] = mapped_column(String(80))
+
+    __table_args__ = (
+        UniqueConstraint("isin", "payment_date", name="uq_coupon_schedule_isin_date"),
+    )
 
 
 # ─────────────── BondLot — лот ЦБ (1 покупка = 1 лот; FIFO при продаже) ───────────────
@@ -741,6 +910,7 @@ class BondLot(Base):
     quantity_current: Mapped[float] = mapped_column(Float, default=0.0)
     nominal_per_unit: Mapped[Optional[float]] = mapped_column(Float)
     face_value_initial: Mapped[float] = mapped_column(Float, default=0.0)
+    price_source: Mapped[Optional[str]] = mapped_column(String(20))  # market | risk_parameters
     face_value_current: Mapped[float] = mapped_column(Float, default=0.0)
 
     purchase_price: Mapped[Optional[float]] = mapped_column(Float)
@@ -958,8 +1128,9 @@ class SecurityHolding(Base):
     __tablename__ = "security_holdings"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    cdu_id: Mapped[int] = mapped_column(
-        ForeignKey("cdu_registry.id", ondelete="CASCADE"), index=True, nullable=False,
+    # NULL — instrument of the reference book not tied to a manager
+    cdu_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("cdu_registry.id", ondelete="CASCADE"), index=True, nullable=True,
     )
     isin: Mapped[str] = mapped_column(String(20), index=True, nullable=False)
     instrument_code: Mapped[Optional[str]] = mapped_column(String(40))

@@ -6,6 +6,7 @@ import re
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from auth import (
@@ -250,3 +251,76 @@ def list_audit(
     user: User = Depends(require_permission("admin.audit.view")),
 ):
     return db.query(AuditLog).order_by(AuditLog.ts.desc()).limit(limit).all()
+
+
+# ─────────────── Purge ───────────────
+# Tables deleted in FK-safe order (children before parents).
+# Excluded: users, role_definitions, audit_log (system meta).
+_PURGE_TABLES = [
+    "price_reconciliation",
+    "kase_risk_prices",
+    "kase_prices",
+    "mbm_index",
+    "bond_lots",
+    "repo_lots",
+    "portfolio_positions",
+    "portfolio_summary",
+    "accounts_receivable",
+    "cash_balances",
+    "cash_snapshots",
+    "alerts",
+    "generated_reports",
+    "calculation_runs",
+    "trades",
+    "raw_trades",
+    "source_documents",
+    "trade_files",
+    "instrument_category_rules",
+    "instruments",
+    "cdu_limits",
+    "cdu_file_formats",
+    "formula_definitions",
+    "instrument_reference",
+    "cdu_registry",
+]
+
+_CONFIRM_PHRASE = "ОЧИСТИТЬ ВСЁ"
+
+
+@router.post("/purge-data")
+def purge_all_data(
+    payload: dict,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_permission("admin.purge")),
+):
+    """Irreversibly delete ALL business data. System meta (users, roles, audit) is kept.
+
+    Body must contain ``{"confirm": "ОЧИСТИТЬ ВСЁ"}`` as a safeguard.
+    """
+    if payload.get("confirm") != _CONFIRM_PHRASE:
+        raise HTTPException(
+            400,
+            f"Требуется подтверждение: укажите {{\"confirm\": \"{_CONFIRM_PHRASE}\"}} в теле запроса.",
+        )
+
+    deleted: dict[str, int] = {}
+    db.execute(text("PRAGMA foreign_keys = OFF"))
+    try:
+        for table in _PURGE_TABLES:
+            result = db.execute(text(f"DELETE FROM {table}"))
+            deleted[table] = result.rowcount
+        db.execute(text("PRAGMA foreign_keys = ON"))
+        db.add(AuditLog(
+            user=actor.username,
+            action="PURGE_ALL_DATA",
+            entity="Database",
+            entity_id=None,
+            details=json.dumps(deleted, ensure_ascii=False),
+        ))
+        db.commit()
+    except Exception:
+        db.execute(text("PRAGMA foreign_keys = ON"))
+        db.rollback()
+        raise
+
+    return {"ok": True, "deleted": deleted}

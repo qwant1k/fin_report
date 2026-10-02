@@ -27,7 +27,7 @@ from .classification import (
     classify_operation,
     detect_cdu_prefix,
 )
-from .number_utils import parse_int, parse_kz_date, parse_kz_number, s
+from .number_utils import normalize_currency, parse_int, parse_kz_date, parse_kz_number, s
 
 
 # Header aliases — the parser tolerates different XLSX column wordings
@@ -82,6 +82,10 @@ HEADER_ALIASES: Dict[str, Tuple[str, ...]] = {
     "placement_price_kzt": ("цена размещения, тенге", "цена размещения тенге"),
     "redemption_price_kzt": ("цена выкупа, тенге", "цена выкупа тенге"),
     "securities_to_execute": ("бумаг к исполнению",),
+    # KASE: number of the head deal of a REPO («витринная сделка») — the same
+    # for the opening and the closing leg.  The file has a second column with
+    # the same title holding a Y/N flag; the first one (numbers) wins.
+    "repo_master_deal": ("витринная сделка",),
 }
 
 
@@ -131,9 +135,13 @@ class TradeReportParser:
         original_name: Optional[str] = None,
         *,
         alias_overrides: Optional[Dict[str, Tuple[str, ...]]] = None,
+        header_row_index: Optional[int] = None,
     ) -> None:
         self.file_path = Path(file_path)
         self.original_name = original_name or self.file_path.name
+        # 0-based index of the header row (CDUFileFormat.header_row_index);
+        # ``None`` = detect automatically among the first rows.
+        self.header_row_index = header_row_index
         # Normalise overrides: lower-cased, whitespace-collapsed tuples.
         self.alias_overrides: Dict[str, Tuple[str, ...]] = {}
         if alias_overrides:
@@ -150,12 +158,15 @@ class TradeReportParser:
         wb = load_workbook(self.file_path, data_only=True, read_only=True)
         ws = wb[wb.sheetnames[0]]
 
-        rows_iter = ws.iter_rows(values_only=True)
-        try:
-            header_row = next(rows_iter)
-        except StopIteration:
+        all_rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+        if not all_rows:
             return ParsedTradeFile(cdu_prefix=None, cdu_name=None, trade_date=None,
                                    warnings=["Файл пустой"], filename=self.original_name)
+
+        header_idx = self._detect_header_row(all_rows)
+        header_row = all_rows[header_idx]
+        rows_iter = iter(all_rows[header_idx + 1:])
 
         col_index = self._build_column_index(header_row)
 
@@ -173,7 +184,7 @@ class TradeReportParser:
         cdu_prefix_votes: Dict[str, int] = {}
         first_trade_date: Optional[date] = None
 
-        for r_idx, raw_row in enumerate(rows_iter, start=2):
+        for r_idx, raw_row in enumerate(rows_iter, start=header_idx + 2):
             if raw_row is None:
                 continue
             if all(c is None or (isinstance(c, str) and not c.strip()) for c in raw_row):
@@ -191,9 +202,14 @@ class TradeReportParser:
             regime = s(data.get("regime_code"))
             kp = s(data.get("kp"))
             instrument_code = s(data.get("instrument_code"))
-            currency_code = s(data.get("currency_code"))
+            currency_code = normalize_currency(data.get("currency_code"))
+            if currency_code:
+                data["currency_code"] = currency_code
             clearing_account = s(data.get("clearing_account"))
             type_marker = s(data.get("type_code"))
+            # Some managers export REPO leg types in Russian: РПВ (head deal),
+            # РП1 (opening leg), РП2 (closing leg)
+            type_marker = {"РПВ": "G", "РП1": "H", "РП2": "h"}.get((type_marker or "").upper(), type_marker)
             ext_user_code = s(data.get("ext_user_code"))
             if type_marker not in ("G", "H", "h") and ext_user_code in ("G", "H", "h"):
                 type_marker = ext_user_code
@@ -202,10 +218,26 @@ class TradeReportParser:
                 type_marker,
             )
             data["instrument_category"] = classify_instrument(regime, instrument_code)
+            if data["operation_type"] == "OTHER":
+                result.warnings.append(
+                    f"Строка {r_idx}: не удалось распознать вид сделки "
+                    f"(режим={regime or 'не указан'}, К/П={kp or 'не указан'})."
+                )
 
             # ЧДУ голосование
-            participant = s(data.get("participant_code")) or ""
-            prefix = detect_cdu_prefix(participant, self.original_name)
+            # Different CDU formats put the stable identifier in different
+            # columns.  In particular Centras/Alatau/Tansar often identify the
+            # manager by «Код фирмы», not «Код участника».
+            # «Код клиринговой фирмы» намеренно не используется: например
+            # CENTR_K — клиринговый член и для Halyk, и для других ЧДУ.
+            identifiers = "|".join(
+                s(data.get(key)) or ""
+                for key in (
+                    "participant_code", "firm_code",
+                    "client_code", "trade_account",
+                )
+            )
+            prefix = detect_cdu_prefix(identifiers, self.original_name)
             if prefix:
                 cdu_prefix_votes[prefix] = cdu_prefix_votes.get(prefix, 0) + 1
 
@@ -230,6 +262,15 @@ class TradeReportParser:
             ):
                 data[k] = parse_kz_number(data.get(k))
             data["repo_term_days"] = parse_int(data.get("repo_term_days"))
+            # Database/UI convention is a fraction (0.0666 == 6.66%).  KASE
+            # Trade Report columns are explicitly percentages (6.66), so
+            # normalise at the ingestion boundary and never multiply twice.
+            # Values ≤ 1 are taken as already-fractional (e.g. a cell formatted
+            # as percent in Excel gives 0.165) — never divide twice.
+            for key in ("yield_pct", "repo_rate_pct"):
+                if data.get(key) is not None:
+                    value = float(data[key])
+                    data[key] = value / 100.0 if abs(value) > 1.0 else value
 
             # Текстовые
             for k in (
@@ -259,6 +300,19 @@ class TradeReportParser:
         return result
 
     # ───────── helpers ─────────
+    def _detect_header_row(self, rows: List[Tuple[Any, ...]]) -> int:
+        """Find the header row: configured index or the best alias match."""
+        if self.header_row_index is not None and 0 <= self.header_row_index < len(rows):
+            return int(self.header_row_index)
+        best_idx, best_score = 0, -1
+        for idx, row in enumerate(rows[:20]):
+            if not row:
+                continue
+            score = len(self._build_column_index(row))
+            if score > best_score:
+                best_idx, best_score = idx, score
+        return best_idx
+
     def _sha256(self) -> str:
         h = hashlib.sha256()
         with self.file_path.open("rb") as f:

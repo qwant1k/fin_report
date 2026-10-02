@@ -16,29 +16,47 @@ def parse_kz_number(value: Any) -> Optional[float]:
         "2 069 895 029"   -> 2069895029.0
         "16,5"            -> 16.5
         "12 000 590,78"   -> 12000590.78
+        "1,214.9000"      -> 1214.9      (KASE: comma = thousands)
+        "16,55%"          -> 16.55       (percent sign is dropped)
+        "(1 234,50)"      -> -1234.5     (accounting negative)
         "-"               -> None
         ""                -> None
-        "  "              -> None
         12.5              -> 12.5
         None              -> None
     """
     if value is None:
         return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    s = str(value).strip()
-    if not s or s in {"-", "—", "–", "n/a", "N/A"}:
+    if isinstance(value, bool):
         return None
+    if isinstance(value, (int, float)):
+        f = float(value)
+        return None if f != f else f
+    s = str(value).strip()
+    if not s or s in {"-", "—", "–", "n/a", "N/A", "#N/A", "#VALUE!", "#REF!", "#NUM!"}:
+        return None
+    negative = False
+    if s.startswith("(") and s.endswith(")"):
+        negative = True
+        s = s[1:-1]
+    s = s.replace("%", "")
     s = _WS_RE.sub("", s)
-    s = s.replace(",", ".")
-    # numbers occasionally come as "1.234.567,89" with both separators — handle gracefully
+    if "," in s and "." in s:
+        # whichever separator comes last is the decimal one
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    else:
+        s = s.replace(",", ".")
+    # numbers occasionally come as "1.234.567" with repeated separators
     if s.count(".") > 1:
         last = s.rfind(".")
         s = s[:last].replace(".", "") + s[last:]
     try:
-        return float(s)
+        f = float(s)
     except ValueError:
         return None
+    return -f if negative else f
 
 
 def parse_kz_date(value: Any) -> Optional[date]:
@@ -57,7 +75,11 @@ def parse_kz_date(value: Any) -> Optional[date]:
     s = str(value).strip()
     if not s:
         return None
-    for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y", "%d.%m.%y"):
+    for fmt in (
+        "%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y", "%d.%m.%y",
+        "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S", "%d-%m-%Y",
+    ):
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:
@@ -84,3 +106,29 @@ def s(value: Any) -> Optional[str]:
     if not out or out in {"-", "—", "–"}:
         return None
     return out
+
+
+_CURRENCY_NAMES = {
+    "казахстанский тенге": "KZT", "тенге": "KZT", "kzt": "KZT", "₸": "KZT",
+    "доллар сша": "USD", "доллар": "USD", "usd": "USD", "$": "USD",
+    "евро": "EUR", "eur": "EUR", "€": "EUR",
+    "российский рубль": "RUB", "рубль": "RUB", "rub": "RUB",
+    "китайский юань": "CNY", "юань": "CNY", "cny": "CNY",
+    "фунт стерлингов": "GBP", "gbp": "GBP",
+}
+
+
+def normalize_currency(value) -> str | None:
+    """ISO code from a code or a Russian name («Казахстанский тенге» → KZT)."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    key = text.lower().replace("ё", "е")
+    if key in _CURRENCY_NAMES:
+        return _CURRENCY_NAMES[key]
+    for name, code in _CURRENCY_NAMES.items():
+        if len(name) > 3 and name in key:
+            return code
+    return text.upper()[:8]

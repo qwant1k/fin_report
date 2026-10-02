@@ -1,7 +1,7 @@
 """Apply freshly loaded KASE prices to dependent portfolio data."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Dict, Optional
 
 from sqlalchemy import select
@@ -11,7 +11,9 @@ from config import settings
 from models.db_models import (
     BondLot,
     GeneratedReport,
+    InstrumentReference,
     KasePrice,
+    KaseRiskPrice,
     PortfolioPosition,
     PortfolioSummary,
     RepoLot,
@@ -34,6 +36,98 @@ def _kase_index(rows: list[KasePrice]) -> Dict[str, KasePrice]:
     return idx
 
 
+def _kase_risk_index(rows: list[KaseRiskPrice]) -> Dict[str, KaseRiskPrice]:
+    idx: Dict[str, KaseRiskPrice] = {}
+    for row in rows:
+        if row.instrument_code:
+            idx.setdefault(row.instrument_code.upper(), row)
+        if row.isin:
+            idx.setdefault(row.isin.upper(), row)
+    return idx
+
+
+def _lookup_risk(
+    idx: Dict[str, KaseRiskPrice],
+    instrument_code: Optional[str],
+    isin: Optional[str],
+) -> Optional[KaseRiskPrice]:
+    if instrument_code:
+        found = idx.get(instrument_code.upper())
+        if found:
+            return found
+    if isin:
+        return idx.get(isin.upper())
+    return None
+
+
+_ISSUER_TYPE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ГЦБ", ("министерство финансов", "национальный банк")),
+    ("Агентские", (
+        "kegoc", "банк развития казахстана", "жилищный строительный",
+        "отбасы", "казахстанский фонд устойчивости", "темір жолы",
+        "темир жолы", "байтерек", "самрук",
+    )),
+    ("МФО", (
+        "евразийский банк развития", "азиатский банк развития",
+        "европейский банк реконструкции", "международная финансовая корпорация",
+    )),
+    ("Бумаги местных исполнительных органов", ("акимат г. алматы", "акимат города алматы")),
+    ("Ин. ЦБ", ("usa", "united states", "treasury", "treasuries")),
+)
+
+
+def _infer_issuer_type(issuer: Optional[str], isin: Optional[str]) -> Optional[str]:
+    isin_norm = (isin or "").strip().upper()
+    if isin_norm.startswith("US"):
+        return "Ин. ЦБ"
+    haystack = (issuer or "").strip().lower().replace("ё", "е")
+    for issuer_type, needles in _ISSUER_TYPE_RULES:
+        if any(needle in haystack for needle in needles):
+            return issuer_type
+    return None
+
+
+def _upsert_reference_from_kase(db: Session, rows: list[KasePrice]) -> int:
+    updated = 0
+    seen: set[str] = set()
+    for kp in rows:
+        isin = (kp.isin or "").strip().upper()
+        if not isin or isin in seen:
+            continue
+        seen.add(isin)
+        ref = db.execute(select(InstrumentReference).where(
+            InstrumentReference.isin == isin,
+        )).scalars().first()
+        if ref is None:
+            ref = InstrumentReference(isin=isin, currency="KZT")
+            db.add(ref)
+
+        issuer = kp.org_name_ru or kp.org_name_en or kp.org_name_kz
+        issuer_type = _infer_issuer_type(issuer, isin)
+        updates = {
+            "ticker_kase": kp.instrument_code,
+            "security_type": kp.fin_sec_ru or kp.fin_sec_en or kp.fin_sec_kz or kp.sec_type,
+            "issuer": issuer,
+            "issuer_type": issuer_type,
+            "quotation_type": kp.unit_ru or kp.unit_en or kp.unit_kz,
+            "source": "KASE_MARKET",
+            "source_updated_at": datetime.utcnow(),
+        }
+        if kp.instrument_name and kp.instrument_name != issuer:
+            updates["instrument_name"] = kp.instrument_name
+        if issuer_type and not ref.bond_type:
+            updates["bond_type"] = issuer_type
+
+        changed = False
+        for field, value in updates.items():
+            if value is not None and getattr(ref, field) != value:
+                setattr(ref, field, value)
+                changed = True
+        if changed:
+            updated += 1
+    return updated
+
+
 def _lookup_kase(
     idx: Dict[str, KasePrice],
     instrument_code: Optional[str],
@@ -49,6 +143,7 @@ def _lookup_kase(
 
 
 def _repriced_market_value(lot: BondLot, price: float) -> float:
+    """Total value (clean value + НКД) — the RR «Total value» column."""
     face = float(lot.face_value_current or lot.quantity_current or 0.0)
     accrued = float(lot.accrued_interest or 0.0)
     return face * price / 100.0 + accrued
@@ -66,24 +161,50 @@ def _reprice_bond_lots(
     *,
     report_date: date,
     kase_idx: Dict[str, KasePrice],
-) -> int:
-    updated = 0
+    risk_idx: Optional[Dict[str, KaseRiskPrice]] = None,
+) -> dict[str, int]:
+    """Reprice bond lots with a market → risk-parameter → keep-current fallback.
+
+    For each lot valued on ``report_date``:
+      * apply the KASE *market* close price when available;
+      * otherwise fall back to the расчетная цена (Расчетные цены_ФР);
+      * otherwise leave the lot's current price untouched.
+    ``BondLot.price_source`` records which family was applied.
+    """
+    risk_idx = risk_idx or {}
+    counters = {"market": 0, "risk_parameters": 0, "unchanged": 0}
     lots = db.execute(select(BondLot).where(
         BondLot.valuation_date == report_date,
     )).scalars().all()
     for lot in lots:
+        price: Optional[float] = None
+        ytm: Optional[float] = None
+        duration: Optional[float] = None
+        source: Optional[str] = None
+
+        # NB: KASE provides «dtm» = days to maturity, not a duration in years;
+        # the lot keeps its modified duration (recomputed by the portfolio engine).
         kp = _lookup_kase(kase_idx, lot.instrument_code, lot.isin)
-        if not kp or kp.close_price is None:
+        if kp and kp.close_price is not None:
+            price, ytm, source = kp.close_price, kp.ytm, "market"
+        else:
+            rp = _lookup_risk(risk_idx, lot.instrument_code, lot.isin)
+            if rp and rp.settlement_price is not None:
+                price, ytm, source = rp.settlement_price, rp.ytm, "risk_parameters"
+
+        if price is None:
+            counters["unchanged"] += 1
             continue
-        lot.market_price = kp.close_price
-        lot.market_value = _repriced_market_value(lot, float(kp.close_price))
-        lot.total_value = lot.market_value
-        if kp.ytm is not None:
-            lot.ytm = kp.ytm
-        if kp.duration is not None:
-            lot.duration = kp.duration
-        updated += 1
-    return updated
+
+        face = float(lot.face_value_current or lot.quantity_current or 0.0)
+        lot.market_price = price
+        lot.market_value = face * float(price) / 100.0          # clean («Market value»)
+        lot.total_value = _repriced_market_value(lot, float(price))  # + НКД («Total value»)
+        if ytm is not None:
+            lot.ytm = ytm
+        lot.price_source = source
+        counters[source] += 1
+    return counters
 
 
 def _rebuild_summary_from_lots(db: Session, *, report_date: date) -> dict[str, int]:
@@ -136,15 +257,11 @@ def _rebuild_summary_from_lots(db: Session, *, report_date: date) -> dict[str, i
                 )).scalars().all()
                 if not bond_lots:
                     continue
-                mv = sum(float(l.market_value or l.total_value or l.face_value_current or 0.0) for l in bond_lots)
-                ytm = _weighted([
-                    (l.ytm, float(l.market_value or l.total_value or l.face_value_current or 0.0))
-                    for l in bond_lots
-                ])
-                duration = _weighted([
-                    (l.duration, float(l.market_value or l.total_value or l.face_value_current or 0.0))
-                    for l in bond_lots
-                ])
+                def _tv(l):
+                    return float(l.total_value if l.total_value is not None else (l.market_value or l.face_value_current or 0.0))
+                mv = sum(_tv(l) for l in bond_lots)
+                ytm = _weighted([(l.ytm, _tv(l)) for l in bond_lots])
+                duration = _weighted([(l.duration, _tv(l)) for l in bond_lots])
 
             old_mv = float(pos.market_value_current or 0.0)
             pos.market_value_current = mv
@@ -163,7 +280,7 @@ def _rebuild_summary_from_lots(db: Session, *, report_date: date) -> dict[str, i
         summary.total_mv_prev = prev_summary.total_mv_current if prev_summary else summary.total_mv_prev
         summary.total_daily_change = total - float(summary.total_mv_prev or 0.0)
 
-        weight_cats = {"GOV_BONDS", "REVERSE_REPO", "MFO_BONDS", "AGENCY_BONDS"}
+        weight_cats = {"GOV_BONDS", "REVERSE_REPO", "MFO_BONDS", "AGENCY_BONDS", "FOREIGN_BONDS", "DEPOSIT"}
         weighted_positions = [p for p in positions if p.instrument_category in weight_cats]
         weight = sum(float(p.market_value_current or 0.0) for p in weighted_positions)
         if weight:
@@ -245,8 +362,15 @@ def apply_kase_update(
         KasePrice.trade_date == report_date,
     )).scalars().all())
     kase_idx = _kase_index(kase_rows)
+    risk_rows = list(db.execute(select(KaseRiskPrice).where(
+        KaseRiskPrice.trade_date == report_date,
+    )).scalars().all())
+    risk_idx = _kase_risk_index(risk_rows)
 
-    bond_lots = _reprice_bond_lots(db, report_date=report_date, kase_idx=kase_idx)
+    reference_updates = _upsert_reference_from_kase(db, kase_rows)
+    bond_lots = _reprice_bond_lots(
+        db, report_date=report_date, kase_idx=kase_idx, risk_idx=risk_idx,
+    )
     summary_updates = _rebuild_summary_from_lots(db, report_date=report_date)
     trade_check = _reconcile_trades(db, report_date=report_date, actor=actor)
     reconciliation_rows = reconcile_prices(db, report_date, commit=False)
@@ -259,7 +383,10 @@ def apply_kase_update(
 
     return {
         "kase_rows": len(kase_rows),
-        "bond_lots_repriced": bond_lots,
+        "kase_risk_rows": len(risk_rows),
+        "instrument_reference_updated": reference_updates,
+        "bond_lots_repriced": bond_lots["market"] + bond_lots["risk_parameters"],
+        "bond_lots_price_source": bond_lots,
         "portfolio_positions_updated": summary_updates["portfolio_positions"],
         "portfolio_summaries_updated": summary_updates["portfolio_summaries"],
         "price_reconciliation_rows": len(reconciliation_rows),

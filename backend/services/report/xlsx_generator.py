@@ -20,7 +20,7 @@ Layout per CDU block (mirrors the original `Report` sheet):
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import List
 
@@ -43,8 +43,7 @@ from services.calculator.constants import (
     CATEGORY_LABELS,
     CATEGORY_ORDER,
     DEFAULT_LIMITS,
-    DURATION_LOWER_OFFSET,
-    DURATION_UPPER_OFFSET,
+    duration_band,
 )
 
 
@@ -87,7 +86,10 @@ COLUMNS = [
 
 def generate_xlsx_report(db: Session, report_date: date, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    out = output_dir / f"risk_report_{report_date.strftime('%Y%m%d')}.xlsx"
+    # A unique file per generation: an approved version must never be
+    # overwritten by a later export of the same date.
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    out = output_dir / f"risk_report_{report_date.strftime('%Y%m%d')}_{stamp}.xlsx"
 
     wb = Workbook()
     _write_main_sheet(wb, db, report_date)
@@ -233,8 +235,9 @@ def _write_cdu_block(ws, start_row, cdu, summary, pos_by_cat, fund_total):
     ws.cell(r, 4, summary.benchmark_duration if summary.benchmark_duration is not None else "—")
     if summary.benchmark_duration is not None:
         ws.cell(r, 4).number_format = NUM_FMT
-        ws.cell(r, 5, summary.benchmark_duration + DURATION_LOWER_OFFSET).number_format = NUM_FMT
-        ws.cell(r, 6, summary.benchmark_duration + DURATION_UPPER_OFFSET).number_format = NUM_FMT
+        lo, hi = duration_band(summary.benchmark_duration)
+        ws.cell(r, 5, lo).number_format = NUM_FMT
+        ws.cell(r, 6, hi).number_format = NUM_FMT
     ws.cell(r, 7, summary.duration_status or "—")
     if summary.duration_status == "breach":
         ws.cell(r, 7).fill = ERROR_FILL

@@ -1,86 +1,117 @@
-"""AR closing engine — Phase C4.
+"""Closing of receivables — business process 6.1.8 / 7.1.11.
 
-Closes AccountReceivable items when a matching cash inflow is detected
-in a custodian statement / cash snapshot, based on:
-  - ISIN match (or sub-fund / portfolio code)
-  - Amount match within tolerance (±0.01 KZT/USD)
-  - Date proximity (value_date ± 3 business days)
+A receivable («купон/погашение в пути») is closed when the money is actually
+received.  Evidence used, in this order:
 
-Idempotent: sets AR.status = CLOSED, actual_value_date, and links to Trade.
+1. an approved cash movement linked to the same ISIN and manager, dated on/after
+   the record date, whose amount matches the open balance within ±0.01
+   (one or several movements may add up to the balance — partial receipts
+   reduce the balance);
+2. otherwise the receivable stays open with the note «Ожидается выписка».
+
+Closing creates an approved ``REPAYMENT`` transaction *without* a new cash leg
+(the cash is already in the matched movements), so the AR balance «на дату»
+history stays correct and nothing is counted twice.  Differences above the
+tolerance are not closed automatically — an alert is raised for ОИиУА.
 """
 from __future__ import annotations
-from datetime import date, timedelta
-from typing import Dict, List, Optional
+
+from datetime import date
+from typing import Dict, Optional
+
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from models.db_models import AccountReceivable, CashSnapshot, Trade
-from services.calculator.constants import RECON_TOLERANCE_KZT, RECON_TOLERANCE_USD
+
+from models.db_models import AccountReceivable, Alert, CashMovement, ReceivableTransaction
+from services.calculator.constants import RECON_TOLERANCE_KZT
+from services.workflow import EFFECTIVE_STATUSES
 
 
-def _match_tolerance(expected: float, actual: float, currency: str) -> bool:
-    tol = RECON_TOLERANCE_USD if currency == "USD" else RECON_TOLERANCE_KZT
-    return abs(expected - actual) <= tol
-
-
-def find_matching_cash_for_ar(
-    db: Session,
-    ar: AccountReceivable,
-    lookback_days: int = 5,
-    lookahead_days: int = 5,
-) -> Optional[CashSnapshot]:
-    """Find a CashSnapshot inflow that matches this AR."""
-    if ar.status != "OPEN" or ar.balance_currency is None or ar.balance_currency <= 0:
-        return None
-
-    start = (ar.due_date or ar.record_date) - timedelta(days=lookback_days)
-    end = (ar.due_date or ar.record_date) + timedelta(days=lookahead_days)
-
-    # Simplified: look for CashSnapshot on the same cdu, currency, where amount increased
-    # In real life we'd compare day-over-day deltas. Here we use a heuristic:
-    # look for any CashSnapshot on the dates around due_date with amount >= balance.
-    snaps = db.execute(select(CashSnapshot).where(
-        CashSnapshot.cdu_id == ar.cdu_id,
-        CashSnapshot.currency == ar.currency,
-        CashSnapshot.snapshot_date >= start,
-        CashSnapshot.snapshot_date <= end,
-    ).order_by(CashSnapshot.snapshot_date.asc())).scalars().all()
-
-    for snap in snaps:
-        # Heuristic: if snapshot amount >= AR balance (within tolerance)
-        # In production, compare delta vs previous day.
-        if _match_tolerance(ar.balance_currency, snap.amount, ar.currency):
-            return snap
-    return None
+def _balance(db: Session, ar: AccountReceivable, as_of: date) -> float:
+    from api.routes.accounting import receivable_balance_as_of
+    return receivable_balance_as_of(db, ar, as_of)
 
 
 def close_ar_items(db: Session, target_date: Optional[date] = None) -> Dict[str, int]:
-    """Close AR items that have a matching cash inflow."""
-    q = select(AccountReceivable).where(AccountReceivable.status == "OPEN")
-    if target_date:
-        q = q.where(AccountReceivable.due_date == target_date)
-
-    ar_items = db.execute(q).scalars().all()
-    counters = {"closed": 0, "pending": 0, "errors": 0}
-
-    for ar in ar_items:
-        try:
-            match = find_matching_cash_for_ar(db, ar)
-            if match:
-                ar.status = "CLOSED"
-                ar.actual_value_date = match.snapshot_date
-                # Optionally update linked trade
-                if ar.related_trade_id:
-                    trade = db.get(Trade, ar.related_trade_id)
-                    if trade:
-                        trade.notes = (trade.notes or "") + f"; AR_CLOSED on {match.snapshot_date}"
-                counters["closed"] += 1
-            else:
-                counters["pending"] += 1
-        except Exception as exc:
-            logger.warning(f"AR close error ar={ar.id}: {exc}")
-            counters["errors"] += 1
-
+    as_of = target_date or date.max
+    q = select(AccountReceivable).where(
+        AccountReceivable.status.in_(("OPEN", "PARTIAL")),
+        AccountReceivable.is_active == True,  # noqa: E712
+        AccountReceivable.workflow_status.in_(EFFECTIVE_STATUSES),
+        AccountReceivable.record_date <= as_of,
+    )
+    counters = {"closed": 0, "partial": 0, "pending": 0, "mismatch": 0}
+    used_movements: set[int] = set()
+    for ar in db.execute(q).scalars().all():
+        balance = _balance(db, ar, as_of)
+        if balance <= RECON_TOLERANCE_KZT:
+            ar.status = "CLOSED"
+            continue
+        if not ar.isin:
+            counters["pending"] += 1
+            continue
+        movements = db.execute(select(CashMovement).where(
+            CashMovement.cdu_id == ar.cdu_id,
+            CashMovement.related_isin == ar.isin,
+            CashMovement.operation_date >= ar.record_date,
+            CashMovement.operation_date <= as_of,
+            CashMovement.is_active == True,  # noqa: E712
+            CashMovement.workflow_status.in_(EFFECTIVE_STATUSES),
+            CashMovement.amount_kzt > 0,
+            CashMovement.related_receivable_transaction_id.is_(None),
+            CashMovement.related_trade_id.is_(None),
+        ).order_by(CashMovement.operation_date.asc(), CashMovement.id.asc())).scalars().all()
+        movements = [m for m in movements if m.id not in used_movements]
+        if not movements:
+            ar.notes = "Ожидается выписка"
+            counters["pending"] += 1
+            continue
+        received = sum(float(m.amount_kzt or 0.0) for m in movements)
+        last_date = movements[-1].operation_date
+        if received > balance + RECON_TOLERANCE_KZT:
+            counters["mismatch"] += 1
+            db.add(Alert(
+                alert_date=last_date, cdu_id=ar.cdu_id, alert_type="AR_MISMATCH", severity="WARN",
+                message=(f"Дебиторка {ar.isin}: поступило {received:,.2f}, ожидалось {balance:,.2f} — "
+                         "требуется ручная проверка ОИиУА"),
+            ))
+            continue
+        db.add(ReceivableTransaction(
+            receivable_id=ar.id,
+            operation_date=last_date,
+            operation_type="REPAYMENT",
+            amount=received,
+            amount_kzt=received,
+            currency=ar.currency or "KZT",
+            basis="Автоматически: поступление по выписке/движению денег " + ", ".join(f"#{m.id}" for m in movements),
+            workflow_status="APPROVED",
+            is_active=True,
+            created_by="SYSTEM",
+            approved_by="SYSTEM",
+        ))
+        used_movements.update(m.id for m in movements)
+        if abs(received - balance) <= RECON_TOLERANCE_KZT:
+            ar.status = "CLOSED"
+            ar.balance_kzt = 0.0
+            ar.actual_value_date = last_date
+            ar.notes = None
+            counters["closed"] += 1
+        else:
+            ar.status = "PARTIAL"
+            ar.balance_kzt = balance - received
+            counters["partial"] += 1
     db.commit()
     logger.info(f"AR close engine: {counters}")
     return counters
+
+
+def find_matching_cash_for_ar(db: Session, ar: AccountReceivable, **_kwargs):
+    """Backward-compatible helper: first matching inflow movement or None."""
+    return db.execute(select(CashMovement).where(
+        CashMovement.cdu_id == ar.cdu_id,
+        CashMovement.related_isin == ar.isin,
+        CashMovement.operation_date >= ar.record_date,
+        CashMovement.amount_kzt > 0,
+        CashMovement.is_active == True,  # noqa: E712
+    ).order_by(CashMovement.operation_date.asc())).scalars().first()

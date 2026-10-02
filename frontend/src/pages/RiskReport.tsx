@@ -14,6 +14,7 @@ import toast from 'react-hot-toast'
 import { api } from '@/lib/api'
 import { CDU } from '@/lib/types'
 import { useAuthStore } from '@/lib/auth'
+import { useConfirm } from '@/lib/confirm'
 
 // ─────────────── types ───────────────
 
@@ -116,10 +117,15 @@ function fmtMln(n: number | null | undefined): string {
   return n == null ? '—' : fmt(n / 1_000_000, 1) + ' млн'
 }
 
+function fmtPct(n: number | null | undefined): string {
+  return n == null ? '—' : `${fmt(n * 100, 2)} %`
+}
+
 // ─────────────── page ───────────────
 
 export default function RiskReportPage() {
   const qc = useQueryClient()
+  const confirm = useConfirm()
   const canWrite = useAuthStore((s) => s.can('risk_report.notes.edit'))
 
   const datesQ = useQuery<RrDate[]>({
@@ -281,8 +287,14 @@ export default function RiskReportPage() {
               rows={notes}
               canWrite={canWrite}
               onEdit={(n) => setNoteModal(n)}
-              onDelete={(id) => {
-                if (confirm('Удалить заметку?')) removeNote.mutate(id)
+              onDelete={async (id) => {
+                const { confirmed } = await confirm({
+                  title: 'Удалить заметку?',
+                  description: 'Заметка будет удалена безвозвратно.',
+                  tone: 'danger',
+                  confirmLabel: 'Удалить',
+                })
+                if (confirmed) removeNote.mutate(id)
               }}
             />
           )}
@@ -368,8 +380,8 @@ function SummaryTab({ rows }: { rows: RrSummary[] }) {
               >
                 {fmtMln(r.total_daily_change)}
               </td>
-              <td className="text-right font-mono">{fmt(r.cdu_share_pct, 2)} %</td>
-              <td className="text-right font-mono">{fmt(r.ytm_weighted, 2)} %</td>
+              <td className="text-right font-mono">{fmtPct(r.cdu_share_pct)}</td>
+              <td className="text-right font-mono">{fmtPct(r.ytm_weighted)}</td>
               <td className="text-right font-mono">{fmt(r.duration_weighted, 2)}</td>
               <td>
                 {r.duration_status && (
@@ -438,8 +450,8 @@ function PositionsTab({ rows }: { rows: RrPosition[] }) {
               >
                 {fmtMln(p.daily_change)}
               </td>
-              <td className="text-right font-mono">{fmt(p.pct_of_total, 2)} %</td>
-              <td className="text-right font-mono">{fmt(p.ytm, 2)} %</td>
+              <td className="text-right font-mono">{fmtPct(p.pct_of_total)}</td>
+              <td className="text-right font-mono">{fmtPct(p.ytm)}</td>
             </tr>
           ))}
         </tbody>

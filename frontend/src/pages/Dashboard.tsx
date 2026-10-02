@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  Activity,
   AlertTriangle,
+  ArrowLeft,
   Calendar,
   ChevronDown,
   ClipboardCheck,
+  Clock,
+  Download,
   Filter,
   FileSpreadsheet,
   FileText,
   Flag,
+  Gauge,
   Layers,
   RefreshCw,
   TrendingDown,
@@ -17,18 +22,20 @@ import {
   X,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
+import { motion } from 'framer-motion'
 import clsx from 'clsx'
 import toast from 'react-hot-toast'
 
 import CDUBlockCard from '@/components/CDUBlockCard'
 import HistoryChart from '@/components/HistoryChart'
-import KpiCard from '@/components/KpiCard'
+import { EmptyState, LoadingBlock, Segmented, Stagger, StatCard } from '@/components/ui'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/lib/auth'
 import { formatDate, formatNumber, formatPct } from '@/lib/format'
 import { DashboardResponse } from '@/lib/types'
 
 type PeriodMode = 'all' | 'year' | 'month' | 'week' | 'custom'
+type DashboardDetail = 'assets' | 'change' | 'ytm' | 'duration' | null
 
 interface DashboardCduOption {
   id: number
@@ -39,6 +46,9 @@ interface DashboardCduOption {
 
 interface DashboardHistoryMeta {
   cdus: DashboardCduOption[]
+  min_date?: string | null
+  max_date?: string | null
+  latest_rr_date?: string | null
 }
 
 const PERIOD_OPTIONS: Array<{ mode: PeriodMode; label: string }> = [
@@ -70,17 +80,22 @@ function startOfWeek(date: Date): Date {
   return copy
 }
 
-function getPeriodBounds(mode: PeriodMode, customFrom: string, customTo: string) {
-  const today = new Date()
-  const to = customTo || toIsoDate(today)
+function parseIsoDate(value: string): Date {
+  const parsed = new Date(`${value}T00:00:00`)
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed
+}
+
+function getPeriodBounds(mode: PeriodMode, customFrom: string, customTo: string, fallbackTo: string) {
+  const to = customTo || fallbackTo || toIsoDate(new Date())
+  const baseDate = parseIsoDate(to)
 
   if (mode === 'all') return { from: undefined, to }
-  if (mode === 'year') return { from: `${today.getFullYear()}-01-01`, to }
+  if (mode === 'year') return { from: `${baseDate.getFullYear()}-01-01`, to }
   if (mode === 'month') {
-    const month = String(today.getMonth() + 1).padStart(2, '0')
-    return { from: `${today.getFullYear()}-${month}-01`, to }
+    const month = String(baseDate.getMonth() + 1).padStart(2, '0')
+    return { from: `${baseDate.getFullYear()}-${month}-01`, to }
   }
-  if (mode === 'week') return { from: toIsoDate(startOfWeek(today)), to }
+  if (mode === 'week') return { from: toIsoDate(startOfWeek(baseDate)), to }
   return { from: customFrom || undefined, to }
 }
 
@@ -88,34 +103,42 @@ export default function DashboardPage() {
   const today = toIsoDate(new Date())
   const [periodMode, setPeriodMode] = useState<PeriodMode>('all')
   const [customFrom, setCustomFrom] = useState('')
-  const [customTo, setCustomTo] = useState(today)
+  const [customTo, setCustomTo] = useState('')
   const [historyPortfolioType, setHistoryPortfolioType] = useState('')
   const [historyCduIds, setHistoryCduIds] = useState<number[]>([])
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [detail, setDetail] = useState<DashboardDetail>(null)
   const qc = useQueryClient()
   const can = useAuthStore((s) => s.can)
 
+  const historyMeta = useQuery<DashboardHistoryMeta>({
+    queryKey: ['dashboard-history-meta'],
+    queryFn: async () => (await api.get('/analytics/meta')).data,
+  })
+  const dashboardDefaultTo = historyMeta.data?.latest_rr_date ?? historyMeta.data?.max_date ?? today
   const period = useMemo(
-    () => getPeriodBounds(periodMode, customFrom, customTo),
-    [periodMode, customFrom, customTo],
+    () => getPeriodBounds(periodMode, customFrom, customTo, dashboardDefaultTo),
+    [dashboardDefaultTo, periodMode, customFrom, customTo],
   )
   const periodLabel = period.from
     ? `${formatDate(period.from)} - ${formatDate(period.to)}`
     : 'весь доступный период'
 
-  const { data, isLoading, refetch } = useQuery<DashboardResponse>({
+  const { data, isLoading, isFetching, refetch, dataUpdatedAt } = useQuery<DashboardResponse>({
     queryKey: ['dashboard', periodMode, period.from, period.to],
+    enabled: !historyMeta.isLoading,
     queryFn: async () => {
       const params: Record<string, string> = { to: period.to }
       if (period.from) params.from = period.from
       return (await api.get('/dashboard/summary', { params })).data
     },
   })
-  const historyMeta = useQuery<DashboardHistoryMeta>({
-    queryKey: ['dashboard-history-meta'],
-    queryFn: async () => (await api.get('/analytics/meta')).data,
-  })
   const effectiveReportDate = data?.report_date ?? period.to
+
+  useEffect(() => {
+    setDetail(null)
+  }, [effectiveReportDate])
 
   const historyCdus = useMemo(() => {
     const cdus = historyMeta.data?.cdus ?? []
@@ -183,31 +206,32 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold">Сводный отчёт Фонда</h1>
-          <p className="text-sm text-slate-500">
-            Период: <strong>{periodLabel}</strong> · дата среза:{' '}
-            <strong>{formatDate(effectiveReportDate)}</strong> · {data?.blocks.length ?? 0} ЧДУ
-          </p>
+        <div className="flex items-start gap-3">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-brand-gradient text-white shadow-soft">
+            <Gauge className="h-5 w-5" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold leading-tight">Сводный отчёт Фонда</h1>
+            <p className="mt-0.5 text-sm text-slate-500">
+              Период: <strong className="text-slate-700">{periodLabel}</strong> · дата среза:{' '}
+              <strong className="text-slate-700">{formatDate(effectiveReportDate)}</strong> · {data?.blocks.length ?? 0} ЧДУ
+            </p>
+            {dataUpdatedAt > 0 && (
+              <p className="mt-1 inline-flex items-center gap-1.5 text-xs text-slate-400">
+                <Clock className="h-3.5 w-3.5" />
+                Обновлено в {new Date(dataUpdatedAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+                {isFetching && <span className="ml-1 inline-flex h-1.5 w-1.5 animate-pulse-ring rounded-full bg-emerald-500" />}
+              </p>
+            )}
+          </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
-          <div className="flex flex-wrap rounded-md border border-slate-200 bg-white p-1 shadow-sm">
-            {PERIOD_OPTIONS.map((option) => (
-              <button
-                key={option.mode}
-                type="button"
-                onClick={() => setPeriodMode(option.mode)}
-                className={clsx(
-                  'h-9 rounded px-3 text-sm transition',
-                  periodMode === option.mode
-                    ? 'bg-kdif-green text-white shadow-sm'
-                    : 'text-slate-600 hover:bg-slate-100',
-                )}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
+          <Segmented
+            options={PERIOD_OPTIONS.map((o) => ({ value: o.mode, label: o.label }))}
+            value={periodMode}
+            onChange={setPeriodMode}
+            layoutId="dashboard-period"
+          />
           {periodMode === 'custom' && (
             <div className="flex flex-wrap items-center gap-2">
               <div className="relative">
@@ -223,58 +247,121 @@ export default function DashboardPage() {
                 <Calendar className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                 <input
                   type="date"
-                  value={customTo}
+                  value={customTo || dashboardDefaultTo}
                   onChange={(e) => setCustomTo(e.target.value)}
                   className="input h-10 w-40 pl-9"
                 />
               </div>
             </div>
           )}
-          <button onClick={() => refetch()} className="btn-secondary">
-            <RefreshCw className="h-4 w-4" /> Обновить
+          <button
+            onClick={() => refetch()}
+            className="btn-secondary h-10 px-3"
+            title="Обновить данные"
+            aria-label="Обновить данные"
+          >
+            <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+            <span className="hidden sm:inline">Обновить</span>
           </button>
           {can('dashboard.calculate') && (
-          <button onClick={() => calc.mutate()} disabled={calc.isPending} className="btn-primary">
-            <RefreshCw className={`h-4 w-4 ${calc.isPending ? 'animate-spin' : ''}`} /> Пересчитать
-          </button>
+            <button onClick={() => calc.mutate()} disabled={calc.isPending} className="btn-primary h-10">
+              <RefreshCw className={`h-4 w-4 ${calc.isPending ? 'animate-spin' : ''}`} /> Пересчитать
+            </button>
           )}
           {can('reports.export') && (
-            <>
-          <button onClick={downloadXlsx} className="btn-secondary">
-            <FileSpreadsheet className="h-4 w-4" /> XLSX
-          </button>
-          <button onClick={downloadPdf} className="btn-secondary">
-            <FileText className="h-4 w-4" /> PDF
-          </button>
-            </>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setExportOpen((open) => !open)}
+                className="btn-secondary h-10"
+                aria-expanded={exportOpen}
+              >
+                <Download className="h-4 w-4" />
+                Экспорт
+                <ChevronDown className={clsx('h-4 w-4 transition-transform', exportOpen && 'rotate-180')} />
+              </button>
+              {exportOpen && (
+                <div className="absolute right-0 z-30 mt-2 w-44 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-card">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExportOpen(false)
+                      void downloadXlsx()
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-emerald-50 hover:text-emerald-800"
+                  >
+                    <FileSpreadsheet className="h-4 w-4 text-emerald-600" />
+                    XLSX
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExportOpen(false)
+                      void downloadPdf()
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-emerald-50 hover:text-emerald-800"
+                  >
+                    <FileText className="h-4 w-4 text-red-500" />
+                    PDF
+                  </button>
+                </div>
+              )}
+            </div>
           )}
         </div>
       </header>
 
-      <section className="sticky top-0 z-20 -mx-2 grid grid-cols-1 gap-4 bg-slate-50/95 px-2 py-3 backdrop-blur sm:grid-cols-2 lg:grid-cols-4">
-        <KpiCard
+      <Stagger className="sticky top-0 z-20 -mx-2 grid grid-cols-1 gap-4 rounded-2xl bg-slate-50/80 px-2 py-3 backdrop-blur sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard
           title="Активы Фонда"
-          value={formatNumber(data?.fund_total_mv ?? 0, 0) + ' ₸'}
+          value={data?.fund_total_mv ?? 0}
+          format={(n) => formatNumber(n, 0) + ' ₸'}
           icon={Wallet}
+          accent="emerald"
+          active={detail === 'assets'}
+          onClick={() => setDetail('assets')}
         />
-        <KpiCard
+        <StatCard
           title="Изменение за день"
-          value={formatNumber(data?.fund_daily_change ?? 0, 0) + ' ₸'}
+          value={data?.fund_daily_change ?? 0}
+          format={(n) => formatNumber(n, 0) + ' ₸'}
           delta={(data?.fund_daily_change ?? 0) >= 0 ? 'up' : 'down'}
           subtitle={formatPct(data?.fund_daily_change_pct ?? 0)}
           icon={(data?.fund_daily_change ?? 0) >= 0 ? TrendingUp : TrendingDown}
+          accent={(data?.fund_daily_change ?? 0) >= 0 ? 'emerald' : 'red'}
+          colorByDelta
+          active={detail === 'change'}
+          onClick={() => setDetail('change')}
         />
-        <KpiCard
+        <StatCard
           title="YTM (взвеш.)"
-          value={formatPct(data?.fund_ytm_weighted ?? 0)}
+          value={data?.fund_ytm_weighted ?? 0}
+          format={formatPct}
           subtitle={data?.benchmark_ytm != null ? `MBM index: ${formatNumber(data.benchmark_ytm, 2)}` : 'MBM index: —'}
+          icon={Activity}
+          accent="sky"
+          active={detail === 'ytm'}
+          onClick={() => setDetail('ytm')}
         />
-        <KpiCard
+        <StatCard
           title="Duration (взвеш.)"
-          value={formatNumber(data?.fund_duration_weighted ?? 0, 2)}
+          value={data?.fund_duration_weighted ?? 0}
+          format={(n) => formatNumber(n, 2)}
           subtitle={data?.benchmark_duration != null ? `MBM: ${formatNumber(data.benchmark_duration, 2)}` : 'MBM: —'}
+          icon={Gauge}
+          accent="violet"
+          active={detail === 'duration'}
+          onClick={() => setDetail('duration')}
         />
-      </section>
+      </Stagger>
+
+      {detail && data && (
+        <DashboardDetailPanel
+          detail={detail}
+          data={data}
+          onBack={() => setDetail(null)}
+        />
+      )}
 
       {/* Operational KPIs (Phase 3) — render only if there is something to act on */}
       {data && (data.breaches_count > 0
@@ -419,21 +506,116 @@ export default function DashboardPage() {
       </section>
 
       <section className="space-y-6">
-        {isLoading && <div className="card p-8 text-center text-slate-500">Загрузка...</div>}
+        {isLoading && <div className="card"><LoadingBlock label="Загрузка блоков ЧДУ…" /></div>}
         {!isLoading && data?.blocks.length === 0 && (
-          <div className="card p-8 text-center text-slate-500">
-            Нет данных за выбранный период. Загрузите файлы и нажмите «Пересчитать».
-          </div>
-        )}
-        {data?.blocks.map((block) => (
-          <CDUBlockCard
-            key={block.cdu_id}
-            block={block}
-            periodFrom={period.from}
-            periodTo={period.to}
+          <EmptyState
+            icon={Layers}
+            title="Нет данных за выбранный период"
+            description="Загрузите файлы TradeReport и выполните пересчёт, чтобы увидеть сводный отчёт Фонда."
+            action={
+              can('upload.trade_report') ? (
+                <Link to="/documents" className="btn-primary">
+                  <FileSpreadsheet className="h-4 w-4" /> Загрузить файлы
+                </Link>
+              ) : undefined
+            }
           />
+        )}
+        {data?.blocks.map((block, i) => (
+          <motion.div
+            key={block.cdu_id}
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: Math.min(i * 0.06, 0.3), ease: [0.22, 1, 0.36, 1] }}
+          >
+            <CDUBlockCard block={block} periodFrom={period.from} periodTo={period.to} />
+          </motion.div>
         ))}
       </section>
     </div>
+  )
+}
+
+function DashboardDetailPanel({
+  detail,
+  data,
+  onBack,
+}: {
+  detail: Exclude<DashboardDetail, null>
+  data: DashboardResponse
+  onBack: () => void
+}) {
+  const titleByType: Record<Exclude<DashboardDetail, null>, string> = {
+    assets: 'Детализация активов Фонда',
+    change: 'Детализация изменения за день',
+    ytm: 'Детализация YTM',
+    duration: 'Детализация Duration',
+  }
+  const rows = [...data.blocks].sort((a, b) => {
+    if (detail === 'change') return Math.abs(b.total_daily_change) - Math.abs(a.total_daily_change)
+    if (detail === 'ytm') return b.ytm_weighted - a.ytm_weighted
+    if (detail === 'duration') return b.duration_weighted - a.duration_weighted
+    return b.total_mv_current - a.total_mv_current
+  })
+
+  return (
+    <section className="card overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-4">
+        <div>
+          <h2 className="section-title">{titleByType[detail]}</h2>
+          <p className="text-sm text-slate-500">Дата среза: {formatDate(data.report_date)}</p>
+        </div>
+        <button type="button" onClick={onBack} className="btn-secondary">
+          <ArrowLeft className="h-4 w-4" />
+          Назад
+        </button>
+      </div>
+      <div className="table-wrap">
+        <table className="kdif-table">
+          <thead>
+            <tr>
+              <th>ЧДУ</th>
+              <th>MV T-1</th>
+              <th>CMV</th>
+              <th>Изменение</th>
+              <th>Доля</th>
+              <th>YTM</th>
+              <th>Duration</th>
+              <th>Benchmark</th>
+              <th>Статус</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((block) => (
+              <tr key={block.cdu_id}>
+                <td>
+                  <div className="font-semibold">{block.cdu_short}</div>
+                  <div className="text-xs text-slate-500">{block.cdu_name}</div>
+                </td>
+                <td className="text-right">{formatNumber(block.total_mv_prev, 0)}</td>
+                <td className="text-right font-semibold">{formatNumber(block.total_mv_current, 0)}</td>
+                <td className={clsx('text-right font-semibold', block.total_daily_change < 0 ? 'text-red-600' : 'text-emerald-700')}>
+                  {formatNumber(block.total_daily_change, 0)}
+                </td>
+                <td className="text-right">{formatPct(block.cdu_share_pct)}</td>
+                <td className="text-right">{formatPct(block.ytm_weighted)}</td>
+                <td className="text-right">{formatNumber(block.duration_weighted, 2)}</td>
+                <td className="text-right">{formatNumber(block.benchmark_duration, 2)}</td>
+                <td>
+                  <span className={block.duration_status === 'breach' ? 'badge-breach' : 'badge-ok'}>
+                    {block.duration_status ?? 'ok'}
+                  </span>
+                </td>
+              </tr>
+            ))}
+            {!rows.length && (
+              <tr>
+                <td colSpan={9} className="py-8 text-center text-slate-400">Нет данных для детализации.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
   )
 }

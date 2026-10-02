@@ -16,6 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     fonts-dejavu-core \
     tzdata \
+    tesseract-ocr \
+    tesseract-ocr-rus \
+    tesseract-ocr-kaz \
     curl \
  && rm -rf /var/lib/apt/lists/*
 

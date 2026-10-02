@@ -187,7 +187,8 @@ class KaseClient:
             close_price=settlement_price,
             ytm=(dohod / 100.0) if dohod is not None else None,
             accrued_interest=None,
-            duration=dtm,
+            # «dtm» is days to maturity — not a duration; keep it in ``dtm`` only.
+            duration=None,
             sec_type=item.get("sec_type"),
             fin_sec_ru=item.get("fin_sec_ru"),
             fin_sec_en=item.get("fin_sec_en"),

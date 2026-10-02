@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from io import BytesIO
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zipfile import BadZipFile
 from typing import Iterable, Optional
@@ -38,6 +38,7 @@ from models.db_models import (
     RepoLot,
     SourceDocument,
 )
+from services.calculator.portfolio_calculator import calculate_for_date
 
 from .helpers import (
     extract_date_from_filename,
@@ -55,6 +56,18 @@ def _mat(wb, *names):
     """
     ws = safe_sheet(wb, *names)
     return materialize_sheet(ws) if ws is not None else None
+
+
+def _sheet_key(name: str) -> str:
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def _mat_exact(wb, *names):
+    targets = {_sheet_key(name) for name in names}
+    for sheet_name in wb.sheetnames:
+        if _sheet_key(sheet_name) in targets:
+            return materialize_sheet(wb[sheet_name])
+    return None
 
 
 def _load_risk_workbook(fp: Path, password: Optional[str] = None):
@@ -126,6 +139,9 @@ class ImportResult:
     ar_rows: int = 0
     report_summaries: int = 0
     report_positions: int = 0
+    report_dates: list[date] = field(default_factory=list)
+    portfolio_cdus: int = 0
+    portfolio_breaches: int = 0
     skipped: bool = False
     error: Optional[str] = None
     warnings: list[str] = field(default_factory=list)
@@ -145,7 +161,55 @@ class ImportResult:
                 f"cash={self.cash_rows} mv={self.mv_rows} ref={self.reference_rows} "
                 f"fx={self.fx_rows} mbm={self.mbm_rows} bonds={self.bond_lots} "
                 f"repo={self.repo_lots} dep={self.deposit_lots} ar={self.ar_rows} "
-                f"report={self.report_summaries}/{self.report_positions}")
+                f"report={self.report_summaries}/{self.report_positions} "
+                f"portfolio_cdus={self.portfolio_cdus}")
+
+
+def _refresh_portfolio_after_import(db: Session, res: ImportResult, report_date: Optional[date]) -> None:
+    if report_date is None:
+        return
+    db.flush()
+    counters = calculate_for_date(db, report_date, recalculate=True)
+    res.portfolio_cdus = max(res.portfolio_cdus, int(counters.get("cdus_processed") or 0))
+    res.portfolio_breaches += int(counters.get("breaches") or 0)
+
+
+def _meta_report_t1_checked(doc: SourceDocument) -> bool:
+    try:
+        meta = json.loads(doc.parse_meta_json or "{}")
+    except (TypeError, ValueError):
+        return False
+    dates = meta.get("report_dates") or []
+    return bool(meta.get("report_t1_checked")) or len(set(dates)) >= 2
+
+
+def _meta_report_dates(doc: SourceDocument) -> list[date]:
+    try:
+        meta = json.loads(doc.parse_meta_json or "{}")
+    except (TypeError, ValueError):
+        meta = {}
+    out: list[date] = []
+    for raw in meta.get("report_dates") or []:
+        try:
+            out.append(date.fromisoformat(str(raw)))
+        except ValueError:
+            continue
+    if not out and doc.doc_date:
+        out.append(doc.doc_date)
+    return out
+
+
+def _load_cdu_map(db: Session) -> dict[str, int]:
+    """Current and canonical names → id (managers may be renamed in settings)."""
+    from services.cdu_lookup import cdu_name_map
+    cdu_map = cdu_name_map(db)
+    if cdu_map:
+        return cdu_map
+
+    from seed import seed_initial_data
+
+    seed_initial_data(db)
+    return cdu_name_map(db)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -156,7 +220,7 @@ def import_risk_report(
     file_path: Path | str,
     *,
     uploaded_by: Optional[str] = None,
-    skip_if_imported: bool = True,
+    skip_if_imported: bool = False,
     password: Optional[str] = None,
 ) -> ImportResult:
     """Импорт одного XLSM-файла Risk Report в БД.
@@ -176,13 +240,20 @@ def import_risk_report(
             existing = db.execute(select(SourceDocument).where(
                 SourceDocument.sha256 == sha,
                 SourceDocument.parse_status == "OK",
-            )).scalars().first()
+            ).order_by(SourceDocument.id.desc())).scalars().first()
             if existing:
-                res.skipped = True
-                res.warnings.append(f"уже импортирован, source_doc_id={existing.id}")
-                res.source_doc_id = existing.id
-                res.file_date = existing.doc_date
-                return res
+                if _meta_report_t1_checked(existing):
+                    res.skipped = True
+                    res.warnings.append(f"уже импортирован, source_doc_id={existing.id}")
+                    res.source_doc_id = existing.id
+                    res.file_date = existing.doc_date
+                    res.report_dates = _meta_report_dates(existing)
+                    for refresh_date in res.report_dates:
+                        _refresh_portfolio_after_import(db, res, refresh_date)
+                    return res
+                res.warnings.append(
+                    f"повторный импорт: старый source_doc_id={existing.id} без Report (T-1)"
+                )
 
         # 3. Создать SourceDocument запись
         sd = SourceDocument(
@@ -216,14 +287,47 @@ def import_risk_report(
         sd.doc_date = file_date
 
         # 6. Кеш: имя CDU → id
-        cdu_map = {c.name: c.id for c in db.execute(select(CDU)).scalars().all()}
+        cdu_map = _load_cdu_map(db)
 
         # 7. Парсеры по листам
+        report_dates: set[date] = set()
+
+        def _import_report_dashboard(ws, fallback_date: Optional[date]) -> tuple[int, int]:
+            rows = parse_report_sheet(ws, fallback_date=fallback_date)
+            for row in rows:
+                snapshot_date = row.get("snapshot_date")
+                if snapshot_date:
+                    report_dates.add(snapshot_date)
+            return _upsert_report_dashboard(db, rows, cdu_map)
+
         if report_ws is not None:
-            rows = parse_report_sheet(report_ws, fallback_date=file_date)
-            res.report_summaries, res.report_positions = _upsert_report_dashboard(
-                db, rows, cdu_map,
+            summaries, positions = _import_report_dashboard(report_ws, file_date)
+            res.report_summaries += summaries
+            res.report_positions += positions
+
+        report_t1_ws = _mat_exact(
+            wb,
+            "Report (T-1)",
+            "Report (t-1)",
+            "Report T-1",
+            "Report t-1",
+            "Report T1",
+            "Report t1",
+            "Report_T-1",
+            "Report_t-1",
+        )
+        report_t1_checked = report_t1_ws is not None
+        if report_t1_ws is not None:
+            report_t1_date = get_report_date(report_t1_ws)
+            fallback_t1_date = report_t1_date or (file_date - timedelta(days=1) if file_date else None)
+            summaries, positions = _import_report_dashboard(
+                report_t1_ws,
+                fallback_t1_date,
             )
+            res.report_summaries += summaries
+            res.report_positions += positions
+
+        res.report_dates = sorted(report_dates)
 
         # 7.1 Cash
         cash_ws = _mat(wb, "Cash")
@@ -256,6 +360,8 @@ def import_risk_report(
         if mbm_ws is not None:
             rows = parse_mbm_sheet(mbm_ws)
             res.mbm_rows = _upsert_mbm(db, rows)
+
+        _delete_rr_detail_rows_for_dates(db, [file_date])
 
         # 7.6 Bond lots
         for sheet_name, category in [
@@ -291,20 +397,29 @@ def import_risk_report(
                      "Дебиторка")
         if ar_ws is not None:
             rows = parse_ar_sheet(ar_ws, fallback_date=file_date)
-            res.ar_rows = _upsert_ar(db, rows, cdu_map, sd.id)
+            res.ar_rows = _upsert_ar(db, rows, cdu_map, sd.id, file_date)
 
         # 8. Финализация
         wb.close()
         sd.parsed_at = datetime.utcnow()
         sd.parse_status = "OK"
         sd.rows_imported = res.total_rows()
-        sd.parse_meta_json = json.dumps({
+        parse_meta = {
             "cash": res.cash_rows, "mv": res.mv_rows, "ref": res.reference_rows,
             "fx": res.fx_rows, "mbm": res.mbm_rows, "bonds": res.bond_lots,
             "repo": res.repo_lots, "dep": res.deposit_lots, "ar": res.ar_rows,
             "report_summaries": res.report_summaries,
             "report_positions": res.report_positions,
-        }, ensure_ascii=False)
+            "report_dates": [d.isoformat() for d in res.report_dates],
+            "report_t1_checked": report_t1_checked,
+        }
+        sd.parse_meta_json = json.dumps(parse_meta, ensure_ascii=False)
+        refresh_dates = res.report_dates or ([file_date] if file_date else [])
+        for refresh_date in refresh_dates:
+            _refresh_portfolio_after_import(db, res, refresh_date)
+        parse_meta["portfolio_cdus"] = res.portfolio_cdus
+        parse_meta["portfolio_breaches"] = res.portfolio_breaches
+        sd.parse_meta_json = json.dumps(parse_meta, ensure_ascii=False)
         db.commit()
 
     except Exception as exc:
@@ -337,6 +452,7 @@ def import_folder(
     job: Optional[ImportJob] = None,
     pattern: str = "**/*.xlsm",
     password: Optional[str] = None,
+    skip_if_imported: bool = False,
 ) -> ImportJob:
     """Рекурсивно импортирует все XLSM-файлы из папки.
 
@@ -351,7 +467,11 @@ def import_folder(
             status="RUNNING",
             triggered_by=uploaded_by,
             files_total=len(files),
-            params_json=json.dumps({"folder": str(folder_p), "pattern": pattern}),
+            params_json=json.dumps({
+                "folder": str(folder_p),
+                "pattern": pattern,
+                "skip_if_imported": skip_if_imported,
+            }),
         )
         db.add(job)
         db.commit()
@@ -367,7 +487,13 @@ def import_folder(
 
     for i, fp in enumerate(files, start=1):
         # Свежая сессия не нужна — мы внутри Session, но коммиты атомарны
-        result = import_risk_report(db, fp, uploaded_by=uploaded_by, password=password)
+        result = import_risk_report(
+            db,
+            fp,
+            uploaded_by=uploaded_by,
+            password=password,
+            skip_if_imported=skip_if_imported,
+        )
         log_lines.append(result.to_log_line())
         if result.error:
             failed += 1
@@ -406,17 +532,25 @@ def _upsert_report_dashboard(
     fund_totals_by_date: dict[date, float] = {}
     summary_count = 0
     position_count = 0
-    affected_keys = {
-        (_resolve_cdu_id(cdu_map, r.get("cdu_name")), r["snapshot_date"])
+    affected_dates = {
+        r["snapshot_date"]
         for r in rows
-        if r.get("cdu_name") and r.get("snapshot_date")
+        if r.get("snapshot_date")
     }
-    for cdu_id, snapshot_date in affected_keys:
-        if cdu_id:
-            db.query(PortfolioPosition).filter_by(
-                cdu_id=cdu_id,
-                position_date=snapshot_date,
-            ).delete()
+    if affected_dates:
+        db.query(PortfolioPosition).filter(
+            PortfolioPosition.position_date.in_(affected_dates),
+            PortfolioPosition.notes == "rr_report_import",
+        ).delete(synchronize_session=False)
+        db.query(PortfolioSummary).filter(
+            PortfolioSummary.summary_date.in_(affected_dates),
+        ).delete(synchronize_session=False)
+
+    def _summary_quality(values: dict) -> tuple[int, int]:
+        return (
+            1 if values.get("ytm_weighted") else 0,
+            1 if values.get("duration_weighted") else 0,
+        )
 
     for r in summary_rows:
         cdu_id = _resolve_cdu_id(cdu_map, r.get("cdu_name"))
@@ -439,6 +573,13 @@ def _upsert_report_dashboard(
             benchmark_duration=r.get("benchmark_duration"),
             duration_status=r.get("duration_status"),
         )
+        if existing and key in summaries_by_key:
+            existing_values = {
+                "ytm_weighted": existing.ytm_weighted,
+                "duration_weighted": existing.duration_weighted,
+            }
+            if _summary_quality(existing_values) > _summary_quality(kwargs):
+                continue
         if existing:
             for k, v in kwargs.items():
                 setattr(existing, k, v)
@@ -507,13 +648,46 @@ def _upsert_report_dashboard(
 
 
 def _resolve_cdu_id(cdu_map: dict[str, int], name: Optional[str]) -> Optional[int]:
-    if not name:
-        return None
-    return cdu_map.get(name)
+    from services.cdu_lookup import resolve_name_id
+    return resolve_name_id(cdu_map, name)
+
+
+def _delete_rr_snapshots_for_dates(db: Session, model, date_column, dates: Iterable[date]) -> None:
+    affected = sorted({d for d in dates if d is not None})
+    for i in range(0, len(affected), 500):
+        chunk = affected[i:i + 500]
+        db.query(model).filter(
+            date_column.in_(chunk),
+            model.source == "rr_import",
+        ).delete(synchronize_session=False)
+
+
+def _delete_rr_detail_rows_for_dates(db: Session, dates: Iterable[date]) -> None:
+    affected = sorted({d for d in dates if d is not None})
+    if not affected:
+        return
+    rr_doc_ids = select(SourceDocument.id).where(SourceDocument.doc_type == "RISK_REPORT_XLSM")
+    for model, date_column in (
+        (BondLot, BondLot.valuation_date),
+        (RepoLot, RepoLot.valuation_date),
+        (DepositLot, DepositLot.valuation_date),
+        # AccountReceivable is NOT deleted: it carries a transaction history
+        # and is reconciled against the snapshot by ``_upsert_ar``.
+    ):
+        for i in range(0, len(affected), 500):
+            chunk = affected[i:i + 500]
+            db.query(model).filter(
+                date_column.in_(chunk),
+                model.source_doc_id.in_(rr_doc_ids),
+            ).delete(synchronize_session=False)
 
 
 def _upsert_cash(db: Session, rows: list[dict], cdu_map: dict[str, int],
                  source_doc_id: int) -> int:
+    _delete_rr_snapshots_for_dates(
+        db, CashSnapshot, CashSnapshot.snapshot_date,
+        (r.get("snapshot_date") for r in rows),
+    )
     cnt = 0
     for r in rows:
         cdu_id = _resolve_cdu_id(cdu_map, r["cdu_name"])
@@ -543,6 +717,10 @@ def _upsert_cash(db: Session, rows: list[dict], cdu_map: dict[str, int],
 
 def _upsert_mv(db: Session, rows: list[dict], cdu_map: dict[str, int],
                source_doc_id: int) -> int:
+    _delete_rr_snapshots_for_dates(
+        db, MVSnapshot, MVSnapshot.snapshot_date,
+        (r.get("snapshot_date") for r in rows),
+    )
     cnt = 0
     for r in rows:
         cdu_id = _resolve_cdu_id(cdu_map, r["cdu_name"])
@@ -585,9 +763,12 @@ def _upsert_reference(db: Session, rows: list[dict]) -> int:
     pending: dict[str, InstrumentReference] = {}
     cnt = 0
     UPDATABLE = (
-        "ticker_kase", "instrument_name", "issuer", "bond_type",
-        "coupon_rate_pct", "frequency", "base", "nominal",
-        "start_date", "maturity_date", "currency",
+        "ticker_kase", "instrument_name", "security_type", "issuer",
+        "issuer_type", "bond_type", "coupon_rate_pct", "coupon_rate_text",
+        "coupon_type", "frequency", "base", "nominal",
+        "start_date", "maturity_date", "last_coupon_date",
+        "next_coupon_date", "quotation_type", "currency", "rating",
+        "rating_source", "rating_agency",
     )
     for r in rows:
         isin = r.get("isin")
@@ -669,22 +850,25 @@ def _upsert_mbm(db: Session, rows: list[dict]) -> int:
 
 def _upsert_bond_lots(db: Session, rows: list[dict], cdu_map: dict[str, int],
                       source_doc_id: int, snapshot_date: date) -> int:
-    """Лоты ЦБ — снимок состояния портфеля на snapshot_date.
-    Идемпотентность: ключ (cdu_id, isin, valuation_date, source_doc_id)."""
+    """Лоты ЦБ — снимок портфеля на snapshot_date («1 сделка = 1 лот»).
+
+    Все прежние RR-лоты этой даты удалены ``_delete_rr_detail_rows_for_dates``,
+    поэтому каждая строка листа вставляется как отдельный лот: две покупки
+    одного ISIN остаются двумя лотами (раньше вторая могла перезаписать первую
+    в зависимости от настроек autoflush сессии).
+    """
     cnt = 0
+    db.flush()  # make pending Справочник rows visible to the enrichment lookups
+    ref_cache: dict[str, InstrumentReference] = {}
     for r in rows:
         cdu_id = _resolve_cdu_id(cdu_map, r["cdu_name"])
         if not cdu_id:
             continue
         val_date = r.get("valuation_date") or snapshot_date
-        existing = db.execute(select(BondLot).where(
-            BondLot.cdu_id == cdu_id,
-            BondLot.isin == r["isin"],
-            BondLot.valuation_date == val_date,
-        )).scalars().first()
         face = r.get("face_value") or 0.0
         qty = r.get("quantity") or 0.0
-        kwargs = dict(
+        db.add(BondLot(
+            cdu_id=cdu_id, isin=r["isin"],
             category=r["category"],
             trade_date=r.get("trade_date") or val_date,
             valuation_date=val_date,
@@ -702,14 +886,51 @@ def _upsert_bond_lots(db: Session, rows: list[dict], cdu_map: dict[str, int],
             duration=r.get("duration"),
             maturity_status=r.get("maturity_status"),
             source_doc_id=source_doc_id,
-        )
-        if existing:
-            for k, v in kwargs.items():
-                setattr(existing, k, v)
-        else:
-            db.add(BondLot(cdu_id=cdu_id, isin=r["isin"], **kwargs))
+        ))
+        _enrich_reference_from_lot(db, r, ref_cache)
         cnt += 1
+    db.flush()
     return cnt
+
+
+def _enrich_reference_from_lot(db: Session, r: dict, cache: dict) -> None:
+    """Fill gaps of the Справочник from the lot sheet (maturity, coupon, base).
+
+    Valuation on dates without a Risk Report needs the coupon schedule; the
+    instrument sheets always carry it even when the «Справочник» row is
+    incomplete.  Existing values are never overwritten here.
+    """
+    isin = (r.get("isin") or "").strip().upper()
+    if not isin:
+        return
+    ref = cache.get(isin)
+    if ref is None:
+        ref = db.execute(select(InstrumentReference).where(
+            InstrumentReference.isin == isin,
+        )).scalars().first()
+    if ref is None:
+        ref = InstrumentReference(isin=isin, currency="USD" if r.get("category") == "FOREIGN_BONDS" else "KZT",
+                                  source="RISK_REPORT_LOT")
+        db.add(ref)
+    cache[isin] = ref
+    coupon = r.get("coupon_rate")
+    if coupon is not None and abs(coupon) <= 1:
+        coupon = coupon * 100.0
+    category_label = {
+        "GOV_BONDS": "ГЦБ", "AGENCY_BONDS": "Агентские",
+        "MFO_BONDS": "МФО", "FOREIGN_BONDS": "Ин. ЦБ",
+    }.get(r.get("category"))
+    for field, value in (
+        ("maturity_date", r.get("maturity_date")),
+        ("coupon_rate_pct", coupon),
+        ("frequency", r.get("frequency")),
+        ("base", r.get("base")),
+        ("issuer", r.get("issuer")),
+        ("issuer_type", category_label),
+        ("bond_type", category_label),
+    ):
+        if value is not None and getattr(ref, field, None) in (None, ""):
+            setattr(ref, field, value)
 
 
 def _upsert_repo_lots(db: Session, rows: list[dict], cdu_map: dict[str, int],
@@ -720,14 +941,9 @@ def _upsert_repo_lots(db: Session, rows: list[dict], cdu_map: dict[str, int],
         if not cdu_id:
             continue
         val_date = r.get("valuation_date") or snapshot_date
-        # Ключ: cdu_id + instrument_code + valuation_date
-        existing = db.execute(select(RepoLot).where(
-            RepoLot.cdu_id == cdu_id,
-            RepoLot.instrument_code == r.get("instrument_code"),
-            RepoLot.valuation_date == val_date,
-            RepoLot.face_value == r["face_value"],
-        )).scalars().first()
-        kwargs = dict(
+        db.add(RepoLot(
+            cdu_id=cdu_id,
+            deal_id=r.get("deal_id"),
             instrument_code=r.get("instrument_code"),
             isin=r.get("isin"),
             trade_date=r.get("trade_date") or val_date,
@@ -736,17 +952,18 @@ def _upsert_repo_lots(db: Session, rows: list[dict], cdu_map: dict[str, int],
             face_value=r["face_value"],
             close_value=r.get("close_value"),
             repo_rate_pct=r.get("repo_rate_pct"),
+            base=r.get("base") or 366,
             accrued_interest=r.get("accrued_interest"),
             term_days=r.get("term_days"),
             market_value=r.get("market_value"),
+            ytm=r.get("ytm"),
+            duration=r.get("duration"),
+            maturity_status=r.get("maturity_status"),
+            is_closed=bool(r.get("close_date") and r["close_date"] <= val_date),
             source_doc_id=source_doc_id,
-        )
-        if existing:
-            for k, v in kwargs.items():
-                setattr(existing, k, v)
-        else:
-            db.add(RepoLot(cdu_id=cdu_id, **kwargs))
+        ))
         cnt += 1
+    db.flush()
     return cnt
 
 
@@ -758,12 +975,8 @@ def _upsert_deposit_lots(db: Session, rows: list[dict], cdu_map: dict[str, int],
         if not cdu_id:
             continue
         val_date = r.get("valuation_date") or snapshot_date
-        existing = db.execute(select(DepositLot).where(
-            DepositLot.cdu_id == cdu_id,
-            DepositLot.valuation_date == val_date,
-            DepositLot.principal == r["principal"],
-        )).scalars().first()
-        kwargs = dict(
+        db.add(DepositLot(
+            cdu_id=cdu_id,
             trade_date=r.get("trade_date") or val_date,
             valuation_date=val_date,
             close_date=r.get("close_date"),
@@ -772,51 +985,130 @@ def _upsert_deposit_lots(db: Session, rows: list[dict], cdu_map: dict[str, int],
             accrued_interest=r.get("accrued_interest"),
             market_value=r.get("market_value"),
             source_doc_id=source_doc_id,
-        )
-        if existing:
-            for k, v in kwargs.items():
-                setattr(existing, k, v)
-        else:
-            db.add(DepositLot(cdu_id=cdu_id, **kwargs))
+        ))
         cnt += 1
+    db.flush()
     return cnt
 
 
 def _upsert_ar(db: Session, rows: list[dict], cdu_map: dict[str, int],
-               source_doc_id: int) -> int:
+               source_doc_id: int, snapshot_date: Optional[date] = None) -> int:
+    """Дебиторская задолженность из листа «Accounts receivable».
+
+    Лист — это *снимок* открытых остатков на дату отчёта.  Поэтому:
+    * строка с тем же (ЧДУ, ISIN, дата постановки) обновляет существующую
+      запись (в т.ч. созданную движком купонов/погашений — без дублей);
+    * изменение остатка фиксируется операцией ReceivableTransaction на дату
+      снимка (история «на дату» сохраняется);
+    * открытая RR-дебиторка, которой больше нет в снимке (или остаток 0),
+      закрывается операцией REPAYMENT — раньше она оставалась OPEN навсегда и
+      завышала портфель.
+    """
+    from models.db_models import ReceivableTransaction
+    from api.routes.accounting import receivable_balance_as_of  # local: avoid import cycle
+
     cnt = 0
+    seen_ids: set[int] = set()
+    present_cdus: set[int] = set()
     for r in rows:
         cdu_id = _resolve_cdu_id(cdu_map, r["cdu_name"])
         if not cdu_id:
             # Для НБ РК вкладок AR может не содержать ДУ — пропускаем строки без cdu
             continue
-        rec_date = r.get("record_date")
+        present_cdus.add(cdu_id)
+        rec_date = r.get("record_date") or snapshot_date
         if not rec_date:
             continue
+        balance = float(r.get("balance_kzt") or 0.0)
         existing = db.execute(select(AccountReceivable).where(
             AccountReceivable.cdu_id == cdu_id,
             AccountReceivable.isin == r["isin"],
             AccountReceivable.record_date == rec_date,
+            AccountReceivable.is_manual.is_(False),
         )).scalars().first()
-        kwargs = dict(
-            isin=r["isin"],
-            description=r.get("description"),
-            currency=r.get("currency", "KZT"),
-            balance_currency=r.get("balance_currency"),
-            balance_kzt=r.get("balance_kzt", 0.0),
-            amount=r.get("balance_kzt") or 0.0,
-            due_date=r.get("due_date"),
-            status="OPEN",
-            source_doc_id=source_doc_id,
-        )
-        if existing:
-            for k, v in kwargs.items():
-                setattr(existing, k, v)
-        else:
-            db.add(AccountReceivable(
+        if existing is None:
+            existing = AccountReceivable(
                 cdu_id=cdu_id,
                 record_date=rec_date,
-                **kwargs,
-            ))
+                isin=r["isin"],
+                description=r.get("description"),
+                currency=r.get("currency", "KZT"),
+                amount=balance,
+                amount_kzt=balance,
+                balance_currency=r.get("balance_currency"),
+                balance_kzt=balance,
+                due_date=r.get("due_date"),
+                status="OPEN",
+                related_event_type=_ar_event_type(r.get("description")),
+                workflow_status="APPROVED",
+                is_manual=False,
+                is_active=True,
+                source_doc_id=source_doc_id,
+                created_by="RISK_REPORT",
+            )
+            db.add(existing)
+            db.flush()
+        else:
+            existing.description = r.get("description") or existing.description
+            existing.due_date = r.get("due_date") or existing.due_date
+            if snapshot_date:
+                current = receivable_balance_as_of(db, existing, snapshot_date)
+                delta = balance - current
+                if abs(delta) > 0.005:
+                    db.add(ReceivableTransaction(
+                        receivable_id=existing.id,
+                        operation_date=snapshot_date,
+                        operation_type="ADJUSTMENT" if delta > 0 else "REPAYMENT",
+                        amount=abs(delta) if delta < 0 else delta,
+                        amount_kzt=abs(delta) if delta < 0 else delta,
+                        currency=existing.currency or "KZT",
+                        basis=f"Остаток по Risk Report за {snapshot_date:%d.%m.%Y}",
+                        workflow_status="APPROVED", is_active=True,
+                        created_by="RISK_REPORT", approved_by="SYSTEM",
+                    ))
+            existing.balance_kzt = balance
+            existing.balance_currency = r.get("balance_currency")
+            existing.status = "OPEN" if balance > 0.005 else "CLOSED"
+            existing.source_doc_id = source_doc_id
+        seen_ids.add(existing.id)
         cnt += 1
+
+    if snapshot_date is not None and present_cdus:
+        rr_doc_ids = select(SourceDocument.id).where(SourceDocument.doc_type == "RISK_REPORT_XLSM")
+        stale = db.execute(select(AccountReceivable).where(
+            AccountReceivable.cdu_id.in_(present_cdus),
+            AccountReceivable.is_manual.is_(False),
+            AccountReceivable.is_active.is_(True),
+            AccountReceivable.record_date <= snapshot_date,
+            AccountReceivable.status.in_(("OPEN", "PARTIAL")),
+            AccountReceivable.source_doc_id.in_(rr_doc_ids),
+        )).scalars().all()
+        for ar in stale:
+            if ar.id in seen_ids:
+                continue
+            current = receivable_balance_as_of(db, ar, snapshot_date)
+            if current > 0.005:
+                db.add(ReceivableTransaction(
+                    receivable_id=ar.id,
+                    operation_date=snapshot_date,
+                    operation_type="REPAYMENT",
+                    amount=current, amount_kzt=current,
+                    currency=ar.currency or "KZT",
+                    basis=f"Отсутствует в Risk Report за {snapshot_date:%d.%m.%Y} — погашена",
+                    workflow_status="APPROVED", is_active=True,
+                    created_by="RISK_REPORT", approved_by="SYSTEM",
+                ))
+            ar.status = "CLOSED"
+            ar.balance_kzt = 0.0
+            ar.actual_value_date = ar.actual_value_date or snapshot_date
+    db.flush()
     return cnt
+
+
+def _ar_event_type(description: Optional[str]) -> Optional[str]:
+    text = (description or "").lower()
+    if "купон" in text or "вознагражд" in text:
+        return "COUPON"
+    if "погашен" in text:
+        return "REDEMPTION"
+    return None

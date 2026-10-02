@@ -1,7 +1,7 @@
 """PDF report — same data as XLSX, simplified table for printing."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import List
 
@@ -49,7 +49,10 @@ for _name, _path in _FONT_CANDIDATES:
 
 def generate_pdf_report(db: Session, report_date: date, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    out = output_dir / f"risk_report_{report_date.strftime('%Y%m%d')}.pdf"
+    # A unique file per generation: an approved version must never be
+    # overwritten by a later export of the same date.
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    out = output_dir / f"risk_report_{report_date.strftime('%Y%m%d')}_{stamp}.pdf"
 
     doc = SimpleDocTemplate(str(out), pagesize=landscape(A4),
                             leftMargin=10 * mm, rightMargin=10 * mm,

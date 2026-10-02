@@ -2,8 +2,12 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 
 import Layout from './components/Layout'
 import LoginPage from './pages/Login'
+import WorkdayPage from './pages/Workday'
 import DashboardPage from './pages/Dashboard'
+import OperationsPage from './pages/Operations'
+import AccountingPage from './pages/Accounting'
 import UploadPage from './pages/Upload'
+import DocumentsPage from './pages/Documents'
 import ImportPage from './pages/Import'
 import HistoryPage from './pages/History'
 import AnalyticsPage from './pages/Analytics'
@@ -40,12 +44,37 @@ function PermissionRoute({ permission, children }: { permission: string; childre
   return <>{children}</>
 }
 
+/** Доступ разрешён, если у пользователя есть хотя бы одно из перечисленных разрешений. */
+function AnyPermissionRoute({ permissions, children }: { permissions: string[]; children: React.ReactNode }) {
+  const allowed = useAuthStore((s) => s.canAny(permissions))
+  if (!allowed) {
+    return (
+      <div className="card p-8 text-center text-slate-500">
+        Нет прав для просмотра этой страницы.
+      </div>
+    )
+  }
+  return <>{children}</>
+}
+
 export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-        <Route path="/" element={<PermissionRoute permission="page.dashboard"><DashboardPage /></PermissionRoute>} />
+        <Route path="/" element={<PermissionRoute permission="page.dashboard"><WorkdayPage /></PermissionRoute>} />
+        <Route path="/dashboard" element={<PermissionRoute permission="page.dashboard"><DashboardPage /></PermissionRoute>} />
+        <Route path="/operations" element={<PermissionRoute permission="page.history"><OperationsPage /></PermissionRoute>} />
+        <Route path="/accounting" element={<PermissionRoute permission="page.accounting"><AccountingPage /></PermissionRoute>} />
+        <Route
+          path="/documents"
+          element={
+            <AnyPermissionRoute permissions={['page.upload', 'page.primary_data']}>
+              <DocumentsPage />
+            </AnyPermissionRoute>
+          }
+        />
+        {/* Старые прямые ссылки на отдельные загрузчики продолжают работать (закладки, deep-link из истории). */}
         <Route path="/upload" element={<PermissionRoute permission="page.upload"><UploadPage /></PermissionRoute>} />
         <Route path="/import" element={<PermissionRoute permission="page.import"><ImportPage /></PermissionRoute>} />
         <Route path="/analytics" element={<PermissionRoute permission="page.analytics"><AnalyticsPage /></PermissionRoute>} />

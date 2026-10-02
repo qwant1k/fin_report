@@ -3,8 +3,25 @@ import toast from 'react-hot-toast'
 
 import { useAuthStore } from './auth'
 
+function resolveApiBaseURL() {
+  const configured = import.meta.env.VITE_API_BASE_URL?.trim()
+  if (configured) return configured.replace(/\/+$/, '')
+
+  if (import.meta.env.DEV && typeof window !== 'undefined') {
+    const { hostname, port } = window.location
+    const isLoopback = hostname === 'localhost' || hostname === '127.0.0.1'
+    const isVitePort = port === '5173' || port === '5174'
+
+    if (isLoopback && port && !isVitePort) {
+      return `http://${hostname}:8000/api`
+    }
+  }
+
+  return '/api'
+}
+
 export const api = axios.create({
-  baseURL: '/api',
+  baseURL: resolveApiBaseURL(),
   timeout: 60_000,
 })
 

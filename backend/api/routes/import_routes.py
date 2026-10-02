@@ -33,7 +33,7 @@ router = APIRouter(
 @router.post("/risk-report")
 async def upload_single_rr(
     file: UploadFile = File(...),
-    skip_if_imported: bool = Form(True),
+    skip_if_imported: bool = Form(False),
     password: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     user: User = Depends(require_permission("import.run")),
@@ -76,6 +76,11 @@ async def upload_single_rr(
             "accounts_receivable": result.ar_rows,
             "report_summaries": result.report_summaries,
             "report_positions": result.report_positions,
+            "report_dates": [d.isoformat() for d in result.report_dates],
+        },
+        "portfolio": {
+            "cdus_processed": result.portfolio_cdus,
+            "breaches": result.portfolio_breaches,
         },
     }
 
@@ -98,17 +103,26 @@ async def import_rr_folder(
         raise HTTPException(400, "folder_path обязателен")
     folder = Path(folder_str)
     if not folder.exists() or not folder.is_dir():
-        raise HTTPException(400, f"Папка не найдена или не является директорией: {folder}")
+        raise HTTPException(400, (
+            f"Папка не найдена на сервере: {folder}. Путь указывается так, как его видит сервер "
+            "приложения (при запуске в Docker — смонтированный каталог, например /data/...), "
+            "а не путь на компьютере пользователя; иначе загрузите файлы через форму."
+        ))
 
     pattern = payload.get("pattern", "**/*.xlsm")
     password = payload.get("password")
+    skip_if_imported = bool(payload.get("skip_if_imported", False))
 
     # Создать ImportJob сразу, чтобы фронт мог поллить
     job = ImportJob(
         job_type="HISTORIC_RR",
         status="RUNNING",
         triggered_by=user.username,
-        params_json=json.dumps({"folder": str(folder), "pattern": pattern}),
+        params_json=json.dumps({
+            "folder": str(folder),
+            "pattern": pattern,
+            "skip_if_imported": skip_if_imported,
+        }),
     )
     db.add(job)
     db.commit()
@@ -126,6 +140,7 @@ async def import_rr_folder(
                     job=fresh_job,
                     pattern=pattern,
                     password=password,
+                    skip_if_imported=skip_if_imported,
                 )
             except Exception as exc:
                 logger.exception(f"Bulk import job {job_id} failed")

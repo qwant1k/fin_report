@@ -45,8 +45,13 @@ def classify_operation(
             return "REPO_CLOSE"
         return "REPO_HEADER"
 
-    # 2. FX (валютные сделки)
-    if r.startswith(("FX", "FXDE", "FXSW")) or ccy in ("USD", "EUR", "GBP", "CNY"):
+    # 2. FX (валютные сделки).  Валюта расчётов сама по себе не является
+    # признаком FX: обычная покупка иностранной облигации также может
+    # рассчитываться в USD/EUR.  Поэтому используем режим торгов либо явно
+    # валютный код инструмента (например USDKZT_TOM).
+    fx_currency = r"(?:USD|EUR|GBP|CNY|RUB|KZT)"
+    is_fx_instrument = bool(re.match(rf"^{fx_currency}{fx_currency}(?:_|$)", code))
+    if r.startswith(("FX", "FXDE", "FXSW")) or is_fx_instrument:
         if k in ("К", "B"):
             return "FX_BUY"
         if k in ("П", "S"):
@@ -98,12 +103,21 @@ class CategoryRule:
 DEFAULT_RULES: List[CategoryRule] = [
     CategoryRule(10, "Reverse REPO (биржевое)", "REVERSE_REPO", regimes=("EBRP", "EBWP", "REPO")),
     CategoryRule(15, "Foreign bonds / Eurobonds", "FOREIGN_BONDS",
-                 code_prefixes=("XS", "US", "RU", "XS2", "XS3", "XS4", "XS5", "XS6", "XS7", "XS8", "XS9")),
+                 code_regex=r"^(XS|US)[A-Z0-9]{9}\d$"),
     CategoryRule(17, "Deposits / T-Bills", "DEPOSIT",
                  regimes=("T-BILL", "DEP", "MMKT", "TREASURY", "NOTES")),
-    CategoryRule(20, "ГЦБ МФ РК (KFUS*)", "GOV_BONDS", code_prefixes=("KFUS", "MFRK")),
-    CategoryRule(30, "Агентские облигации (EABR*)", "AGENCY_BONDS", code_prefixes=("EABR", "EAB")),
-    CategoryRule(40, "МФО облигации (MFO*)", "MFO_BONDS", code_prefixes=("MFO",)),
+    # ГЦБ: МЕОКАМ/МЕУКАМ/МЕККАМ/МУИКАМ Минфина, ноты НБРК, облигации МИО.
+    CategoryRule(20, "ГЦБ (МФ РК, НБ РК, МИО)", "GOV_BONDS",
+                 code_prefixes=("MUM", "MOM", "MKM", "MEU", "MUJ", "MTM", "MTC", "NTK", "KZ_MGB", "MFRK")),
+    # Агентские (квазигосударственный сектор).  KFUS — АО «Казахстанский фонд
+    # устойчивости» (КФУ) по п. 6.2.2 D относится к Агентским, не к ГЦБ.
+    CategoryRule(30, "Агентские облигации (квазигоссектор)", "AGENCY_BONDS",
+                 code_prefixes=("KFUS", "BTRK", "BRKZ", "KEGC", "ZHSS", "TMJL", "SKKZ", "AGKK", "DAMU")),
+    # МФО = международные финансовые организации (ЕАБР, АБР, ЕБРР, IFC).
+    # ВНИМАНИЕ: тикеры KASE «MFO…/MF…» — это МИКРОфинансовые организации,
+    # они сюда не относятся.
+    CategoryRule(40, "МФО (международные финансовые организации)", "MFO_BONDS",
+                 code_prefixes=("EABR", "ASDB", "EBRD", "IFCN", "IBRD")),
     CategoryRule(90, "Прочее", "OTHER"),
 ]
 
@@ -127,14 +141,19 @@ DEFAULT_CDU_PREFIXES: dict[str, str] = {
     "HALFN": "Halyk Finance",
     "HALY":  "Halyk Finance",
     "BCC":   "BCC Invest",
+    "KIBAM": "BCC Invest",          # код участника KASE «BCC Invest» (KIBAM0BT11)
     "JUSAN": "Jusan Invest",
     "JYS":   "Jusan Invest",
-    "CAIFC": "Centras Securities",
+    # KASE: CAIFC — АО «Tansar Capital» (бывш. CAIFC Investment Group),
+    # CESEC — АО «Centras Securities».
+    "CAIFC": "Tansar Capital",
+    "CESEC": "Centras Securities",
     "CENTR": "Centras Securities",
     "TANSAR":"Tansar Capital",
     "TANSA": "Tansar Capital",
     "TANSR": "Tansar Capital",
     "ALATAU": "Alatau City Invest",
+    "DRBES": "Alatau City Invest",  # код участника KASE «Alatau City Invest» (DRBES0BT08)
     "ALATA": "Alatau City Invest",
     "ACI":   "Alatau City Invest",
     "UDCAP": "UD Capital",
@@ -143,19 +162,35 @@ DEFAULT_CDU_PREFIXES: dict[str, str] = {
     "300138":"НБ РК (Специальный резерв)",      # спец портфель
 }
 
+# Short prefixes produce false positives inside other codes (e.g. «UD» in
+# «STUDY», «ACI» in «PLACING»), so they must start a token.
+_TOKEN_START_PREFIXES = {"UD", "ACI", "BCC", "JYS"}
+
+
+def _match_prefix(src: str) -> Optional[str]:
+    for prefix in sorted(DEFAULT_CDU_PREFIXES, key=lambda p: -len(p)):
+        if prefix in _TOKEN_START_PREFIXES:
+            if re.search(rf"(^|[^A-Z0-9]){re.escape(prefix)}", src):
+                return prefix
+        elif prefix in src:
+            return prefix
+    return None
+
 
 def detect_cdu_prefix(participant_code: Optional[str], filename: str) -> Optional[str]:
     """Detect CDU prefix from participant code or filename.
 
-    Приоритет: более длинные совпадения побеждают (например HALFN перед HALY).
+    Приоритет: идентификаторы из файла (код участника / фирмы / торговый
+    счёт), затем имя файла.  Более длинные совпадения побеждают
+    (например HALFN перед HALY).  Код клиринговой фирмы сюда передавать
+    нельзя: «CENTR_K» — клиринговый член для нескольких управляющих.
     """
     participant_src = (participant_code or "").upper()
     filename_src = (filename or "").upper()
+    if participant_src:
+        found = _match_prefix(participant_src)
+        if found:
+            return found
     if re.search(r"(^|[^A-Z0-9])JI([^A-Z0-9]|$)", filename_src):
         return "JUSAN"
-    src = participant_src + "|" + filename_src
-    # Сортируем по убыванию длины для greedy matching
-    for prefix in sorted(DEFAULT_CDU_PREFIXES, key=lambda p: -len(p)):
-        if prefix in src:
-            return prefix
-    return None
+    return _match_prefix(filename_src)

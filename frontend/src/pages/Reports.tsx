@@ -3,10 +3,12 @@ import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   CheckCircle2,
+  CalendarDays,
   Clock,
   Download,
   FileSpreadsheet,
   FileText,
+  MoreHorizontal,
   RefreshCw,
   Send,
   Trash2,
@@ -15,7 +17,11 @@ import {
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
+import { Modal, PageHeader } from '@/components/ui'
+import { downloadBlob, filenameFromPath } from '@/lib/download'
 import { useAuthStore } from '@/lib/auth'
+import { useConfirm } from '@/lib/confirm'
+import { useWorkContextStore } from '@/lib/workContext'
 import { formatDate } from '@/lib/format'
 import { GeneratedReport, ReportStatus } from '@/lib/types'
 
@@ -45,35 +51,66 @@ const VALID_STATUSES: ReportStatus[] = ['draft', 'pending_approval', 'approved',
 export default function ReportsPage() {
   const qc = useQueryClient()
   const can = useAuthStore((s) => s.can)
+  const confirm = useConfirm()
   const [searchParams, setSearchParams] = useSearchParams()
   const initialStatus = (searchParams.get('status') ?? '') as ReportStatus | ''
+  // Общая рабочая дата — синхронизирована с Рабочим днём, Позициями, KASE и Сверкой.
+  const reportDate = useWorkContextStore((s) => s.workDate)
+  const setReportDate = useWorkContextStore((s) => s.setWorkDate)
   const [statusFilter, setStatusFilter] = useState<ReportStatus | ''>(
     VALID_STATUSES.includes(initialStatus as ReportStatus) ? initialStatus : '',
   )
+  const [openActionsId, setOpenActionsId] = useState<number | null>(null)
   const [rejectFor, setRejectFor] = useState<GeneratedReport | null>(null)
   const [rejectComment, setRejectComment] = useState('')
+
+  // Deep link (например, из Рабочего дня: /reports?date=...) один раз при монтировании
+  // подставляется в общий контекст даты, чтобы обе части приложения остались согласованы.
+  useEffect(() => {
+    const urlDate = searchParams.get('date')
+    if (urlDate) setReportDate(urlDate)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Keep URL in sync with the dropdown so deep links from the dashboard stick.
   useEffect(() => {
     const next = new URLSearchParams(searchParams)
     if (statusFilter) next.set('status', statusFilter)
     else next.delete('status')
+    if (reportDate) next.set('date', reportDate)
+    else next.delete('date')
     if (next.toString() !== searchParams.toString()) {
       setSearchParams(next, { replace: true })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusFilter])
+  }, [reportDate, statusFilter])
 
   const reports = useQuery<GeneratedReport[]>({
-    queryKey: ['reports', statusFilter],
+    queryKey: ['reports', statusFilter, reportDate],
     queryFn: async () => {
       const params: Record<string, string> = {}
       if (statusFilter) params.status = statusFilter
+      if (reportDate) params.report_date = reportDate
       return (await api.get('/reports/', { params })).data
     },
   })
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['reports'] })
+
+  const generate = useMutation({
+    mutationFn: async (type: 'xlsx' | 'pdf') => {
+      const resp = await api.get(`/export/${type}`, {
+        params: { report_date: reportDate },
+        responseType: 'blob',
+      })
+      downloadBlob(resp.data, `risk_report_${reportDate.replaceAll('-', '')}.${type}`)
+      return type
+    },
+    onSuccess: () => {
+      toast.success('Отчёт сформирован')
+      invalidate()
+    },
+  })
 
   const submit = useMutation({
     mutationFn: async (id: number) => (await api.post(`/reports/${id}/submit`)).data,
@@ -106,8 +143,48 @@ export default function ReportsPage() {
     onSuccess: () => { toast.success('Удалено'); invalidate() },
   })
 
-  const handleDownload = (id: number) => {
-    window.open(`/api/reports/${id}/download`, '_blank')
+  const handleDownload = async (report: GeneratedReport) => {
+    const resp = await api.get(`/reports/${report.id}/download`, { responseType: 'blob' })
+    downloadBlob(resp.data, filenameFromPath(report.file_path, `report_${report.id}`))
+  }
+
+  const reportLabel = (r: GeneratedReport) => `${r.report_type} v${r.version} от ${formatDate(r.report_date)}`
+
+  const handleSubmit = async (r: GeneratedReport) => {
+    const { confirmed } = await confirm({
+      title: 'Отправить отчёт на утверждение?',
+      description: `${reportLabel(r)} — после отправки отчёт увидит утверждающий и сможет одобрить или отклонить его.`,
+      confirmLabel: 'Отправить',
+    })
+    if (confirmed) submit.mutate(r.id)
+  }
+
+  const handleApprove = async (r: GeneratedReport) => {
+    const { confirmed } = await confirm({
+      title: 'Утвердить отчёт?',
+      description: `${reportLabel(r)} будет отмечен утверждённым и станет официальной версией за эту дату.`,
+      confirmLabel: 'Утвердить',
+    })
+    if (confirmed) approve.mutate(r.id)
+  }
+
+  const handleRegenerate = async (r: GeneratedReport) => {
+    const { confirmed } = await confirm({
+      title: 'Перегенерировать отчёт?',
+      description: `${reportLabel(r)} — текущий файл будет заменён на пересобранный из актуальных данных на дату отчёта.`,
+      confirmLabel: 'Перегенерировать',
+    })
+    if (confirmed) regenerate.mutate(r.id)
+  }
+
+  const handleDelete = async (r: GeneratedReport) => {
+    const { confirmed } = await confirm({
+      title: 'Удалить отчёт?',
+      description: `${reportLabel(r)} будет удалён безвозвратно, включая файл и историю версии.`,
+      tone: 'danger',
+      confirmLabel: 'Удалить',
+    })
+    if (confirmed) remove.mutate(r.id)
   }
 
   const confirmReject = () => {
@@ -123,26 +200,48 @@ export default function ReportsPage() {
 
   return (
     <div className="space-y-6">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold">Сформированные отчёты</h1>
-          <p className="text-sm text-slate-500">Утверждение и история версий</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <label className="label">Статус:</label>
-          <select
-            className="input"
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as ReportStatus | '')}
-          >
-            <option value="">Все</option>
-            <option value="draft">{STATUS_LABEL.draft}</option>
-            <option value="pending_approval">{STATUS_LABEL.pending_approval}</option>
-            <option value="approved">{STATUS_LABEL.approved}</option>
-            <option value="rejected">{STATUS_LABEL.rejected}</option>
-          </select>
-        </div>
-      </header>
+      <PageHeader
+        icon={FileText}
+        title="Сформированные отчёты"
+        subtitle="Утверждение и история версий"
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <CalendarDays className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="date"
+                className="input h-10 w-44 pl-9"
+                value={reportDate}
+                onChange={(e) => setReportDate(e.target.value)}
+              />
+            </div>
+            {can('reports.export') && (
+              <>
+                <button className="btn-secondary h-10" disabled={generate.isPending || !reportDate} onClick={() => generate.mutate('xlsx')}>
+                  <FileSpreadsheet className="h-4 w-4" />
+                  XLSX
+                </button>
+                <button className="btn-secondary h-10" disabled={generate.isPending || !reportDate} onClick={() => generate.mutate('pdf')}>
+                  <FileText className="h-4 w-4" />
+                  PDF
+                </button>
+              </>
+            )}
+            <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Статус:</span>
+            <select
+              className="input h-10 w-48"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as ReportStatus | '')}
+            >
+              <option value="">Все</option>
+              <option value="draft">{STATUS_LABEL.draft}</option>
+              <option value="pending_approval">{STATUS_LABEL.pending_approval}</option>
+              <option value="approved">{STATUS_LABEL.approved}</option>
+              <option value="rejected">{STATUS_LABEL.rejected}</option>
+            </select>
+          </div>
+        }
+      />
 
       <div className="card overflow-hidden">
         <div className="table-wrap">
@@ -210,77 +309,115 @@ export default function ReportsPage() {
                     {(r.status === 'draft' || r.status === 'pending_approval') && '—'}
                   </td>
                   <td>
-                    <div className="flex flex-wrap gap-1">
-                      <button
-                        className="btn-secondary px-2 py-1"
-                        title="Скачать"
-                        onClick={() => handleDownload(r.id)}
-                      >
-                        <Download className="w-4 h-4" />
-                      </button>
+                    {(() => {
+                      const canSubmitReport = can('reports.submit') && (r.status === 'draft' || r.status === 'rejected')
+                      const canRegenerateReport = can('reports.regenerate') && (r.status === 'draft' || r.status === 'rejected')
+                      const canDeleteReport = can('reports.delete') && r.status !== 'approved'
+                      const hasMoreActions = canRegenerateReport || canDeleteReport
 
-                      {can('reports.submit') && (r.status === 'draft' || r.status === 'rejected') && (
-                        <button
-                          className="btn-primary px-2 py-1"
-                          title="Отправить на утверждение"
-                          onClick={() => submit.mutate(r.id)}
-                          disabled={submit.isPending}
-                        >
-                          <Send className="w-4 h-4" />
-                        </button>
-                      )}
-
-                      {can('reports.regenerate') && (r.status === 'draft' || r.status === 'rejected') && (
-                        <button
-                          className="btn-secondary px-2 py-1"
-                          title="Перегенерировать"
-                          onClick={() => regenerate.mutate(r.id)}
-                          disabled={regenerate.isPending}
-                        >
-                          <RefreshCw className="w-4 h-4" />
-                        </button>
-                      )}
-
-                      {(can('reports.approve') || can('reports.reject')) && r.status === 'pending_approval' && (
-                        <>
-                          {can('reports.approve') && (
+                      return (
+                        <div className="flex items-center justify-end gap-1">
                           <button
-                            className="btn-primary px-2 py-1 bg-emerald-600 hover:bg-emerald-700"
-                            title="Утвердить"
-                            onClick={() => approve.mutate(r.id)}
-                            disabled={approve.isPending}
+                            className="btn-secondary px-2 py-1"
+                            title="Скачать"
+                            aria-label="Скачать"
+                            onClick={() => { void handleDownload(r) }}
                           >
-                            <CheckCircle2 className="w-4 h-4" />
+                            <Download className="w-4 h-4" />
                           </button>
-                          )}
-                          {can('reports.reject') && (
-                          <button
-                            className="btn-secondary px-2 py-1 text-red-700 border-red-300 hover:bg-red-50"
-                            title="Отклонить"
-                            onClick={() => { setRejectFor(r); setRejectComment('') }}
-                          >
-                            <XCircle className="w-4 h-4" />
-                          </button>
-                          )}
-                        </>
-                      )}
 
-                      {can('reports.delete') && r.status !== 'approved' && (
-                        <button
-                          className="btn-secondary px-2 py-1 text-red-600"
-                          title="Удалить"
-                          onClick={() => remove.mutate(r.id)}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      )}
-                    </div>
+                          {canSubmitReport && (
+                            <button
+                              className="btn-primary px-2 py-1"
+                              title="Отправить на утверждение"
+                              aria-label="Отправить на утверждение"
+                              onClick={() => handleSubmit(r)}
+                              disabled={submit.isPending}
+                            >
+                              <Send className="w-4 h-4" />
+                            </button>
+                          )}
+
+                          {(can('reports.approve') || can('reports.reject')) && r.status === 'pending_approval' && (
+                            <>
+                              {can('reports.approve') && (
+                                <button
+                                  className="btn-primary bg-emerald-600 px-2 py-1 hover:bg-emerald-700"
+                                  title="Утвердить"
+                                  aria-label="Утвердить"
+                                  onClick={() => handleApprove(r)}
+                                  disabled={approve.isPending}
+                                >
+                                  <CheckCircle2 className="w-4 h-4" />
+                                </button>
+                              )}
+                              {can('reports.reject') && (
+                                <button
+                                  className="btn-secondary border-red-300 px-2 py-1 text-red-700 hover:bg-red-50"
+                                  title="Отклонить"
+                                  aria-label="Отклонить"
+                                  onClick={() => { setRejectFor(r); setRejectComment(''); setOpenActionsId(null) }}
+                                >
+                                  <XCircle className="w-4 h-4" />
+                                </button>
+                              )}
+                            </>
+                          )}
+
+                          {hasMoreActions && (
+                            <div className="relative">
+                              <button
+                                type="button"
+                                className="btn-secondary px-2 py-1"
+                                title="Еще действия"
+                                aria-label="Еще действия"
+                                aria-expanded={openActionsId === r.id}
+                                onClick={() => setOpenActionsId((id) => (id === r.id ? null : r.id))}
+                              >
+                                <MoreHorizontal className="w-4 h-4" />
+                              </button>
+                              {openActionsId === r.id && (
+                                <div className="absolute right-0 z-30 mt-2 w-52 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 text-left shadow-card">
+                                  {canRegenerateReport && (
+                                    <button
+                                      type="button"
+                                      className="flex w-full items-center gap-2 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-emerald-50 hover:text-emerald-800"
+                                      onClick={() => {
+                                        setOpenActionsId(null)
+                                        handleRegenerate(r)
+                                      }}
+                                      disabled={regenerate.isPending}
+                                    >
+                                      <RefreshCw className="h-4 w-4" />
+                                      Перегенерировать
+                                    </button>
+                                  )}
+                                  {canDeleteReport && (
+                                    <button
+                                      type="button"
+                                      className="flex w-full items-center gap-2 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50"
+                                      onClick={() => {
+                                        setOpenActionsId(null)
+                                        handleDelete(r)
+                                      }}
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                      Удалить
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })()}
                   </td>
                 </tr>
               ))}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={9} className="text-center text-slate-400 py-6">
+                  <td colSpan={9} className="py-10 text-center text-slate-400">
                     Отчётов нет. Сгенерируйте через «Экспорт» на дашборде.
                   </td>
                 </tr>
@@ -290,44 +427,38 @@ export default function ReportsPage() {
         </div>
       </div>
 
-      {rejectFor && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="card w-full max-w-lg p-5 space-y-4 bg-white shadow-xl">
-            <div className="flex items-start gap-3">
-              <XCircle className="w-6 h-6 text-red-600 shrink-0 mt-0.5" />
-              <div>
-                <h2 className="text-lg font-semibold">Отклонить отчёт #{rejectFor.id}</h2>
-                <p className="text-sm text-slate-500 mt-1">
-                  Укажите причину отклонения. Комментарий будет сохранён в аудит-логе.
-                </p>
-              </div>
-            </div>
-            <textarea
-              className="input min-h-[100px]"
-              placeholder="Например: расхождение по нормативу 12.04…"
-              value={rejectComment}
-              onChange={(e) => setRejectComment(e.target.value)}
-              autoFocus
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                className="btn btn-secondary"
-                disabled={reject.isPending}
-                onClick={() => { setRejectFor(null); setRejectComment('') }}
-              >
-                Отмена
-              </button>
-              <button
-                className="btn btn-primary bg-red-600 hover:bg-red-700"
-                disabled={reject.isPending || !rejectComment.trim()}
-                onClick={confirmReject}
-              >
-                Отклонить
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Modal
+        open={!!rejectFor}
+        onClose={() => { if (!reject.isPending) { setRejectFor(null); setRejectComment('') } }}
+        title={
+          <span className="flex items-center gap-2">
+            <XCircle className="h-5 w-5 text-red-600" /> Отклонить отчёт{rejectFor ? ` #${rejectFor.id}` : ''}
+          </span>
+        }
+        description="Укажите причину отклонения. Комментарий будет сохранён в аудит-логе."
+        footer={
+          <>
+            <button
+              className="btn-secondary"
+              disabled={reject.isPending}
+              onClick={() => { setRejectFor(null); setRejectComment('') }}
+            >
+              Отмена
+            </button>
+            <button className="btn-danger" disabled={reject.isPending || !rejectComment.trim()} onClick={confirmReject}>
+              Отклонить
+            </button>
+          </>
+        }
+      >
+        <textarea
+          className="input min-h-[120px]"
+          placeholder="Например: расхождение по нормативу 12.04…"
+          value={rejectComment}
+          onChange={(e) => setRejectComment(e.target.value)}
+          autoFocus
+        />
+      </Modal>
     </div>
   )
 }

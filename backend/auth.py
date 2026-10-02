@@ -33,6 +33,7 @@ PERMISSION_CATALOG: tuple[dict[str, str], ...] = (
     _perm("page.primary_data", "Страницы", "Первичка"),
     _perm("page.reconciliation", "Страницы", "Сверка"),
     _perm("page.history", "Страницы", "История"),
+    _perm("page.accounting", "Страницы", "Операционный учёт"),
     _perm("page.import", "Страницы", "Импорт истории"),
     _perm("page.reports", "Страницы", "Сводные отчеты"),
     _perm("page.positions", "Страницы", "Позиции"),
@@ -56,6 +57,11 @@ PERMISSION_CATALOG: tuple[dict[str, str], ...] = (
     _perm("import.run", "Загрузка", "Импорт Risk Report"),
     _perm("reconciliation.run", "Загрузка", "Запуск сверки"),
     _perm("automation.run", "Операции", "Дневная автоматизация"),
+    _perm("manual.trades.manage", "Операции", "Создавать и изменять ручные сделки"),
+    _perm("manual.cash.manage", "Операции", "Создавать и изменять движения денег"),
+    _perm("manual.receivables.manage", "Операции", "Вести дебиторскую задолженность"),
+    _perm("manual.operations.cancel", "Операции", "Запрашивать аннулирование операций"),
+    _perm("manual.operations.approve", "Операции", "Согласовывать ручные операции"),
     _perm("kase.refresh", "Рынок", "Обновить KASE"),
     _perm("kase.reconcile", "Рынок", "Сверить цены KASE"),
     _perm("kase.manual_price", "Рынок", "Ручная цена KASE"),
@@ -70,6 +76,7 @@ PERMISSION_CATALOG: tuple[dict[str, str], ...] = (
     _perm("admin.users.manage", "Администрирование", "Управлять пользователями"),
     _perm("admin.roles.manage", "Администрирование", "Управлять ролями"),
     _perm("admin.audit.view", "Администрирование", "Просмотр аудита"),
+    _perm("admin.purge", "Администрирование", "Полная очистка бизнес-данных"),
 )
 
 ALL_PERMISSIONS: tuple[str, ...] = tuple(item["code"] for item in PERMISSION_CATALOG)
@@ -77,18 +84,18 @@ PAGE_PERMISSIONS: tuple[str, ...] = tuple(code for code in ALL_PERMISSIONS if co
 
 ANALYST_PAGES = (
     "page.dashboard", "page.analytics", "page.alerts", "page.upload",
-    "page.primary_data", "page.reconciliation", "page.history", "page.reports",
+    "page.primary_data", "page.reconciliation", "page.history", "page.accounting", "page.reports",
     "page.positions", "page.securities", "page.risk_report", "page.kase",
     "page.mbm", "page.settings", "page.data_editor",
 )
 AUDITOR_PAGES = (
-    "page.dashboard", "page.analytics", "page.alerts", "page.history",
+    "page.dashboard", "page.analytics", "page.alerts", "page.history", "page.accounting",
     "page.reports", "page.positions", "page.securities", "page.risk_report",
     "page.kase", "page.mbm",
 )
 OPERATOR_PAGES = (
     "page.dashboard", "page.alerts", "page.upload", "page.primary_data",
-    "page.reconciliation", "page.history",
+    "page.reconciliation", "page.history", "page.accounting",
 )
 
 DEFAULT_ROLE_PERMISSIONS: dict[str, tuple[str, ...]] = {
@@ -102,11 +109,15 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, tuple[str, ...]] = {
         "mbm.refresh", "mbm.manual",
         "settings.edit", "cdu_formats.edit", "data_editor.edit",
         "securities.edit", "risk_report.notes.edit",
+        "manual.trades.manage", "manual.cash.manage", "manual.receivables.manage",
+        "manual.operations.cancel", "manual.operations.approve",
     ),
     "operator": (
         *OPERATOR_PAGES,
         "upload.trade_report", "primary_data.upload", "reconciliation.run",
         "dashboard.calculate",
+        "manual.trades.manage", "manual.cash.manage", "manual.receivables.manage",
+        "manual.operations.cancel",
     ),
     "auditor": AUDITOR_PAGES,
     "viewer": AUDITOR_PAGES,
