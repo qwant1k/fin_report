@@ -227,6 +227,7 @@ def upload_trade_report(
         rows_skipped=parsed.rows_skipped,
         warnings=parsed.warnings,
         price_check=result.price_check,
+        anomalies=result.anomalies,
     )
 
 

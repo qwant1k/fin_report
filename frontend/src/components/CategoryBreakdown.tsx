@@ -9,6 +9,7 @@ import { formatDate, formatNumber, formatPct } from '@/lib/format'
 import { useAuthStore } from '@/lib/auth'
 import OperationWizard from '@/components/OperationWizard'
 import { operationLabel } from '@/lib/displayLabels'
+import FormulaExplainer, { type FormulaExplanation } from '@/components/FormulaExplainer'
 
 // ───────────────────────── types of /dashboard/category-breakdown ─────────────────────────
 
@@ -137,6 +138,85 @@ function Warn({ items }: { items: string[] }) {
   )
 }
 
+function pricePriority(item: BondItem) {
+  const source = (item.price_source ?? '').toLowerCase()
+  const market = source === 'market' || source.includes('kase')
+  const risk = source.includes('risk')
+  return {
+    selected: item.price_source_label ?? (market ? 'KASE' : risk ? 'Параметры риска' : 'Номинал'),
+    steps: [
+      { label: '1. Рыночная цена KASE', active: market, note: market ? `Цена ${formatNumber(item.price, 4)} от ${formatDate(item.price_date)}` : 'Нет подходящей котировки на дату' },
+      { label: '2. Цена из параметров риска', active: risk, note: risk ? `Цена ${formatNumber(item.price, 4)}` : 'Используется, если KASE недоступна' },
+      { label: '3. Номинальная стоимость', active: !market && !risk, note: 'Резервный источник при отсутствии рыночных данных' },
+    ],
+  }
+}
+
+function bondAccruedExplanation(item: BondItem): FormulaExplanation {
+  const rate = Math.abs(item.coupon_rate_pct ?? 0) > 1 ? (item.coupon_rate_pct ?? 0) / 100 : (item.coupon_rate_pct ?? 0)
+  const periodShare = item.face_value && rate ? item.accrued / (item.face_value * rate) : 0
+  return {
+    title: 'Накопленный купонный доход',
+    instrument: item.code || item.isin,
+    formula: 'НКД = Номинал × Купонная ставка × Доля купонного периода',
+    substituted: `${formatNumber(item.face_value, 2)} × ${formatPct(rate)} × ${formatNumber(periodShare, 6)} = ${formatNumber(item.accrued, 2)} ₸`,
+    result: `${formatNumber(item.accrued, 2)} ₸`,
+    inputs: [
+      { label: 'Номинал позиции', value: `${formatNumber(item.face_value, 2)} ${item.currency}` },
+      { label: 'Купонная ставка', value: formatPct(rate) },
+      { label: 'Доля купонного периода', value: formatNumber(periodShare, 6) },
+      { label: 'Дата расчётов', value: formatDate(item.settlement_date) || '—' },
+    ],
+    priceSource: pricePriority(item),
+    note: 'Доля периода рассчитывается по купонному графику и базе дней инструмента.',
+  }
+}
+
+function bondDurationExplanation(item: BondItem): FormulaExplanation {
+  const couponRate = Math.abs(item.coupon_rate_pct ?? 0) > 1 ? (item.coupon_rate_pct ?? 0) / 100 : (item.coupon_rate_pct ?? 0)
+  return {
+    title: 'Модифицированная дюрация',
+    instrument: item.code || item.isin,
+    formula: 'Dmod = [Σ(t × PV(CFₜ)) / ΣPV(CFₜ)] ÷ (1 + YTM / f)',
+    substituted: `DURATION(${formatDate(item.settlement_date)}, ${formatDate(item.maturity_date)}, ${formatPct(couponRate)}, ${formatPct(item.ytm ?? 0)}) = ${formatNumber(item.duration, 4)}`,
+    result: `${formatNumber(item.duration, 4)} года`,
+    inputs: [
+      { label: 'Дата оценки', value: formatDate(item.settlement_date) || '—' },
+      { label: 'Дата погашения', value: formatDate(item.maturity_date) || '—' },
+      { label: 'YTM', value: item.ytm != null ? formatPct(item.ytm) : '—' },
+      { label: 'Купон', value: item.coupon_rate_pct != null ? formatPct(couponRate) : '—' },
+      { label: 'Рыночная цена', value: item.price != null ? formatNumber(item.price, 4) : '—' },
+    ],
+    priceSource: pricePriority(item),
+    note: 'Расчёт повторяет методику Excel MDURATION; денежные потоки строятся по купонному графику.',
+  }
+}
+
+function repoExplanation(item: MMItem, metric: 'accrued' | 'value'): FormulaExplanation {
+  const rate = Math.abs(item.rate ?? 0) > 1 ? (item.rate ?? 0) / 100 : (item.rate ?? 0)
+  const accruedFormula = item.close_amount != null && item.days_total
+    ? `(${formatNumber(item.close_amount, 2)} − ${formatNumber(item.open_amount, 2)}) × ${item.days_passed ?? 0} / ${item.days_total}`
+    : `${formatNumber(item.open_amount, 2)} × ${formatPct(rate)} × ${item.days_passed ?? 0} / ${item.base || 365}`
+  const title = metric === 'value' ? 'Стоимость РЕПО на дату' : 'Начисленное вознаграждение РЕПО'
+  return {
+    title,
+    instrument: item.deal_id || item.code || item.isin || 'РЕПО',
+    formula: metric === 'value' ? 'Стоимость = Сумма открытия + Начисленное вознаграждение' : 'Вознаграждение начисляется линейно за прошедшие дни',
+    substituted: metric === 'value'
+      ? `${formatNumber(item.open_amount, 2)} + ${formatNumber(item.accrued, 2)} = ${formatNumber(item.value_kzt, 2)} ₸`
+      : `${accruedFormula} = ${formatNumber(item.accrued, 2)} ₸`,
+    result: `${formatNumber(metric === 'value' ? item.value_kzt : item.accrued, 2)} ₸`,
+    inputs: [
+      { label: 'Сумма открытия', value: `${formatNumber(item.open_amount, 2)} ₸` },
+      { label: 'Сумма закрытия', value: item.close_amount != null ? `${formatNumber(item.close_amount, 2)} ₸` : '—' },
+      { label: 'Ставка', value: item.rate != null ? formatPct(rate) : '—' },
+      { label: 'Прошло / всего дней', value: `${item.days_passed ?? '—'} / ${item.days_total ?? '—'}` },
+      { label: 'База дней', value: String(item.base || 365) },
+    ],
+    note: item.close_amount != null ? 'Приоритет имеет сумма закрытия из условий сделки.' : 'Если сумма закрытия не задана, применяется ставка РЕПО.',
+  }
+}
+
 // ───────────────────────── main ─────────────────────────
 
 export default function CategoryBreakdown({ cduId, category, date }: { cduId: number; category: string; date: string }) {
@@ -196,8 +276,9 @@ function Empty({ cols, text = 'Нет позиций на дату' }: { cols: n
 }
 
 function BondsTable({ items, total }: { items: BondItem[]; total: number }) {
+  const [explanation, setExplanation] = useState<FormulaExplanation | null>(null)
   return (
-    <div className="overflow-x-auto rounded-lg border border-slate-300 bg-white">
+    <><div className="overflow-x-auto rounded-lg border border-slate-300 bg-white">
       <table className="detail-table">
         <thead>
           <tr>
@@ -231,10 +312,10 @@ function BondsTable({ items, total }: { items: BondItem[]; total: number }) {
                 <div>{it.price_source_label ?? '—'}</div>
                 {it.price_date && <div className="text-[11px] text-slate-500">от {formatDate(it.price_date)}</div>}
               </td>
-              <td className="num">{formatNumber(it.accrued, 2)}</td>
+              <td className="num"><button type="button" className="rounded px-1 font-mono text-indigo-700 underline decoration-dotted underline-offset-2 hover:bg-indigo-50" onClick={() => setExplanation(bondAccruedExplanation(it))} title="Показать расчёт НКД">{formatNumber(it.accrued, 2)}</button></td>
               <td className="num font-semibold">{formatNumber(it.value_kzt, 2)}</td>
               <td className="num">{it.ytm != null ? formatPct(it.ytm) : '—'}</td>
-              <td className="num">{it.duration != null ? formatNumber(it.duration, 2) : '—'}</td>
+              <td className="num">{it.duration != null ? <button type="button" className="rounded px-1 font-mono text-indigo-700 underline decoration-dotted underline-offset-2 hover:bg-indigo-50" onClick={() => setExplanation(bondDurationExplanation(it))} title="Показать расчёт дюрации">{formatNumber(it.duration, 2)}</button> : '—'}</td>
               <td className="whitespace-nowrap text-xs">{formatDate(it.trade_date)}<div className="text-slate-500">{formatDate(it.settlement_date)}</div></td>
               <td className="whitespace-nowrap text-xs">{formatDate(it.maturity_date)}</td>
               <td><SourceChip source={it.source} /></td>
@@ -246,13 +327,14 @@ function BondsTable({ items, total }: { items: BondItem[]; total: number }) {
           <tfoot><tr><td colSpan={7}>Итого: {items.length} поз.</td><td className="num">{formatNumber(total, 2)}</td><td colSpan={5} /></tr></tfoot>
         )}
       </table>
-    </div>
+    </div><FormulaExplainer explanation={explanation} onClose={() => setExplanation(null)} /></>
   )
 }
 
 function MoneyMarketTable({ items, total, repo }: { items: MMItem[]; total: number; repo: boolean }) {
+  const [explanation, setExplanation] = useState<FormulaExplanation | null>(null)
   return (
-    <div className="overflow-x-auto rounded-lg border border-slate-300 bg-white">
+    <><div className="overflow-x-auto rounded-lg border border-slate-300 bg-white">
       <table className="detail-table">
         <thead>
           <tr>
@@ -287,8 +369,8 @@ function MoneyMarketTable({ items, total, repo }: { items: MMItem[]; total: numb
               <td className="num">{formatNumber(it.open_amount, 2)}</td>
               <td className="num">{it.close_amount != null ? formatNumber(it.close_amount, 2) : '—'}</td>
               <td className="num">{it.rate != null ? formatPct(it.rate) : '—'}</td>
-              <td className="num">{formatNumber(it.accrued, 2)}</td>
-              <td className="num font-semibold">{formatNumber(it.value_kzt, 2)}</td>
+              <td className="num">{repo ? <button type="button" className="rounded px-1 font-mono text-indigo-700 underline decoration-dotted underline-offset-2 hover:bg-indigo-50" onClick={() => setExplanation(repoExplanation(it, 'accrued'))}>{formatNumber(it.accrued, 2)}</button> : formatNumber(it.accrued, 2)}</td>
+              <td className="num font-semibold">{repo ? <button type="button" className="rounded px-1 font-mono text-indigo-700 underline decoration-dotted underline-offset-2 hover:bg-indigo-50" onClick={() => setExplanation(repoExplanation(it, 'value'))}>{formatNumber(it.value_kzt, 2)}</button> : formatNumber(it.value_kzt, 2)}</td>
               <td><SourceChip source={it.source} /></td>
             </tr>
           ))}
@@ -298,7 +380,7 @@ function MoneyMarketTable({ items, total, repo }: { items: MMItem[]; total: numb
           <tfoot><tr><td colSpan={repo ? 9 : 8}>Итого: {items.length} сделок</td><td className="num">{formatNumber(total, 2)}</td><td /></tr></tfoot>
         )}
       </table>
-    </div>
+    </div><FormulaExplainer explanation={explanation} onClose={() => setExplanation(null)} /></>
   )
 }
 

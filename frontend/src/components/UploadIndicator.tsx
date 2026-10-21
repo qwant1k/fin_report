@@ -13,7 +13,7 @@ import { bindUploadQueryClient, useUploadProgress, useUploadQueue } from '@/lib/
 export default function UploadIndicator() {
   const qc = useQueryClient()
   const { pathname } = useLocation()
-  const { total, done, failed, active, waiting, duplicates } = useUploadProgress()
+  const { total, done, failed, active, waiting, duplicates, anomalies } = useUploadProgress()
   const clearDone = useUploadQueue((s) => s.clearDone)
   const [hidden, setHidden] = useState(false)
 
@@ -43,6 +43,7 @@ export default function UploadIndicator() {
             Готово {done} из {total}
             {failed > 0 && <span className="text-red-600"> · ошибок {failed}</span>}
             {duplicates > 0 && <span className="text-amber-700"> · дублей {duplicates}</span>}
+            {anomalies > 0 && <span className="text-amber-700"> · аномалий {anomalies}</span>}
           </div>
           <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
             <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-500" style={{ width: `${pct}%` }} />

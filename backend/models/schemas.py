@@ -143,6 +143,7 @@ class UploadResponse(BaseModel):
     # successful import; ``None`` when the price check could not be executed
     # (no CDU resolved, no KASE data yet, etc.).
     price_check: Optional[dict] = None
+    anomalies: List[dict] = Field(default_factory=list)
 
 
 # ───────── Position / Summary ─────────

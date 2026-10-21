@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     # If |price_cdu - price_kase| / price_kase > tolerance, Trade.price_flag is
     # set, price_final is replaced with price_kase, and the change is audited.
     price_tolerance_pct: float = 0.0001
+    # Express audit after Trade Report upload. Amounts are compared with the
+    # average of earlier comparable operations (25% by default).
+    upload_amount_tolerance_pct: float = 0.25
+    upload_anomaly_history_limit: int = 20
 
     # MBM
     nbrk_mbm_url: str = "https://nationalbank.kz/ru/page/mbm"

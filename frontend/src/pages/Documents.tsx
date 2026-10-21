@@ -4,6 +4,7 @@ import { useDropzone } from 'react-dropzone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertCircle,
+  AlertTriangle,
   Building2,
   CheckCircle2,
   Clock,
@@ -500,6 +501,7 @@ function QueueRow({
   const locked = busy || item.status === 'done'
 
   return (
+    <div>
     <div className="flex flex-wrap items-center gap-3 p-3">
       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-100">
         {isTradeReport ? <FileSpreadsheet className="h-4 w-4 text-emerald-600" /> : <FileText className="h-4 w-4 text-slate-500" />}
@@ -586,6 +588,26 @@ function QueueRow({
           </button>
         )}
       </div>
+    </div>
+    {!!item.anomalies?.length && (
+      <div className="grid gap-2 border-t border-amber-100 bg-amber-50/40 px-3 py-3 md:grid-cols-2">
+        {item.anomalies.map((anomaly, index) => (
+          <div key={`${anomaly.kind}-${anomaly.trade_id}-${index}`} className={cn(
+            'rounded-lg border px-3 py-2 text-xs',
+            anomaly.severity === 'critical' ? 'border-rose-200 bg-rose-50 text-rose-800' : 'border-amber-200 bg-amber-50 text-amber-800',
+          )}>
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <div className="font-semibold">{anomaly.title}</div>
+                <div className="mt-0.5 opacity-90">{anomaly.message}</div>
+                <div className="mt-1 text-[11px] opacity-70">Источник сравнения: {anomaly.source} · допуск {(anomaly.tolerance_pct * 100).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    )}
     </div>
   )
 }

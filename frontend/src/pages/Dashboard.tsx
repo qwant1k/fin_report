@@ -13,6 +13,7 @@ import {
   FileSpreadsheet,
   FileText,
   Flag,
+  FlaskConical,
   Gauge,
   Layers,
   Plus,
@@ -32,6 +33,8 @@ import { FundIndicatorsPanel } from '@/components/CustomIndicators'
 import { useIndicatorValues } from '@/lib/indicators'
 import OperationWizard from '@/components/OperationWizard'
 import HistoryChart from '@/components/HistoryChart'
+import WhatIfSimulator from '@/components/WhatIfSimulator'
+import FormulaExplainer, { type FormulaExplanation } from '@/components/FormulaExplainer'
 import { EmptyState, LoadingBlock, Segmented, Stagger, StatCard } from '@/components/ui'
 import { api } from '@/lib/api'
 import { downloadBlob } from '@/lib/download'
@@ -105,6 +108,29 @@ function getPeriodBounds(mode: PeriodMode, customFrom: string, customTo: string,
   return { from: customFrom || undefined, to }
 }
 
+function fundDurationExplanation(data: DashboardResponse): FormulaExplanation {
+  const eligible = new Set(['GOV_BONDS', 'REVERSE_REPO', 'MFO_BONDS', 'AGENCY_BONDS', 'FOREIGN_BONDS', 'DEPOSIT'])
+  const parts = data.blocks.map((block) => ({
+    name: block.cdu_short,
+    duration: block.duration_weighted,
+    weight: block.rows.filter((row) => eligible.has(row.category)).reduce((sum, row) => sum + row.market_value_current, 0),
+  })).filter((part) => part.weight > 0)
+  const denominator = parts.reduce((sum, part) => sum + part.weight, 0)
+  const numerator = parts.reduce((sum, part) => sum + part.duration * part.weight, 0)
+  return {
+    title: 'Взвешенная дюрация Фонда',
+    instrument: `Срез на ${formatDate(data.report_date)}`,
+    formula: 'Dфонда = Σ(Dпортфеля × стоимость инструментов) ÷ Σ(стоимость инструментов)',
+    substituted: `${formatNumber(numerator, 2)} ÷ ${formatNumber(denominator, 2)} = ${formatNumber(data.fund_duration_weighted, 4)}`,
+    result: `${formatNumber(data.fund_duration_weighted, 4)} года`,
+    inputs: parts.map((part) => ({
+      label: part.name,
+      value: `${formatNumber(part.duration, 4)} × ${formatNumber(part.weight, 0)} ₸`,
+    })),
+    note: 'Денежные средства и дебиторская задолженность исключены из веса дюрации по методике отчёта о рисках.',
+  }
+}
+
 export default function DashboardPage() {
   const today = toIsoDate(new Date())
   const [periodMode, setPeriodMode] = useState<PeriodMode>('all')
@@ -118,6 +144,8 @@ export default function DashboardPage() {
   const qc = useQueryClient()
   const can = useAuthStore((s) => s.can)
   const [wizardOpen, setWizardOpen] = useState(false)
+  const [simulationOpen, setSimulationOpen] = useState(false)
+  const [formulaExplanation, setFormulaExplanation] = useState<FormulaExplanation | null>(null)
 
   const historyMeta = useQuery<DashboardHistoryMeta>({
     queryKey: ['dashboard-history-meta'],
@@ -236,6 +264,14 @@ export default function DashboardPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setSimulationOpen((value) => !value)}
+            className={clsx('btn-secondary h-10', simulationOpen && 'border-indigo-300 bg-indigo-50 text-indigo-700')}
+            aria-pressed={simulationOpen}
+          >
+            <FlaskConical className="h-4 w-4" /> Режим симуляции
+          </button>
           <Segmented
             options={PERIOD_OPTIONS.map((o) => ({ value: o.mode, label: o.label }))}
             value={periodMode}
@@ -326,6 +362,8 @@ export default function DashboardPage() {
         </div>
       </header>
 
+      {simulationOpen && data && <WhatIfSimulator reportDate={effectiveReportDate} blocks={data.blocks} />}
+
       <Stagger className="sticky top-0 z-20 -mx-2 grid grid-cols-1 gap-4 rounded-2xl bg-slate-50/80 px-2 py-3 backdrop-blur sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
           title="Активы Фонда"
@@ -366,7 +404,10 @@ export default function DashboardPage() {
           icon={Gauge}
           accent="violet"
           active={detail === 'duration'}
-          onClick={() => setDetail('duration')}
+          onClick={() => {
+            setDetail('duration')
+            if (data) setFormulaExplanation(fundDurationExplanation(data))
+          }}
         />
       </Stagger>
 
@@ -377,6 +418,8 @@ export default function DashboardPage() {
           onBack={() => setDetail(null)}
         />
       )}
+
+      <FormulaExplainer explanation={formulaExplanation} onClose={() => setFormulaExplanation(null)} />
 
       {/* Operational KPIs (Phase 3) — render only if there is something to act on */}
       {data && (data.breaches_count > 0

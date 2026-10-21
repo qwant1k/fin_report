@@ -10,6 +10,7 @@ import { useConfirm } from '@/lib/confirm'
 import { Modal, PageHeader } from '@/components/ui'
 import type { CDU } from '@/lib/types'
 import OperationWizard from '@/components/OperationWizard'
+import FormulaExplainer, { type FormulaExplanation } from '@/components/FormulaExplainer'
 import { useWorkContextStore } from '@/lib/workContext'
 import { apiErrorMessage } from '@/lib/notifications'
 import {
@@ -202,9 +203,36 @@ function TradeTable({ rows, canEdit, onAdd, onEdit, onCancel }: { rows: Row[]; c
   return <><Toolbar title="Ручные сделки" canAdd={canEdit} onAdd={onAdd} /><div className="table-wrap"><table className="kdif-table"><thead><tr><th>Дата / расчёты</th><th>ЧДУ</th><th>Операция</th><th>Инструмент</th><th className="text-right">Сумма, ₸</th><th>Статус</th><th>Основание</th><th /></tr></thead><tbody>{rows.map((r) => <tr key={r.id}><td>{r.trade_date}<div className="text-xs text-slate-400">{r.value_date}</div></td><td>{r.cdu_name}</td><td className="font-semibold">{operationLabel(r.operation_type)}</td><td className="font-mono text-xs">{r.isin || r.instrument_code || '—'}</td><td className="text-right font-mono">{formatNumber(r.amount_kzt, 2)}</td><td><StatusBadge value={r.workflow_status} /></td><td className="max-w-64 truncate" title={r.change_reason}>{r.change_reason}</td><td><RowActions row={r} canEdit={canEdit} onEdit={() => onEdit(r)} onCancel={() => onCancel(r.id)} /></td></tr>)}{!rows.length && <tr><td colSpan={8} className="py-10 text-center text-slate-400">Ручных сделок нет</td></tr>}</tbody></table></div></>
 }
 
-function RepoTable({ rows }: { rows: Row[] }) {
-  return <><Toolbar title="РЕПО, действующие на выбранную дату" canAdd={false} onAdd={() => {}} /><div className="table-wrap"><table className="kdif-table"><thead><tr><th>ЧДУ</th><th>Сделка</th><th>Инструмент</th><th>Открытие / закрытие</th><th className="text-right">Сумма открытия</th><th className="text-right">Ставка</th><th className="text-right">Начислено</th><th className="text-right">Стоимость</th></tr></thead><tbody>{rows.map((r) => <tr key={r.id}><td>{r.cdu_name}</td><td className="font-mono text-xs">{r.deal_id || `#${r.id}`}</td><td>{r.isin || r.instrument_code || '—'}</td><td>{r.open_date}<div className="text-xs text-slate-400">до {r.close_date || 'открыто'}</div></td><td className="text-right font-mono">{formatNumber(r.open_amount, 2)}</td><td className="text-right">{r.repo_rate_pct == null ? '—' : formatPct(Math.abs(r.repo_rate_pct) > 1 ? r.repo_rate_pct / 100 : r.repo_rate_pct)}</td><td className="text-right font-mono">{formatNumber(r.accrued_reward, 2)}</td><td className="text-right font-mono font-semibold">{formatNumber(r.value_on_date, 2)}</td></tr>)}{!rows.length && <tr><td colSpan={8} className="py-10 text-center text-slate-400">На выбранную дату действующих операций РЕПО нет</td></tr>}</tbody></table></div></>
+function repoAccountingExplanation(row: Row, metric: 'accrued' | 'value'): FormulaExplanation {
+  const rate = Math.abs(row.repo_rate_pct ?? 0) > 1 ? (row.repo_rate_pct ?? 0) / 100 : (row.repo_rate_pct ?? 0)
+  const accrual = row.close_amount && row.term_days
+    ? `(${formatNumber(row.close_amount, 2)} − ${formatNumber(row.open_amount, 2)}) × ${row.days_passed ?? 0} / ${row.term_days}`
+    : `${formatNumber(row.open_amount, 2)} × ${formatPct(rate)} × ${row.days_passed ?? 0} / ${row.base ?? 365}`
+  return {
+    title: metric === 'value' ? 'Стоимость РЕПО на дату' : 'Начисленное вознаграждение РЕПО',
+    instrument: row.deal_id || row.isin || row.instrument_code || `РЕПО #${row.id}`,
+    formula: metric === 'value' ? 'Стоимость = Сумма открытия + Начисленное вознаграждение' : 'Вознаграждение начисляется линейно за прошедшие дни',
+    substituted: metric === 'value'
+      ? `${formatNumber(row.open_amount, 2)} + ${formatNumber(row.accrued_reward, 2)} = ${formatNumber(row.value_on_date, 2)} ₸`
+      : `${accrual} = ${formatNumber(row.accrued_reward, 2)} ₸`,
+    result: `${formatNumber(metric === 'value' ? row.value_on_date : row.accrued_reward, 2)} ₸`,
+    inputs: [
+      { label: 'Сумма открытия', value: `${formatNumber(row.open_amount, 2)} ₸` },
+      { label: 'Сумма закрытия', value: row.close_amount ? `${formatNumber(row.close_amount, 2)} ₸` : '—' },
+      { label: 'Ставка', value: row.repo_rate_pct == null ? '—' : formatPct(rate) },
+      { label: 'Прошло / срок', value: `${row.days_passed ?? '—'} / ${row.term_days ?? '—'} дней` },
+      { label: 'База дней', value: String(row.base ?? 365) },
+    ],
+    note: row.close_amount ? 'Сумма закрытия из условий сделки имеет приоритет перед расчётом по ставке.' : 'Расчёт выполнен по ставке РЕПО.',
+  }
 }
+
+function RepoTable({ rows }: { rows: Row[] }) {
+  const [explanation, setExplanation] = useState<FormulaExplanation | null>(null)
+  return <><Toolbar title="РЕПО, действующие на выбранную дату" canAdd={false} onAdd={() => {}} /><div className="table-wrap"><table className="kdif-table"><thead><tr><th>ЧДУ</th><th>Сделка</th><th>Инструмент</th><th>Открытие / закрытие</th><th className="text-right">Сумма открытия</th><th className="text-right">Ставка</th><th className="text-right">Начислено</th><th className="text-right">Стоимость</th></tr></thead><tbody>{rows.map((r) => <tr key={r.id}><td>{r.cdu_name}</td><td className="font-mono text-xs">{r.deal_id || `#${r.id}`}</td><td>{r.isin || r.instrument_code || '—'}</td><td>{r.open_date}<div className="text-xs text-slate-400">до {r.close_date || 'открыто'}</div></td><td className="text-right font-mono">{formatNumber(r.open_amount, 2)}</td><td className="text-right">{r.repo_rate_pct == null ? '—' : formatPct(rateValue(r.repo_rate_pct))}</td><td className="text-right"><button type="button" className="rounded px-1 font-mono text-indigo-700 underline decoration-dotted underline-offset-2 hover:bg-indigo-50" onClick={() => setExplanation(repoAccountingExplanation(r, 'accrued'))}>{formatNumber(r.accrued_reward, 2)}</button></td><td className="text-right font-semibold"><button type="button" className="rounded px-1 font-mono text-indigo-700 underline decoration-dotted underline-offset-2 hover:bg-indigo-50" onClick={() => setExplanation(repoAccountingExplanation(r, 'value'))}>{formatNumber(r.value_on_date, 2)}</button></td></tr>)}{!rows.length && <tr><td colSpan={8} className="py-10 text-center text-slate-400">На выбранную дату действующих операций РЕПО нет</td></tr>}</tbody></table></div><FormulaExplainer explanation={explanation} onClose={() => setExplanation(null)} /></>
+}
+
+function rateValue(value: number) { return Math.abs(value) > 1 ? value / 100 : value }
 
 function CashTable({ rows, canEdit, onAdd, onEdit, onCancel }: { rows: Row[]; canEdit: boolean; onAdd: () => void; onEdit: (r: Row) => void; onCancel: (id: number) => void }) {
   return <><Toolbar title="Денежные движения" canAdd={canEdit} onAdd={onAdd} /><div className="table-wrap"><table className="kdif-table"><thead><tr><th>Дата</th><th>ЧДУ</th><th>Счёт</th><th>Вид</th><th className="text-right">Сумма</th><th>Валюта</th><th>Связь</th><th>Статус</th><th>Назначение</th><th /></tr></thead><tbody>{rows.map((r) => <tr key={r.id}><td>{r.operation_date}</td><td>{r.cdu_name}</td><td className="font-mono text-xs">{r.account || '—'}</td><td>{operationLabel(r.movement_type)}</td><td className={`text-right font-mono font-semibold ${r.amount < 0 ? 'text-red-600' : 'text-emerald-700'}`}>{formatNumber(r.amount, 2)}</td><td>{r.currency}</td><td>{r.related_trade_id ? `Сделка #${r.related_trade_id}` : r.related_isin || '—'}</td><td><StatusBadge value={r.workflow_status} /></td><td className="max-w-64 truncate" title={r.basis}>{r.basis}</td><td>{r.is_manual && <RowActions row={r} canEdit={canEdit} onEdit={() => onEdit(r)} onCancel={() => onCancel(r.id)} />}</td></tr>)}{!rows.length && <tr><td colSpan={10} className="py-10 text-center text-slate-400">Движений нет</td></tr>}</tbody></table></div></>

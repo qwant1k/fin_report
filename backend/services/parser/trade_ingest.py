@@ -34,6 +34,7 @@ class IngestResult:
     parsed: ParsedTradeFile
     counters: Dict[str, int] = field(default_factory=dict)
     price_check: Optional[dict] = None
+    anomalies: List[dict] = field(default_factory=list)
     superseded_file_ids: List[int] = field(default_factory=list)
 
 
@@ -227,6 +228,15 @@ def ingest_trade_report(
     if run_price_check and result.counters.get("trades", 0) > 0:
         result.price_check = apply_kase_prices_to_trades(
             db, cdu_id=cdu.id, trade_date=parsed_date, actor=actor,
+        )
+    if result.counters.get("trades", 0) > 0:
+        from services.anomaly_audit import audit_uploaded_trades
+        db.flush()
+        result.anomalies = audit_uploaded_trades(
+            db,
+            cdu_id=cdu.id,
+            source_doc_id=source_doc.id,
+            trade_date=parsed_date,
         )
     try:
         sync_holdings(db, cdu_id=cdu.id, actor=actor)

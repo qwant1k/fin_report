@@ -77,6 +77,21 @@ export interface QueueItem {
   finishedAt?: number
   /** the already uploaded file, when the server reported a duplicate */
   existing?: DuplicateExisting
+  anomalies?: UploadAnomaly[]
+}
+
+export interface UploadAnomaly {
+  kind: 'price' | 'amount'
+  severity: 'warning' | 'critical'
+  title: string
+  message: string
+  actual: number
+  baseline: number
+  deviation_pct: number
+  tolerance_pct: number
+  source: string
+  trade_id: number
+  samples?: number
 }
 
 export interface DuplicateExisting {
@@ -145,6 +160,7 @@ export const useUploadQueue = create<UploadQueueState>((set, get) => {
         patch(item.id, {
           status: 'done', finishedAt: Date.now(),
           message: `${r.cdu_name ?? ''} · ${r.rows_parsed} строк`.replace(/^ · /, ''),
+          anomalies: r.anomalies ?? [],
         })
       } else {
         const r = await uploadPrimary(item)
@@ -254,5 +270,6 @@ export function useUploadProgress() {
   const active = items.filter((it) => it.status === 'uploading').length
   const waiting = items.filter((it) => it.status === 'queued').length
   const duplicates = items.filter((it) => it.status === 'duplicate').length
-  return { total, done, failed, active, waiting, duplicates }
+  const anomalies = items.reduce((sum, item) => sum + (item.anomalies?.length ?? 0), 0)
+  return { total, done, failed, active, waiting, duplicates, anomalies }
 }

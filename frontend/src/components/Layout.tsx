@@ -37,6 +37,7 @@ import { useAuthStore } from '@/lib/auth'
 import { todayIso, useWorkContextStore } from '@/lib/workContext'
 import { ConfirmDialogHost } from '@/components/ui'
 import UploadIndicator from '@/components/UploadIndicator'
+import QuickApprovalDrawer from '@/components/QuickApprovalDrawer'
 
 interface NavItem {
   to: string
@@ -276,7 +277,13 @@ function WorkDateBar() {
   const setWorkDate = useWorkContextStore((s) => s.setWorkDate)
   const shiftWorkDate = useWorkContextStore((s) => s.shiftWorkDate)
 
-  if (DATE_CONTEXT_HIDDEN_PREFIXES.some((p) => pathname.startsWith(p))) return null
+  if (DATE_CONTEXT_HIDDEN_PREFIXES.some((p) => pathname.startsWith(p))) {
+    return (
+      <div className="-mx-4 mb-4 flex justify-end border-b border-slate-200/80 bg-white/85 px-4 py-2.5 backdrop-blur-xl sm:-mx-5 sm:px-5 lg:sticky lg:top-0 lg:z-20 lg:-mx-8 lg:px-8">
+        <QuickApprovalDrawer />
+      </div>
+    )
+  }
 
   const isToday = workDate === todayIso()
 
@@ -317,9 +324,12 @@ function WorkDateBar() {
           Сегодня
         </button>
       )}
-      <span className="ml-auto hidden text-xs text-slate-400 lg:inline">
-        Единый контекст для Рабочего дня, Позиций, KASE, Сверки и Отчётов
-      </span>
+      <div className="ml-auto flex items-center gap-2">
+        <span className="hidden text-xs text-slate-400 xl:inline">
+          Единый контекст для Рабочего дня, Позиций, KASE, Сверки и Отчётов
+        </span>
+        <QuickApprovalDrawer />
+      </div>
     </div>
   )
 }

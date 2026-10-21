@@ -242,6 +242,7 @@ def _repo_dict(row: RepoLot, report_date: date, names: dict[int, str]) -> dict[s
         "open_date": start.isoformat(), "close_date": row.close_date.isoformat() if row.close_date else None,
         "open_amount": row.face_value, "close_amount": row.close_value,
         "repo_rate_pct": row.repo_rate_pct, "term_days": row.term_days,
+        "days_passed": elapsed, "base": row.base or 365,
         "accrued_reward": reward, "value_on_date": float(row.face_value or 0.0) + reward,
     }
 

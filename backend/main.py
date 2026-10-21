@@ -20,6 +20,7 @@ from api.routes import (
     import_routes,
     automation,
     accounting,
+    approvals,
     operations,
     kase,
     positions,
@@ -103,6 +104,7 @@ def create_app() -> FastAPI:
     app.include_router(workday.router)
     app.include_router(operations.router)
     app.include_router(accounting.router)
+    app.include_router(approvals.router)
     app.include_router(kase.router)
     app.include_router(positions.router)
     app.include_router(reconciliation.router)

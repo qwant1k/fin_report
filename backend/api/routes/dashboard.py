@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -253,6 +253,138 @@ def category_breakdown_route(
     """Full drill-down of a summary row: items with dates, prices and sources."""
     from services.portfolio.breakdown import category_breakdown
     return category_breakdown(db, cdu_id, category, as_of or date.today())
+
+
+@router.post("/what-if")
+def what_if_simulation(payload: dict[str, Any], db: Session = Depends(get_db)):
+    """Calculate a temporary transaction without persisting it."""
+    try:
+        report_date = date.fromisoformat(str(payload.get("report_date")))
+        cdu_id = int(payload.get("cdu_id"))
+        amount = abs(float(payload.get("amount_kzt")))
+        transaction_duration = float(payload.get("duration") or 0.0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Укажите корректные дату, портфель, сумму и дюрацию") from exc
+    category = str(payload.get("category") or "").upper()
+    operation_type = str(payload.get("operation_type") or "BUY").upper()
+    if category not in CATEGORY_ORDER:
+        raise HTTPException(400, "Неизвестная категория инструмента")
+    if operation_type not in {"BUY", "SELL"}:
+        raise HTTPException(400, "Для симуляции доступны покупка и продажа")
+    if amount <= 0:
+        raise HTTPException(400, "Сумма виртуальной сделки должна быть больше нуля")
+
+    cdu = db.get(CDU, cdu_id)
+    summary = db.execute(select(PortfolioSummary).where(
+        PortfolioSummary.cdu_id == cdu_id,
+        PortfolioSummary.summary_date <= report_date,
+    ).order_by(PortfolioSummary.summary_date.desc())).scalars().first()
+    if not cdu or not summary:
+        raise HTTPException(404, "Для выбранного портфеля нет рассчитанного среза на эту дату")
+
+    positions = db.execute(select(PortfolioPosition).where(
+        PortfolioPosition.cdu_id == cdu_id,
+        PortfolioPosition.position_date == summary.summary_date,
+        PortfolioPosition.instrument_code.is_(None),
+    )).scalars().all()
+    by_category = {row.instrument_category: row for row in positions}
+    current_category = float(by_category.get(category).market_value_current or 0.0) if by_category.get(category) else 0.0
+    signed_amount = amount if operation_type == "BUY" else -amount
+    new_category = current_category + signed_amount
+    new_total = float(summary.total_mv_current or 0.0) + signed_amount
+    if new_category < 0:
+        raise HTTPException(400, "Нельзя продать больше текущей стоимости выбранной категории")
+    if new_total <= 0:
+        raise HTTPException(400, "После виртуальной сделки стоимость портфеля должна оставаться положительной")
+
+    eligible = {"GOV_BONDS", "REVERSE_REPO", "MFO_BONDS", "AGENCY_BONDS", "FOREIGN_BONDS", "DEPOSIT"}
+    current_weight = sum(float(row.market_value_current or 0.0) for row in positions if row.instrument_category in eligible)
+    new_weight = current_weight + (signed_amount if category in eligible else 0.0)
+    current_duration = float(summary.duration_weighted or 0.0)
+    duration_numerator = current_duration * current_weight
+    new_duration_numerator = duration_numerator + (transaction_duration * signed_amount if category in eligible else 0.0)
+    new_duration = new_duration_numerator / new_weight if new_weight > 0 else 0.0
+
+    # Reproduce the dashboard's as-of fund weighting and replace only the
+    # selected manager with the simulated values.
+    all_rows = db.execute(select(PortfolioSummary).where(
+        PortfolioSummary.summary_date <= report_date,
+    ).order_by(PortfolioSummary.cdu_id.asc(), PortfolioSummary.summary_date.desc())).scalars().all()
+    latest: dict[int, PortfolioSummary] = {}
+    for row in all_rows:
+        latest.setdefault(row.cdu_id, row)
+    fund_weight = 0.0
+    fund_duration_numerator = 0.0
+    for row in latest.values():
+        row_positions = db.execute(select(PortfolioPosition).where(
+            PortfolioPosition.cdu_id == row.cdu_id,
+            PortfolioPosition.position_date == row.summary_date,
+            PortfolioPosition.instrument_code.is_(None),
+        )).scalars().all()
+        weight = sum(float(pos.market_value_current or 0.0) for pos in row_positions if pos.instrument_category in eligible)
+        fund_weight += weight
+        fund_duration_numerator += float(row.duration_weighted or 0.0) * weight
+    fund_duration_before = fund_duration_numerator / fund_weight if fund_weight else 0.0
+    fund_weight_after = fund_weight - current_weight + new_weight
+    fund_numerator_after = fund_duration_numerator - duration_numerator + new_duration_numerator
+    fund_duration_after = fund_numerator_after / fund_weight_after if fund_weight_after > 0 else 0.0
+
+    pct_before = current_category / float(summary.total_mv_current or 1.0)
+    pct_after = new_category / new_total
+    spec = _load_limit_specs(db, cdu_id, summary.summary_date).get(category)
+    if spec is None:
+        defaults = DEFAULT_LIMITS.get(category, (0.0, 1.0))
+        spec = LimitSpec(defaults[0], defaults[1], defaults[1], defaults[1])
+    hard_before, soft_before = check_limit_spec(pct_before, spec)
+    hard_after, soft_after = check_limit_spec(pct_after, spec)
+    benchmark = _benchmark_for(db, summary.summary_date)
+    lower, upper = duration_band(benchmark)
+    duration_status_before = "not_available" if lower is None or upper is None else ("ok" if lower <= current_duration <= upper else "breach")
+    duration_status_after = "not_available" if lower is None or upper is None else ("ok" if lower <= new_duration <= upper else "breach")
+
+    return {
+        "report_date": summary.summary_date.isoformat(),
+        "cdu": {"id": cdu.id, "name": cdu.short_name or cdu.name},
+        "transaction": {
+            "operation_type": operation_type,
+            "category": category,
+            "category_label": CATEGORY_LABELS.get(category, category),
+            "amount_kzt": signed_amount,
+            "duration": transaction_duration,
+        },
+        "portfolio": {
+            "total_before": summary.total_mv_current,
+            "total_after": new_total,
+            "duration_before": current_duration,
+            "duration_after": new_duration,
+            "duration_delta": new_duration - current_duration,
+            "benchmark_duration": benchmark,
+            "duration_lower": lower,
+            "duration_upper": upper,
+            "duration_status_before": duration_status_before,
+            "duration_status_after": duration_status_after,
+        },
+        "fund": {
+            "duration_before": fund_duration_before,
+            "duration_after": fund_duration_after,
+            "duration_delta": fund_duration_after - fund_duration_before,
+        },
+        "limit": {
+            "category_value_before": current_category,
+            "category_value_after": new_category,
+            "pct_before": pct_before,
+            "pct_after": pct_after,
+            "min_pct": spec.min_pct,
+            "max_pct": spec.max_pct,
+            "hard_pct": spec.hard_pct,
+            "soft_pct": spec.soft_pct,
+            "hard_status_before": hard_before,
+            "hard_status_after": hard_after,
+            "soft_status_before": soft_before,
+            "soft_status_after": soft_after,
+        },
+        "persisted": False,
+    }
 
 
 @router.get("/instrument-details")
