@@ -45,11 +45,37 @@ def list_cdus(db: Session = Depends(get_db)):
     return db.query(CDUModel).order_by(CDUModel.name).all()
 
 
+def _ensure_unique_cdu_fields(db: Session, payload: dict, *, exclude_id: int | None = None) -> None:
+    """Return a clear conflict instead of a database error for manual entry."""
+    for field, label in (
+        ("name", "Полное наименование"),
+        ("short_name", "Краткое наименование"),
+        ("participant_code", "Код участника"),
+    ):
+        value = payload.get(field)
+        if not value:
+            continue
+        normalized = value.strip().casefold()
+        duplicate = next(
+            (
+                item for item in db.query(CDUModel).all()
+                if (exclude_id is None or item.id != exclude_id)
+                and (getattr(item, field) or "").strip().casefold() == normalized
+            ),
+            None,
+        )
+        if duplicate:
+            raise HTTPException(
+                409,
+                f"{label} уже используется у ЧДУ «{duplicate.short_name}»",
+            )
+
+
 @router.post("/cdus", response_model=CDU)
 def create_cdu(payload: CDUCreate, db: Session = Depends(get_db), user: User = Depends(require_permission("settings.edit"))):
-    if db.query(CDUModel).filter_by(name=payload.name).first():
-        raise HTTPException(409, "ЧДУ с таким именем уже существует")
-    obj = CDUModel(**payload.model_dump())
+    values = payload.model_dump()
+    _ensure_unique_cdu_fields(db, values)
+    obj = CDUModel(**values)
     db.add(obj)
     db.flush()
     write_audit(db, user=user.username, action="CDU_CREATED", entity="CDU", entity_id=obj.id,
@@ -65,6 +91,7 @@ def update_cdu(cdu_id: int, payload: CDUUpdate, db: Session = Depends(get_db), u
     if not obj:
         raise HTTPException(404, "ЧДУ не найден")
     changes = payload.model_dump(exclude_unset=True)
+    _ensure_unique_cdu_fields(db, changes, exclude_id=cdu_id)
     before = {k: getattr(obj, k) for k in changes}
     for k, v in changes.items():
         setattr(obj, k, v)

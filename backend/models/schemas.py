@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 InstrumentCategory = Literal[
     "CASH",
@@ -46,16 +46,31 @@ class ORMModel(BaseModel):
 
 # ───────── ЧДУ ─────────
 class CDUBase(BaseModel):
-    name: str
-    short_name: str
-    participant_code: str
-    participant_code_prefix: str
-    portfolio_type: str = "PRIVATE_CDU"
-    portfolio_code: Optional[str] = None
-    share_target_pct: float = 0.0
-    contact_email: Optional[str] = None
-    contact_manager: Optional[str] = None
+    name: str = Field(min_length=1, max_length=120)
+    short_name: str = Field(min_length=1, max_length=40)
+    participant_code: str = Field(min_length=1, max_length=40)
+    participant_code_prefix: str = Field(min_length=1, max_length=20)
+    portfolio_type: PortfolioType = "PRIVATE_CDU"
+    portfolio_code: Optional[str] = Field(default=None, max_length=20)
+    share_target_pct: float = Field(default=0.0, ge=0.0, le=100.0)
+    contact_email: Optional[str] = Field(default=None, max_length=120)
+    contact_manager: Optional[str] = Field(default=None, max_length=120)
     is_active: bool = True
+
+    @field_validator("name", "short_name", "participant_code", "participant_code_prefix")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("поле не может быть пустым")
+        return value
+
+    @field_validator("portfolio_code", "contact_email", "contact_manager")
+    @classmethod
+    def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return value.strip() or None
 
 
 class CDUCreate(CDUBase):
@@ -67,7 +82,7 @@ class CDUUpdate(BaseModel):
     short_name: Optional[str] = None
     participant_code: Optional[str] = None
     participant_code_prefix: Optional[str] = None
-    portfolio_type: Optional[str] = None
+    portfolio_type: Optional[PortfolioType] = None
     portfolio_code: Optional[str] = None
     share_target_pct: Optional[float] = None
     contact_email: Optional[str] = None

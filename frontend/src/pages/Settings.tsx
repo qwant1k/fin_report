@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, Save } from 'lucide-react'
+import { Plus, Trash2, Save, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
@@ -12,6 +12,20 @@ import { useConfirm } from '@/lib/confirm'
 import { apiErrorMessage } from '@/lib/notifications'
 
 const CATS = ['CASH', 'GOV_BONDS', 'REVERSE_REPO', 'MFO_BONDS', 'AGENCY_BONDS', 'RECEIVABLES', 'OTHER']
+type NewCduPayload = Omit<CDU, 'id'>
+
+const EMPTY_CDU: NewCduPayload = {
+  name: '',
+  short_name: '',
+  participant_code: '',
+  participant_code_prefix: '',
+  portfolio_type: 'PRIVATE_CDU',
+  portfolio_code: null,
+  share_target_pct: 0,
+  contact_email: null,
+  contact_manager: null,
+  is_active: true,
+}
 
 export default function SettingsPage() {
   const qc = useQueryClient()
@@ -20,6 +34,7 @@ export default function SettingsPage() {
   const canEdit = can('settings.edit')
   const canEditFormats = can('cdu_formats.edit')
   const [tab, setTab] = useState<'cdus' | 'limits' | 'formats'>('cdus')
+  const [showNewCdu, setShowNewCdu] = useState(false)
 
   const cdus = useQuery<CDU[]>({
     queryKey: ['cdus'],
@@ -31,16 +46,22 @@ export default function SettingsPage() {
   })
 
   const saveCdu = useMutation({
-    mutationFn: async (c: CDU) =>
-      (c.id
-        ? api.put(`/settings/cdus/${c.id}`, c)
-        : api.post('/settings/cdus', c)
-      ).then((r) => r.data),
+    mutationFn: async (c: CDU) => (await api.put(`/settings/cdus/${c.id}`, c)).data,
     onSuccess: (_result, c) => {
       toast.success(`ЧДУ «${c.short_name || c.name}» сохранён в справочнике.`)
       qc.invalidateQueries({ queryKey: ['cdus'] })
     },
     onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось сохранить ЧДУ')),
+  })
+
+  const createCdu = useMutation({
+    mutationFn: async (payload: NewCduPayload) => (await api.post('/settings/cdus', payload)).data as CDU,
+    onSuccess: (created) => {
+      toast.success(`ЧДУ «${created.short_name}» добавлен и доступен для загрузок, операций и отчётов.`)
+      setShowNewCdu(false)
+      qc.invalidateQueries({ queryKey: ['cdus'] })
+    },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось добавить ЧДУ')),
   })
 
   const delCdu = useMutation({
@@ -89,26 +110,50 @@ export default function SettingsPage() {
       </div>
 
       {tab === 'cdus' && (
-        <div className="card overflow-hidden">
-          <div className="table-wrap">
-            <table className="kdif-table">
-              <thead>
-                <tr>
-                  <th>Имя</th>
-                  <th>Краткое</th>
-                  <th>Префикс</th>
-                  <th>Целевая доля</th>
-                  <th>Email</th>
-                  <th>Активен</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {(cdus.data ?? []).map((c) => (
-                  <CduRow key={c.id} cdu={c} canEdit={canEdit} onSave={(u) => saveCdu.mutate(u)} onDelete={() => handleDeleteCdu(c)} />
-                ))}
-              </tbody>
-            </table>
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-semibold text-slate-800">Справочник ЧДУ</h2>
+              <p className="text-sm text-slate-500">Добавляйте управляющих вручную и настраивайте их распознавание в загружаемых файлах.</p>
+            </div>
+            {canEdit && !showNewCdu && (
+              <button type="button" className="btn-primary" onClick={() => setShowNewCdu(true)}>
+                <Plus className="mr-1 h-4 w-4" /> Добавить ЧДУ
+              </button>
+            )}
+          </div>
+
+          {showNewCdu && (
+            <NewCduForm
+              pending={createCdu.isPending}
+              onCancel={() => setShowNewCdu(false)}
+              onCreate={(payload) => createCdu.mutate(payload)}
+            />
+          )}
+
+          <div className="card overflow-hidden">
+            <div className="table-wrap">
+              <table className="kdif-table">
+                <thead>
+                  <tr>
+                    <th>Имя</th>
+                    <th>Краткое</th>
+                    <th>Код участника</th>
+                    <th>Префикс</th>
+                    <th>Тип</th>
+                    <th>Целевая доля</th>
+                    <th>Email</th>
+                    <th>Активен</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(cdus.data ?? []).map((c) => (
+                    <CduRow key={c.id} cdu={c} canEdit={canEdit} onSave={(u) => saveCdu.mutate(u)} onDelete={() => handleDeleteCdu(c)} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
@@ -146,6 +191,113 @@ export default function SettingsPage() {
   )
 }
 
+function NewCduForm({ pending, onCreate, onCancel }: {
+  pending: boolean
+  onCreate: (payload: NewCduPayload) => void
+  onCancel: () => void
+}) {
+  const [value, setValue] = useState<NewCduPayload>({ ...EMPTY_CDU })
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault()
+    const required = [value.name, value.short_name, value.participant_code, value.participant_code_prefix]
+    if (required.some((item) => !item.trim())) {
+      toast.error('Заполните полное и краткое наименование, код участника и префикс распознавания.')
+      return
+    }
+    if (value.portfolio_type !== 'PRIVATE_CDU' && !value.portfolio_code?.trim()) {
+      toast.error('Для портфеля НБ РК укажите код портфеля.')
+      return
+    }
+    if (value.share_target_pct < 0 || value.share_target_pct > 100) {
+      toast.error('Целевая доля должна быть от 0 до 100%.')
+      return
+    }
+    onCreate({
+      ...value,
+      name: value.name.trim(),
+      short_name: value.short_name.trim(),
+      participant_code: value.participant_code.trim(),
+      participant_code_prefix: value.participant_code_prefix.trim(),
+      portfolio_code: value.portfolio_code?.trim() || null,
+      contact_email: value.contact_email?.trim() || null,
+      contact_manager: value.contact_manager?.trim() || null,
+    })
+  }
+
+  return (
+    <form onSubmit={submit} className="card space-y-4 border border-emerald-200 bg-emerald-50/40 p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="font-semibold text-slate-900">Новый ЧДУ</h3>
+          <p className="text-sm text-slate-500">Поля со звёздочкой обязательны. Код и префикс используются для автоматического распознавания файлов.</p>
+        </div>
+        <button type="button" onClick={onCancel} className="rounded p-1 text-slate-500 hover:bg-white hover:text-slate-800" title="Закрыть форму">
+          <X className="h-5 w-5" />
+        </button>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <Field label="Полное наименование *">
+          <input className="input" value={value.name} onChange={(e) => setValue({ ...value, name: e.target.value })} placeholder="АО «Название компании»" autoFocus />
+        </Field>
+        <Field label="Краткое наименование *">
+          <input className="input" value={value.short_name} onChange={(e) => setValue({ ...value, short_name: e.target.value })} placeholder="Название" />
+        </Field>
+        <Field label="Код участника *">
+          <input className="input font-mono" value={value.participant_code} onChange={(e) => setValue({ ...value, participant_code: e.target.value })} placeholder="Код из Trade Report" />
+        </Field>
+        <Field label="Префикс распознавания *">
+          <input className="input font-mono" value={value.participant_code_prefix} onChange={(e) => setValue({ ...value, participant_code_prefix: e.target.value })} placeholder="Первые символы кода" />
+        </Field>
+        <Field label="Тип портфеля">
+          <select className="input" value={value.portfolio_type} onChange={(e) => setValue({ ...value, portfolio_type: e.target.value as CDU['portfolio_type'], portfolio_code: e.target.value === 'PRIVATE_CDU' ? null : value.portfolio_code })}>
+            <option value="PRIVATE_CDU">Частный ЧДУ</option>
+            <option value="NBRK_OWN">НБ РК — собственный портфель</option>
+            <option value="NBRK_RESERVE">НБ РК — специальный резерв</option>
+          </select>
+        </Field>
+        {value.portfolio_type !== 'PRIVATE_CDU' && (
+          <Field label="Код портфеля НБ РК *">
+            <input className="input font-mono" value={value.portfolio_code ?? ''} onChange={(e) => setValue({ ...value, portfolio_code: e.target.value })} placeholder="Например, 310138-1" />
+          </Field>
+        )}
+        <Field label="Целевая доля, %">
+          <input type="number" min="0" max="100" step="0.01" className="input" value={value.share_target_pct} onChange={(e) => setValue({ ...value, share_target_pct: Number(e.target.value) })} />
+        </Field>
+        <Field label="Email">
+          <input type="email" className="input" value={value.contact_email ?? ''} onChange={(e) => setValue({ ...value, contact_email: e.target.value })} placeholder="reports@example.kz" />
+        </Field>
+        <Field label="Ответственный менеджер">
+          <input className="input" value={value.contact_manager ?? ''} onChange={(e) => setValue({ ...value, contact_manager: e.target.value })} placeholder="Ф.И.О." />
+        </Field>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-emerald-200 pt-4">
+        <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+          <input type="checkbox" checked={value.is_active} onChange={(e) => setValue({ ...value, is_active: e.target.checked })} />
+          Сразу включить ЧДУ в загрузки и отчёты
+        </label>
+        <div className="flex gap-2">
+          <button type="button" className="btn-secondary" onClick={onCancel} disabled={pending}>Отмена</button>
+          <button type="submit" className="btn-primary" disabled={pending}>
+            <Save className="mr-1 h-4 w-4" /> {pending ? 'Добавление…' : 'Добавить ЧДУ'}
+          </button>
+        </div>
+      </div>
+    </form>
+  )
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="space-y-1 text-sm font-medium text-slate-700">
+      <span>{label}</span>
+      {children}
+    </label>
+  )
+}
+
 function CduRow({ cdu, canEdit, onSave, onDelete }: {
   cdu: CDU; canEdit: boolean; onSave: (c: CDU) => void; onDelete: () => void
 }) {
@@ -154,7 +306,15 @@ function CduRow({ cdu, canEdit, onSave, onDelete }: {
     <tr>
       <td><input className="input py-1" value={v.name} disabled={!canEdit} onChange={(e) => setV({ ...v, name: e.target.value })} /></td>
       <td><input className="input py-1" value={v.short_name} disabled={!canEdit} onChange={(e) => setV({ ...v, short_name: e.target.value })} /></td>
+      <td><input className="input py-1 font-mono" value={v.participant_code} disabled={!canEdit} onChange={(e) => setV({ ...v, participant_code: e.target.value })} /></td>
       <td><input className="input py-1" value={v.participant_code_prefix} disabled={!canEdit} onChange={(e) => setV({ ...v, participant_code_prefix: e.target.value })} /></td>
+      <td>
+        <select className="input min-w-40 py-1" value={v.portfolio_type} disabled={!canEdit} onChange={(e) => setV({ ...v, portfolio_type: e.target.value as CDU['portfolio_type'] })}>
+          <option value="PRIVATE_CDU">Частный ЧДУ</option>
+          <option value="NBRK_OWN">НБ РК — собственный</option>
+          <option value="NBRK_RESERVE">НБ РК — спецрезерв</option>
+        </select>
+      </td>
       <td><input className="input py-1 text-right" value={v.share_target_pct} disabled={!canEdit} onChange={(e) => setV({ ...v, share_target_pct: Number(e.target.value) })} /></td>
       <td><input className="input py-1" value={v.contact_email ?? ''} disabled={!canEdit} onChange={(e) => setV({ ...v, contact_email: e.target.value })} /></td>
       <td>

@@ -106,3 +106,39 @@ def test_what_if_returns_deltas_without_persisting_trade(stand):
     assert body["limit"]["pct_after"] == pytest.approx(700 / 1100)
     with Session() as db:
         assert db.query(Trade).count() == before_count
+
+
+def test_cdu_can_be_added_manually_with_validation_and_clear_duplicate_error(stand):
+    client, Session, _current = stand
+    payload = {
+        "name": "  АО «Тестовое управление»  ",
+        "short_name": "  Тест УА  ",
+        "participant_code": "  TEST01  ",
+        "participant_code_prefix": "  TEST  ",
+        "portfolio_type": "PRIVATE_CDU",
+        "portfolio_code": None,
+        "share_target_pct": 12.5,
+        "contact_email": "  reports@example.kz  ",
+        "contact_manager": "  Тестовый менеджер  ",
+        "is_active": True,
+    }
+
+    created = client.post("/api/settings/cdus", json=payload)
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["name"] == "АО «Тестовое управление»"
+    assert body["short_name"] == "Тест УА"
+    assert body["participant_code"] == "TEST01"
+    assert body["contact_email"] == "reports@example.kz"
+
+    duplicate = {**payload, "name": "ао «тестовое управление»", "participant_code": "OTHER01"}
+    conflict = client.post("/api/settings/cdus", json=duplicate)
+    assert conflict.status_code == 409
+    assert "уже используется" in conflict.json()["detail"]
+
+    invalid = {**payload, "name": "   ", "participant_code": "OTHER02"}
+    rejected = client.post("/api/settings/cdus", json=invalid)
+    assert rejected.status_code == 422
+
+    with Session() as db:
+        assert db.query(CDU).filter(CDU.participant_code == "TEST01").count() == 1
