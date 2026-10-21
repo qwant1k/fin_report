@@ -71,7 +71,7 @@ def _deactivate_file_trades(db: Session, tf: TradeFile) -> None:
 
 
 @router.post("/trade-report", response_model=UploadResponse)
-async def upload_trade_report(
+def upload_trade_report(
     file: UploadFile = File(...),
     cdu_id: Optional[int] = Form(None),
     trade_date: Optional[str] = Form(None),
@@ -169,7 +169,7 @@ async def upload_trade_report(
             parsed_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
         except ValueError:
             _safe_unlink(target_path)
-            raise HTTPException(400, "trade_date должен быть в формате YYYY-MM-DD")
+            raise HTTPException(400, "Дата сделки должна быть в формате ГГГГ-ММ-ДД")
 
     # ── persist + import (single transaction) ──
     try:

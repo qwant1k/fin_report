@@ -15,6 +15,7 @@ import {
   Flag,
   Gauge,
   Layers,
+  Plus,
   RefreshCw,
   TrendingDown,
   TrendingUp,
@@ -27,9 +28,14 @@ import clsx from 'clsx'
 import toast from 'react-hot-toast'
 
 import CDUBlockCard from '@/components/CDUBlockCard'
+import { FundIndicatorsPanel } from '@/components/CustomIndicators'
+import { useIndicatorValues } from '@/lib/indicators'
+import OperationWizard from '@/components/OperationWizard'
 import HistoryChart from '@/components/HistoryChart'
 import { EmptyState, LoadingBlock, Segmented, Stagger, StatCard } from '@/components/ui'
 import { api } from '@/lib/api'
+import { downloadBlob } from '@/lib/download'
+import { apiErrorMessage } from '@/lib/notifications'
 import { useAuthStore } from '@/lib/auth'
 import { formatDate, formatNumber, formatPct } from '@/lib/format'
 import { DashboardResponse } from '@/lib/types'
@@ -111,6 +117,7 @@ export default function DashboardPage() {
   const [detail, setDetail] = useState<DashboardDetail>(null)
   const qc = useQueryClient()
   const can = useAuthStore((s) => s.can)
+  const [wizardOpen, setWizardOpen] = useState(false)
 
   const historyMeta = useQuery<DashboardHistoryMeta>({
     queryKey: ['dashboard-history-meta'],
@@ -135,6 +142,7 @@ export default function DashboardPage() {
     },
   })
   const effectiveReportDate = data?.report_date ?? period.to
+  const indicatorValues = useIndicatorValues(data ? effectiveReportDate : null)
 
   useEffect(() => {
     setDetail(null)
@@ -174,33 +182,35 @@ export default function DashboardPage() {
         `Расчёт за ${formatDate(effectiveReportDate)} завершён за ${r.duration_seconds}с: ЧДУ ${r.cdus_processed}, нарушений ${r.breaches_count}`,
       )
       qc.invalidateQueries({ queryKey: ['dashboard'] })
+      qc.invalidateQueries({ queryKey: ['indicator-values'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, `Не удалось пересчитать сводку за ${formatDate(effectiveReportDate)}`)),
   })
 
   const downloadXlsx = async () => {
-    const resp = await api.get('/export/xlsx', {
-      params: { report_date: effectiveReportDate },
-      responseType: 'blob',
-    })
-    const url = URL.createObjectURL(new Blob([resp.data]))
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `risk_report_${effectiveReportDate.replaceAll('-', '')}.xlsx`
-    a.click()
-    URL.revokeObjectURL(url)
+    try {
+      const resp = await api.get('/export/xlsx', {
+        params: { report_date: effectiveReportDate },
+        responseType: 'blob',
+      })
+      downloadBlob(resp.data, `risk_report_${effectiveReportDate.replaceAll('-', '')}.xlsx`)
+      toast.success(`Отчёт за ${formatDate(effectiveReportDate)} скачан в формате XLSX.`)
+    } catch (error) {
+      toast.error(apiErrorMessage(error, `Не удалось скачать отчёт за ${formatDate(effectiveReportDate)} в формате XLSX`))
+    }
   }
 
   const downloadPdf = async () => {
-    const resp = await api.get('/export/pdf', {
-      params: { report_date: effectiveReportDate },
-      responseType: 'blob',
-    })
-    const url = URL.createObjectURL(new Blob([resp.data], { type: 'application/pdf' }))
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `risk_report_${effectiveReportDate.replaceAll('-', '')}.pdf`
-    a.click()
-    URL.revokeObjectURL(url)
+    try {
+      const resp = await api.get('/export/pdf', {
+        params: { report_date: effectiveReportDate },
+        responseType: 'blob',
+      })
+      downloadBlob(resp.data, `risk_report_${effectiveReportDate.replaceAll('-', '')}.pdf`)
+      toast.success(`Отчёт за ${formatDate(effectiveReportDate)} скачан в формате PDF.`)
+    } catch (error) {
+      toast.error(apiErrorMessage(error, `Не удалось скачать отчёт за ${formatDate(effectiveReportDate)} в формате PDF`))
+    }
   }
 
   return (
@@ -263,6 +273,11 @@ export default function DashboardPage() {
             <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
             <span className="hidden sm:inline">Обновить</span>
           </button>
+          {(can('manual.cash.manage') || can('manual.trades.manage')) && (
+            <button onClick={() => setWizardOpen(true)} className="btn-secondary h-10" title="Ручная операция: поступление денег, покупка ЦБ, закрытие дебиторки…">
+              <Plus className="h-4 w-4" /> Операция
+            </button>
+          )}
           {can('dashboard.calculate') && (
             <button onClick={() => calc.mutate()} disabled={calc.isPending} className="btn-primary h-10">
               <RefreshCw className={`h-4 w-4 ${calc.isPending ? 'animate-spin' : ''}`} /> Пересчитать
@@ -337,14 +352,14 @@ export default function DashboardPage() {
           title="YTM (взвеш.)"
           value={data?.fund_ytm_weighted ?? 0}
           format={formatPct}
-          subtitle={data?.benchmark_ytm != null ? `MBM index: ${formatNumber(data.benchmark_ytm, 2)}` : 'MBM index: —'}
+          subtitle={data?.benchmark_ytm != null ? `Индекс MBM: ${formatNumber(data.benchmark_ytm, 2)}` : 'Индекс MBM: —'}
           icon={Activity}
           accent="sky"
           active={detail === 'ytm'}
           onClick={() => setDetail('ytm')}
         />
         <StatCard
-          title="Duration (взвеш.)"
+          title="Дюрация (взвешенная)"
           value={data?.fund_duration_weighted ?? 0}
           format={(n) => formatNumber(n, 2)}
           subtitle={data?.benchmark_duration != null ? `MBM: ${formatNumber(data.benchmark_duration, 2)}` : 'MBM: —'}
@@ -505,13 +520,16 @@ export default function DashboardPage() {
         )}
       </section>
 
+      <OperationWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
+
       <section className="space-y-6">
+        <FundIndicatorsPanel items={indicatorValues.data?.fund} date={effectiveReportDate} />
         {isLoading && <div className="card"><LoadingBlock label="Загрузка блоков ЧДУ…" /></div>}
         {!isLoading && data?.blocks.length === 0 && (
           <EmptyState
             icon={Layers}
             title="Нет данных за выбранный период"
-            description="Загрузите файлы TradeReport и выполните пересчёт, чтобы увидеть сводный отчёт Фонда."
+            description="Загрузите файлы отчёта о сделках и выполните пересчёт, чтобы увидеть сводный отчёт Фонда."
             action={
               can('upload.trade_report') ? (
                 <Link to="/documents" className="btn-primary">
@@ -528,7 +546,8 @@ export default function DashboardPage() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4, delay: Math.min(i * 0.06, 0.3), ease: [0.22, 1, 0.36, 1] }}
           >
-            <CDUBlockCard block={block} periodFrom={period.from} periodTo={period.to} />
+            <CDUBlockCard block={block} periodFrom={period.from} periodTo={period.to}
+              indicators={indicatorValues.data?.by_cdu[String(block.cdu_id)]} />
           </motion.div>
         ))}
       </section>
@@ -549,7 +568,7 @@ function DashboardDetailPanel({
     assets: 'Детализация активов Фонда',
     change: 'Детализация изменения за день',
     ytm: 'Детализация YTM',
-    duration: 'Детализация Duration',
+    duration: 'Детализация дюрации',
   }
   const rows = [...data.blocks].sort((a, b) => {
     if (detail === 'change') return Math.abs(b.total_daily_change) - Math.abs(a.total_daily_change)
@@ -580,8 +599,8 @@ function DashboardDetailPanel({
               <th>Изменение</th>
               <th>Доля</th>
               <th>YTM</th>
-              <th>Duration</th>
-              <th>Benchmark</th>
+              <th>Дюрация</th>
+              <th>Ориентир</th>
               <th>Статус</th>
             </tr>
           </thead>

@@ -4,10 +4,12 @@ import { Plus, Trash2, Save } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
+import { categoryLabel } from '@/lib/displayLabels'
 import { CDU, CDULimit } from '@/lib/types'
 import { formatPct } from '@/lib/format'
 import { useAuthStore } from '@/lib/auth'
 import { useConfirm } from '@/lib/confirm'
+import { apiErrorMessage } from '@/lib/notifications'
 
 const CATS = ['CASH', 'GOV_BONDS', 'REVERSE_REPO', 'MFO_BONDS', 'AGENCY_BONDS', 'RECEIVABLES', 'OTHER']
 
@@ -34,18 +36,20 @@ export default function SettingsPage() {
         ? api.put(`/settings/cdus/${c.id}`, c)
         : api.post('/settings/cdus', c)
       ).then((r) => r.data),
-    onSuccess: () => {
-      toast.success('Сохранено')
+    onSuccess: (_result, c) => {
+      toast.success(`ЧДУ «${c.short_name || c.name}» сохранён в справочнике.`)
       qc.invalidateQueries({ queryKey: ['cdus'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось сохранить ЧДУ')),
   })
 
   const delCdu = useMutation({
     mutationFn: async (id: number) => (await api.delete(`/settings/cdus/${id}`)).data,
     onSuccess: () => {
-      toast.success('Удалено')
+      toast.success('ЧДУ удалён из справочника.')
       qc.invalidateQueries({ queryKey: ['cdus'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось удалить ЧДУ')),
   })
 
   const handleDeleteCdu = async (c: CDU) => {
@@ -64,10 +68,11 @@ export default function SettingsPage() {
         ? api.put(`/settings/limits/${l.id}`, l)
         : api.post('/settings/limits', l)
       ).then((r) => r.data),
-    onSuccess: () => {
-      toast.success('Лимит сохранён')
+    onSuccess: (_result, limit) => {
+      toast.success(`Лимит для категории «${categoryLabel(limit.instrument_category)}» сохранён.`)
       qc.invalidateQueries({ queryKey: ['limits'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось сохранить лимит ЧДУ')),
   })
 
   return (
@@ -173,7 +178,7 @@ function LimitRow({ limit, cdus, canEdit, onSave }: {
       <td>{cduName}</td>
       <td>
         <select className="input py-1" value={v.instrument_category} disabled={!canEdit} onChange={(e) => setV({ ...v, instrument_category: e.target.value })}>
-          {CATS.map((c) => <option key={c}>{c}</option>)}
+          {CATS.map((c) => <option key={c} value={c}>{categoryLabel(c)}</option>)}
         </select>
       </td>
       <td><input className="input py-1 text-right w-24" value={v.min_limit_pct} disabled={!canEdit} onChange={(e) => setV({ ...v, min_limit_pct: Number(e.target.value) })} /></td>
@@ -233,18 +238,19 @@ function CDUFormatsPanel({ cdus, canEdit }: { cdus: CDU[]; canEdit: boolean }) {
     mutationFn: async (payload: CDUFormat) =>
       (await api.post(`/cdu-formats/${payload.cdu_id}`, payload)).data,
     onSuccess: () => {
-      toast.success('Формат сохранён')
+      toast.success('Правила распознавания файла ЧДУ сохранены.')
       qc.invalidateQueries({ queryKey: ['cdu-format', selectedCduId] })
     },
-    onError: () => toast.error('Не удалось сохранить'),
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось сохранить правила распознавания файла')),
   })
 
   const remove = useMutation({
     mutationFn: async () => (await api.delete(`/cdu-formats/${selectedCduId}`)).data,
     onSuccess: () => {
-      toast.success('Сброшено к умолчанию')
+      toast.success('Индивидуальные правила удалены; применяется формат по умолчанию.')
       qc.invalidateQueries({ queryKey: ['cdu-format', selectedCduId] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось восстановить формат по умолчанию')),
   })
 
   const [draft, setDraft] = useState<Record<string, string>>({})

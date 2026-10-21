@@ -240,6 +240,8 @@ def _apply_dev_migrations() -> None:
             ("rating_agency",     "VARCHAR(80)"),
             ("source",            "VARCHAR(80)"),
             ("source_updated_at", "DATETIME"),
+            ("float_index",       "VARCHAR(12)"),
+            ("float_margin_pct",  "FLOAT"),
         ]:
             if col not in ref_cols:
                 additions.append((

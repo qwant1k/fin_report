@@ -243,6 +243,18 @@ def dashboard_summary(
     )
 
 
+@router.get("/category-breakdown")
+def category_breakdown_route(
+    cdu_id: int = Query(...),
+    category: str = Query(...),
+    as_of: Optional[date] = Query(None, alias="date"),
+    db: Session = Depends(get_db),
+):
+    """Full drill-down of a summary row: items with dates, prices and sources."""
+    from services.portfolio.breakdown import category_breakdown
+    return category_breakdown(db, cdu_id, category, as_of or date.today())
+
+
 @router.get("/instrument-details")
 def instrument_details(
     cdu_id: int = Query(...),

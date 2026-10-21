@@ -7,6 +7,8 @@ import { api } from '@/lib/api'
 import { useAuthStore } from '@/lib/auth'
 import { useConfirm } from '@/lib/confirm'
 import { formatDate } from '@/lib/format'
+import { auditActionLabel, entityLabel } from '@/lib/displayLabels'
+import { apiErrorMessage } from '@/lib/notifications'
 
 interface User {
   id: number
@@ -162,28 +164,31 @@ export default function AdminPage() {
   const createUser = useMutation({
     mutationFn: async () => (await api.post('/admin/users', newUser)).data,
     onSuccess: () => {
-      toast.success('Пользователь создан')
+      toast.success(`Пользователь «${newUser.username}» создан и может войти в систему.`)
       setNewUser({ username: '', password: '', full_name: '', email: '', role: 'viewer' })
       qc.invalidateQueries({ queryKey: ['users'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось создать пользователя')),
   })
 
   const removeUser = useMutation({
     mutationFn: async (id: number) => (await api.delete(`/admin/users/${id}`)).data,
     onSuccess: () => {
-      toast.success('Пользователь удален')
+      toast.success('Пользователь удалён; доступ к системе прекращён.')
       qc.invalidateQueries({ queryKey: ['users'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось удалить пользователя')),
   })
 
   const setRole = useMutation({
     mutationFn: async ({ id, role }: { id: number; role: string }) =>
       (await api.put(`/admin/users/${id}/role`, null, { params: { role } })).data,
     onSuccess: () => {
-      toast.success('Роль пользователя обновлена')
+      toast.success('Роль пользователя обновлена; новые права применены.')
       qc.invalidateQueries({ queryKey: ['users'] })
       void refreshCurrentSession()
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось изменить роль пользователя')),
   })
 
   const saveRole = useMutation({
@@ -203,21 +208,23 @@ export default function AdminPage() {
       })).data
     },
     onSuccess: (saved: RoleDefinition) => {
-      toast.success('Роль сохранена')
+      toast.success(`Роль «${saved.name}» сохранена; назначено прав: ${saved.permissions.length}.`)
       invalidateAdmin()
       selectRole(saved)
       void refreshCurrentSession()
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось сохранить роль')),
   })
 
   const removeRole = useMutation({
     mutationFn: async (id: number) => (await api.delete(`/admin/roles/${id}`)).data,
     onSuccess: () => {
-      toast.success('Роль удалена')
+      toast.success('Роль удалена; связанные права доступа отозваны.')
       setRoleForm(emptyRoleForm)
       invalidateAdmin()
       void refreshCurrentSession()
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось удалить роль')),
   })
 
   const handleRemoveUser = async (u: User) => {
@@ -245,14 +252,12 @@ export default function AdminPage() {
     mutationFn: async () =>
       (await api.post('/admin/purge-data', { confirm: PURGE_PHRASE })).data,
     onSuccess: () => {
-      toast.success('База данных очищена')
+      toast.success('Операционные данные очищены. Настройки и учётные записи сохранены.')
       setPurgeModal(false)
       setPurgeInput('')
       qc.invalidateQueries()
     },
-    onError: (e: any) => {
-      toast.error(e?.response?.data?.detail ?? 'Ошибка очистки')
-    },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось очистить операционные данные')),
   })
 
   const togglePermission = (code: string) => {
@@ -294,7 +299,7 @@ export default function AdminPage() {
               <input className="input" placeholder="Email" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} />
               <select className="input" value={newUser.role} onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}>
                 {activeRoles.map((role) => (
-                  <option key={role.code} value={role.code}>{role.name} ({role.code})</option>
+                  <option key={role.code} value={role.code}>{role.name}</option>
                 ))}
               </select>
               <button onClick={() => createUser.mutate()} className="btn-primary">
@@ -320,7 +325,7 @@ export default function AdminPage() {
                         <select className="input py-1" value={u.role} onChange={(e) => setRole.mutate({ id: u.id, role: e.target.value })}>
                           {roleOptions.map((role) => (
                             <option key={role.code} value={role.code} disabled={!role.is_active}>
-                              {role.name} ({role.code}){!role.is_active ? ' - отключена' : ''}
+                              {role.name}{!role.is_active ? ' — отключена' : ''}
                             </option>
                           ))}
                         </select>
@@ -360,7 +365,6 @@ export default function AdminPage() {
                   <Shield className="mt-0.5 h-4 w-4 text-emerald-600" />
                   <span className="min-w-0 flex-1">
                     <span className="block font-semibold text-slate-800">{role.name}</span>
-                    <span className="block truncate text-xs text-slate-500">{role.code}</span>
                     <span className="mt-1 block text-xs text-slate-400">
                       {role.permissions.length} прав{role.is_system ? ' - системная' : ''}{!role.is_active ? ' - отключена' : ''}
                     </span>
@@ -441,7 +445,6 @@ export default function AdminPage() {
                         />
                         <span>
                           <span className="block font-medium text-slate-700">{permission.label}</span>
-                          <span className="block text-xs text-slate-400">{permission.code}</span>
                         </span>
                       </label>
                     ))}
@@ -465,8 +468,8 @@ export default function AdminPage() {
                   <tr key={a.id}>
                     <td>{formatDate(a.ts)}</td>
                     <td>{a.user ?? '-'}</td>
-                    <td>{a.action}</td>
-                    <td>{a.entity ?? '-'}</td>
+                    <td>{auditActionLabel(a.action)}</td>
+                    <td>{a.entity ? entityLabel(a.entity) : '—'}</td>
                     <td>{a.entity_id ?? '-'}</td>
                     <td className="text-xs">{a.details ?? '-'}</td>
                   </tr>

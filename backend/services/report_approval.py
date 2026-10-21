@@ -32,14 +32,23 @@ _ALLOWED_TRANSITIONS = {
     "rejected": {"pending_approval"},
 }
 
+_STATUS_LABELS = {
+    "draft": "черновик",
+    "pending_approval": "на утверждении",
+    "approved": "утверждён",
+    "rejected": "отклонён",
+}
+
 
 def _ensure_transition(current: str, target: str) -> None:
     if target not in _ALLOWED_TRANSITIONS.get(current, set()):
+        current_label = _STATUS_LABELS.get(current, "неизвестный статус")
+        target_label = _STATUS_LABELS.get(target, "неизвестный статус")
         raise HTTPException(
             status_code=409,
             detail={
                 "error": "invalid_transition",
-                "message": f"Переход {current!r} → {target!r} запрещён.",
+                "message": f"Нельзя изменить статус «{current_label}» на «{target_label}».",
                 "from": current,
                 "to": target,
             },

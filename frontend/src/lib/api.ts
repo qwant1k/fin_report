@@ -38,17 +38,12 @@ api.interceptors.response.use(
   (resp: AxiosResponse) => resp,
   (err: AxiosError<{ detail?: unknown }>) => {
     const status = err.response?.status
-    const detail = err.response?.data?.detail
-    if (status === 401) {
+    if (status === 401 && useAuthStore.getState().token) {
       useAuthStore.getState().clear()
-      toast.error('Сессия истекла, войдите заново')
-    } else if (status && status >= 500) {
-      toast.error(typeof detail === 'string' ? detail : 'Ошибка сервера')
-    } else if (typeof detail === 'string') {
-      toast.error(detail)
+      toast.error('Сессия истекла. Войдите в систему повторно.')
     }
-    // Structured detail objects (e.g. duplicate_file 409) are surfaced to the
-    // caller so the UI can render its own dialog.
+    // Остальные ошибки обрабатывает конкретный экран: так сообщение содержит
+    // контекст действия и не дублируется вторым уведомлением.
     return Promise.reject(err)
   },
 )

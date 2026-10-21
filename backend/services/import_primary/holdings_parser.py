@@ -97,7 +97,7 @@ def parse_holdings_xlsx(file_path: Path | str) -> Dict[str, Any]:
             })
 
     if cdu_name is None:
-        warnings.append("CDU not detected from filename or content")
+        warnings.append("ЧДУ не удалось определить по имени или содержимому файла")
     return {
         "cdu_name": cdu_name,
         "report_date": report_date,

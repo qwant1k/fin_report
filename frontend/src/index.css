@@ -152,24 +152,63 @@
 table.kdif-table {
   @apply w-full border-collapse text-sm;
 }
-table.kdif-table thead th {
+table.kdif-table > thead > tr > th {
   @apply sticky top-0 z-10 border-b border-emerald-800/30 bg-brand-gradient px-3 py-2.5 text-left font-semibold text-white;
 }
-table.kdif-table tbody td {
+table.kdif-table > tbody > tr > td {
   @apply border-b border-slate-100 px-3 py-2;
 }
-table.kdif-table tbody tr {
+table.kdif-table > tbody > tr {
   @apply transition-colors hover:bg-emerald-50/50;
 }
-table.kdif-table tr.repo td {
+table.kdif-table > tbody > tr.repo > td {
   @apply bg-amber-100/80 font-medium;
 }
-table.kdif-table tr.total td {
+table.kdif-table > tbody > tr.total > td {
   @apply border-emerald-800/40 bg-brand-gradient font-bold text-white;
 }
-table.kdif-table tr.total:hover td {
+table.kdif-table > tbody > tr.total:hover > td {
   @apply bg-brand-gradient;
 }
-table.kdif-table tr.breach td {
+table.kdif-table > tbody > tr.breach > td {
   @apply bg-red-50;
+}
+
+/* compact detail tables (drill-downs, cards): zebra rows + column rules for readability */
+table.detail-table {
+  @apply w-full border-collapse text-[13px] leading-tight;
+}
+table.detail-table thead th {
+  @apply border border-slate-300 bg-slate-100 px-2 py-1.5 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-600;
+}
+table.detail-table tbody td {
+  @apply border border-slate-200 px-2 py-1.5 align-top text-slate-800;
+}
+table.detail-table tbody tr:nth-child(even) td {
+  @apply bg-slate-50/70;
+}
+table.detail-table tbody tr:hover td {
+  @apply bg-emerald-50/60;
+}
+table.detail-table tfoot td {
+  @apply border border-slate-300 bg-slate-100 px-2 py-1.5 font-semibold text-slate-900;
+}
+.num {
+  @apply text-right tabular-nums;
+}
+
+/* compact controls for dense cards and grids */
+@layer components {
+  .input-sm {
+    @apply h-8 w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-[13px] text-slate-900
+      placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20
+      disabled:bg-slate-50 disabled:text-slate-700;
+  }
+  .cell-input {
+    @apply h-7 w-full rounded border border-transparent bg-transparent px-1.5 text-[13px] text-slate-900
+      hover:border-slate-300 focus:border-emerald-500 focus:bg-white focus:outline-none focus:ring-1 focus:ring-emerald-500/30;
+  }
+  .field-label {
+    @apply mb-0.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-600;
+  }
 }

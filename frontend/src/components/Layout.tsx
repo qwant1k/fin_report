@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import {
   Activity,
+  Percent,
   AlertCircle,
   BookMarked,
   CalendarCheck,
@@ -35,6 +36,7 @@ import { cn } from '@/lib/cn'
 import { useAuthStore } from '@/lib/auth'
 import { todayIso, useWorkContextStore } from '@/lib/workContext'
 import { ConfirmDialogHost } from '@/components/ui'
+import UploadIndicator from '@/components/UploadIndicator'
 
 interface NavItem {
   to: string
@@ -79,7 +81,7 @@ const navGroups: NavGroup[] = [
     items: [
       { to: '/documents', label: 'Загрузка документов', icon: Upload, permission: ['page.upload', 'page.primary_data'] },
       { to: '/reconciliation', label: 'Сверка', icon: CheckCircle, permission: 'page.reconciliation' },
-      { to: '/risk-report', label: 'Risk Report', icon: ShieldAlert, permission: 'page.risk_report' },
+      { to: '/risk-report', label: 'Отчёт о рисках', icon: ShieldAlert, permission: 'page.risk_report' },
       { to: '/history', label: 'История загрузок', icon: History, permission: 'page.history' },
       { to: '/import', label: 'Импорт истории', icon: Database, permission: 'page.import' },
     ],
@@ -91,6 +93,7 @@ const navGroups: NavGroup[] = [
     items: [
       { to: '/kase', label: 'Цены KASE', icon: TrendingUp, permission: 'page.kase' },
       { to: '/mbm', label: 'MBM', icon: Activity, permission: 'page.mbm' },
+      { to: '/tonia', label: 'TONIA Compounded', icon: Percent, permission: 'page.kase' },
     ],
   },
   {
@@ -448,6 +451,8 @@ export default function Layout() {
 
       {/* Единый диалог подтверждения критичных действий на всё приложение — см. lib/confirm.ts */}
       <ConfirmDialogHost />
+      {/* Фоновая очередь загрузки документов — прогресс на любом экране */}
+      <UploadIndicator />
     </div>
   )
 }

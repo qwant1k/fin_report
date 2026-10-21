@@ -96,7 +96,7 @@ async def backfill_mbm(
     """Скачать с KASE все значения MBM за диапазон [start_date, end_date] и upsert-ить в БД."""
     end_date = end_date or date.today()
     if end_date < start_date:
-        raise HTTPException(400, "end_date должен быть ≥ start_date")
+        raise HTTPException(400, "Конечная дата должна быть не раньше начальной")
     client = MBMClient()
     rows = await client.fetch_history(start=start_date, end=end_date)
     if not rows:

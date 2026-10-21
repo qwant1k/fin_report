@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     kase_api_base_url: str = "https://kase.kz/api"
     # refresh coupon schedules of held instruments with the daily KASE job
     kase_coupon_refresh_daily: bool = True
+    kase_tonia_xlsx_url: str = "https://kase.kz/api/indicators/tonia-compounded/archive-xls"
+    kase_tonia_start_date: date = date(2024, 1, 1)
+    kase_tonia_fetch_daily: bool = True
+    kase_tonia_cron_hour: int = 20
+    kase_tonia_cron_minute: int = 10
+    kase_tonia_lookback_days: int = 7
 
     # Price reconciliation tolerance vs KASE (fraction, 0.0001 = 0.01% = 1 bp).
     # If |price_cdu - price_kase| / price_kase > tolerance, Trade.price_flag is

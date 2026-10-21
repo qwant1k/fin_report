@@ -38,7 +38,7 @@ def _validate_permissions(permissions: list[str]) -> list[str]:
     cleaned = sorted({p.strip() for p in permissions if p and p.strip()})
     unknown = [p for p in cleaned if p not in allowed]
     if unknown:
-        raise HTTPException(400, f"Unknown permissions: {', '.join(unknown)}")
+        raise HTTPException(400, f"Указаны неизвестные права доступа: {len(unknown)}. Обновите список прав и повторите сохранение")
     return cleaned
 
 
@@ -79,7 +79,7 @@ def _user_to_dict(user: User, db: Session) -> dict:
 def _ensure_role_assignable(db: Session, role_code: str) -> None:
     role = db.query(RoleDefinition).filter_by(code=role_code, is_active=True).first()
     if not role:
-        raise HTTPException(400, "Role is not active or does not exist")
+        raise HTTPException(400, "Выбранная роль не существует или отключена")
 
 
 @router.get("/permissions", response_model=List[PermissionCatalogItem])
@@ -106,9 +106,9 @@ def create_role(
 ):
     code = payload.code.strip().lower()
     if not ROLE_CODE_RE.match(code):
-        raise HTTPException(400, "Role code must be 2-40 chars: lowercase latin letters, digits, underscore")
+        raise HTTPException(400, "Код роли: от 2 до 40 строчных латинских букв, цифр или знаков подчёркивания")
     if db.query(RoleDefinition).filter_by(code=code).first():
-        raise HTTPException(409, "Role already exists")
+        raise HTTPException(409, "Роль с таким кодом уже существует")
     permissions = _validate_permissions(payload.permissions)
     obj = RoleDefinition(
         code=code,
@@ -135,18 +135,18 @@ def update_role(
 ):
     obj = db.get(RoleDefinition, role_id)
     if not obj:
-        raise HTTPException(404, "Role not found")
+        raise HTTPException(404, "Роль не найдена")
     if payload.name is not None:
         obj.name = payload.name.strip() or obj.code
     if payload.description is not None:
         obj.description = payload.description
     if payload.permissions is not None:
         if obj.is_system:
-            raise HTTPException(400, "System role permissions are managed by the application")
+            raise HTTPException(400, "Права системной роли задаются приложением и не могут быть изменены")
         obj.permissions_json = json.dumps(_validate_permissions(payload.permissions), ensure_ascii=False)
     if payload.is_active is not None:
         if obj.is_system and not payload.is_active:
-            raise HTTPException(400, "System role cannot be disabled")
+            raise HTTPException(400, "Системную роль нельзя отключить")
         obj.is_active = payload.is_active
     db.add(AuditLog(user=actor.username, action="UPDATE_ROLE", entity="RoleDefinition",
                     entity_id=role_id, details=obj.code))
@@ -163,11 +163,11 @@ def delete_role(
 ):
     obj = db.get(RoleDefinition, role_id)
     if not obj:
-        raise HTTPException(404, "Role not found")
+        raise HTTPException(404, "Роль не найдена")
     if obj.is_system:
-        raise HTTPException(400, "System role cannot be deleted")
+        raise HTTPException(400, "Системную роль нельзя удалить")
     if db.query(User).filter_by(role=obj.code).first():
-        raise HTTPException(409, "Role is assigned to users")
+        raise HTTPException(409, "Роль назначена пользователям; сначала измените их роли")
     db.add(AuditLog(user=actor.username, action="DELETE_ROLE", entity="RoleDefinition",
                     entity_id=role_id, details=obj.code))
     db.delete(obj)

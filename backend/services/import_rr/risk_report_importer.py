@@ -169,7 +169,7 @@ def _refresh_portfolio_after_import(db: Session, res: ImportResult, report_date:
     if report_date is None:
         return
     db.flush()
-    counters = calculate_for_date(db, report_date, recalculate=True)
+    counters = calculate_for_date(db, report_date, recalculate=True, auto_events=False)
     res.portfolio_cdus = max(res.portfolio_cdus, int(counters.get("cdus_processed") or 0))
     res.portfolio_breaches += int(counters.get("breaches") or 0)
 
@@ -244,7 +244,7 @@ def import_risk_report(
             if existing:
                 if _meta_report_t1_checked(existing):
                     res.skipped = True
-                    res.warnings.append(f"уже импортирован, source_doc_id={existing.id}")
+                    res.warnings.append(f"файл уже импортирован; документ №{existing.id}")
                     res.source_doc_id = existing.id
                     res.file_date = existing.doc_date
                     res.report_dates = _meta_report_dates(existing)
@@ -252,7 +252,7 @@ def import_risk_report(
                         _refresh_portfolio_after_import(db, res, refresh_date)
                     return res
                 res.warnings.append(
-                    f"повторный импорт: старый source_doc_id={existing.id} без Report (T-1)"
+                    f"повторный импорт: в документе №{existing.id} нет листа «Отчёт за предыдущий день»"
                 )
 
         # 3. Создать SourceDocument запись
@@ -333,6 +333,10 @@ def import_risk_report(
         cash_ws = _mat(wb, "Cash")
         if cash_ws is not None:
             rows = parse_cash_sheet(cash_ws, fallback_date=file_date)
+            # the sheet carries the balance forward to the next day(s) with a zero
+            # cash flow — these rows are not balances of the report
+            rows = [r for r in rows if not file_date or r.get("snapshot_date") is None
+                    or r["snapshot_date"] <= file_date]
             res.cash_rows = _upsert_cash(db, rows, cdu_map, sd.id)
 
         # 7.2 MV
@@ -384,6 +388,7 @@ def import_risk_report(
         repo_ws = _mat(wb, "Repo")
         if repo_ws is not None:
             rows = parse_repo_sheet(repo_ws, fallback_date=file_date)
+            _attach_repo_collateral(db, wb, rows)
             res.repo_lots = _upsert_repo_lots(db, rows, cdu_map, sd.id, file_date)
 
         # 7.8 Deposit lots
@@ -931,6 +936,69 @@ def _enrich_reference_from_lot(db: Session, r: dict, cache: dict) -> None:
     ):
         if value is not None and getattr(ref, field, None) in (None, ""):
             setattr(ref, field, value)
+
+
+def _repo_collateral_from_trades(wb, deal_ids: set) -> dict:
+    """Collateral of the REPO deals of the slice from the «Trades» sheet.
+
+    The «Repo» sheet has the deal number but not the security; the opening
+    leg in «Trades» («Type of operations» = Repo, «Описание» = deal number)
+    carries the ticker and the number of securities.
+    """
+    ws = safe_sheet(wb, "Trades")
+    if ws is None or not deal_ids:
+        return {}
+    header = None
+    out: dict = {}
+    for row in ws.iter_rows(values_only=True):
+        if header is None:
+            names = [str(v or "").strip().lower() for v in row]
+            if "тикер" in names and any("type of operation" in n for n in names):
+                header = names
+                c_type = next(i for i, n in enumerate(names) if "type of operation" in n)
+                c_deal = names.index("описание") if "описание" in names else None
+                c_ticker = names.index("тикер")
+                c_qty = next((i for i, n in enumerate(names) if n.startswith("кол-во бумаг")), None)
+                if c_deal is None:
+                    return {}
+            continue
+        if len(row) <= max(c_type, c_deal, c_ticker):
+            continue
+        if str(row[c_type] or "").strip().lower() != "repo":
+            continue
+        deal = row[c_deal]
+        if isinstance(deal, float) and deal.is_integer():
+            deal = int(deal)
+        deal = str(deal).strip() if deal is not None else ""
+        if deal not in deal_ids or deal in out:
+            continue
+        ticker = str(row[c_ticker] or "").strip()
+        if not ticker:
+            continue
+        qty = row[c_qty] if c_qty is not None and c_qty < len(row) else None
+        out[deal] = {"ticker": ticker, "quantity": qty if isinstance(qty, (int, float)) else None}
+    return out
+
+
+def _attach_repo_collateral(db: Session, wb, rows: list[dict]) -> None:
+    deal_ids = {str(r["deal_id"]) for r in rows if r.get("deal_id")}
+    try:
+        found = _repo_collateral_from_trades(wb, deal_ids)
+    except Exception as exc:  # noqa: BLE001 — collateral is informative only
+        logger.warning(f"RR: collateral of REPO deals not read from Trades: {exc!r}")
+        return
+    if not found:
+        return
+    from services.portfolio.reference import ReferenceBook
+    refs = ReferenceBook(db)
+    for r in rows:
+        c = found.get(str(r.get("deal_id") or ""))
+        if not c:
+            continue
+        if not r.get("instrument_code"):
+            r["instrument_code"] = c["ticker"]
+        if not r.get("isin"):
+            r["isin"] = refs.isin_for(c["ticker"])
 
 
 def _upsert_repo_lots(db: Session, rows: list[dict], cdu_map: dict[str, int],

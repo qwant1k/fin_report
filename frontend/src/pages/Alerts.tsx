@@ -5,6 +5,8 @@ import toast from 'react-hot-toast'
 import { api } from '@/lib/api'
 import { AlertItem } from '@/lib/types'
 import { formatDate } from '@/lib/format'
+import { alertSeverityLabel, alertTypeLabel, localizeTechnicalText } from '@/lib/displayLabels'
+import { apiErrorMessage } from '@/lib/notifications'
 
 const sevIcon = {
   INFO: <Info className="w-4 h-4 text-blue-500" />,
@@ -28,9 +30,10 @@ export default function AlertsPage() {
   const resolve = useMutation({
     mutationFn: async (id: number) => (await api.put(`/dashboard/alerts/${id}/resolve`)).data,
     onSuccess: () => {
-      toast.success('Алерт отмечен как решённый')
+      toast.success('Уведомление закрыто и отмечено как решённое.')
       qc.invalidateQueries({ queryKey: ['alerts'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось закрыть уведомление')),
   })
 
   return (
@@ -47,9 +50,9 @@ export default function AlertsPage() {
               <div className="flex items-start gap-3">
                 {sevIcon[a.severity]}
                 <div>
-                  <div className="font-medium">{a.message}</div>
+                  <div className="font-medium">{localizeTechnicalText(a.message)}</div>
                   <div className="text-xs text-slate-500 mt-1">
-                    {formatDate(a.alert_date)} · тип: {a.alert_type} · severity: {a.severity}
+                    {formatDate(a.alert_date)} · {alertTypeLabel(a.alert_type)} · важность: {alertSeverityLabel(a.severity)}
                   </div>
                 </div>
               </div>

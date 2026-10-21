@@ -74,6 +74,7 @@ class BondPosition:
     snapshot_duration: Optional[float] = None
     trade_ytm: Optional[float] = None
     unit_nominal: Optional[float] = None   # face value of one security
+    source_doc_id: Optional[int] = None    # document the lot came from (RR / Trade Report / ...)
     # valuation (filled by ``value_bond``)
     maturity_date: Optional[date] = None
     price: Optional[float] = None
@@ -104,6 +105,8 @@ class MoneyMarketPosition:
     origin: str
     quantity: Optional[float] = None       # securities received as collateral
     collateral: Optional[str] = None       # ticker / ISIN of the collateral
+    source_doc_id: Optional[int] = None
+    trade_id: Optional[int] = None
     accrued: float = 0.0
     market_value: float = 0.0
     ytm: Optional[float] = None
@@ -179,7 +182,14 @@ class PortfolioState:
 class MarketData:
     """Prices and FX rates around ``as_of`` loaded once per calculation."""
 
-    def __init__(self, db: Session, as_of: date, *, stale_days: int = MAX_STALE_PRICE_DAYS):
+    def __init__(self, db: Session, as_of: date, *, stale_days: Optional[int] = None):
+        from services.formulas import params
+        params.refresh(db, force=True)
+        if stale_days is None:
+            stale_days = int(params.get("max_stale_price_days"))
+        self.stale_days = stale_days
+        order = ("market", "risk_parameters")
+        self.order = order if params.get("price_priority") == "market" else tuple(reversed(order))
         self.as_of = as_of
         lower = as_of - timedelta(days=stale_days)
         self.market: Dict[str, KasePrice] = {}
@@ -211,7 +221,9 @@ class MarketData:
         return (rate, True) if rate else (1.0, False)
 
     def quote(self, *identifiers: Optional[str]) -> Tuple[Optional[object], Optional[str]]:
-        for source, table in (("market", self.market), ("risk_parameters", self.risk)):
+        tables = {"market": self.market, "risk_parameters": self.risk}
+        for source in self.order:
+            table = tables[source]
             for ident in identifiers:
                 if not ident:
                     continue
@@ -226,7 +238,8 @@ class MarketData:
         # stale fallback — the freshest price of either family within the window
         best = None
         best_source = None
-        for source, table in (("market", self.market), ("risk_parameters", self.risk)):
+        for source in self.order:
+            table = tables[source]
             for ident in identifiers:
                 if not ident:
                     continue
@@ -350,6 +363,7 @@ def build_portfolio(
                 trade_date=lot.trade_date, settlement_date=lot.settlement_date or lot.trade_date,
                 purchase_price=lot.purchase_price,
                 origin="risk_report", seq=seq,
+                source_doc_id=lot.source_doc_id,
                 snapshot_date=base,
                 snapshot_price=lot.market_price,
                 snapshot_accrued=lot.accrued_interest,
@@ -406,7 +420,7 @@ def build_portfolio(
                 trade_date=t.trade_date, settlement_date=t.value_date,
                 purchase_price=t.clean_price or t.price_final or t.market_price,
                 origin="manual" if t.is_manual else "trade",
-                trade_id=t.id, seq=seq,
+                trade_id=t.id, seq=seq, source_doc_id=t.source_doc_id,
                 trade_ytm=bm.rate_fraction(t.ytm),
                 unit_nominal=(face / abs(float(t.quantity)) if t.quantity
                               else (float(ref.nominal) if ref is not None and ref.nominal else None)),
@@ -535,7 +549,7 @@ def value_bond(lot: BondPosition, ref, market: MarketData, as_of: date,
         price = lot.snapshot_price
         lot.price_source = "risk_report_carry"
         lot.price_date = lot.snapshot_date
-        lot.warnings.append(f"{lot.isin}: нет цены KASE ≤ {MAX_STALE_PRICE_DAYS} дн., оставлена цена Risk Report")
+        lot.warnings.append(f"{lot.isin}: нет цены KASE ≤ {market.stale_days} дн., оставлена цена Risk Report")
     elif lot.purchase_price is not None:
         price = lot.purchase_price
         lot.price_source = "purchase"
@@ -775,13 +789,14 @@ def _repos(db: Session, cdu_id: int, base: Optional[date], as_of: date,
             continue
         metrics = bm.repo_metrics(
             open_amount, t.repo_buyback_sum, t.value_date, close_date, as_of,
-            rate=bm.rate_fraction(t.repo_rate_pct),
+            rate=bm.rate_fraction(t.repo_rate_pct), base=_repo_base(None),
         )
         out.append(MoneyMarketPosition(
             kind="REPO", cdu_id=cdu_id, identifier=t.instrument_code or t.isin,
             deal_id=t.deal_id, open_date=t.value_date, close_date=close_date,
             open_amount=open_amount, close_amount=t.repo_buyback_sum,
-            rate=bm.rate_fraction(t.repo_rate_pct), base=366, origin="manual",
+            rate=bm.rate_fraction(t.repo_rate_pct), base=_repo_base(None), origin="manual",
+            trade_id=t.id, source_doc_id=t.source_doc_id,
             quantity=abs(float(t.quantity)) if t.quantity else None,
             collateral=t.isin or t.instrument_code,
             accrued=metrics["accrued"], market_value=metrics["market_value"],
@@ -790,21 +805,33 @@ def _repos(db: Session, cdu_id: int, base: Optional[date], as_of: date,
     return out
 
 
+def _repo_base(value: Optional[int]) -> int:
+    from services.formulas import params
+    return int(value or params.get("repo_default_base"))
+
+
+def _deposit_base(value: Optional[int]) -> int:
+    from services.formulas import params
+    return int(value or params.get("deposit_default_base"))
+
+
 def _repo_position(lot: RepoLot, open_date: date, close_date: Optional[date], as_of: date,
                    *, origin: str) -> MoneyMarketPosition:
     rate = bm.rate_fraction(lot.repo_rate_pct)
     metrics = bm.repo_metrics(
         float(lot.face_value or 0.0), lot.close_value, open_date, close_date, as_of,
-        rate=rate, base=int(lot.base or 366),
+        rate=rate, base=_repo_base(lot.base),
     )
     return MoneyMarketPosition(
         kind="REPO", cdu_id=lot.cdu_id, identifier=lot.instrument_code or lot.isin,
         deal_id=lot.deal_id, open_date=open_date, close_date=close_date,
         open_amount=float(lot.face_value or 0.0), close_amount=lot.close_value,
-        rate=rate, base=int(lot.base or 366), origin=origin,
+        rate=rate, base=_repo_base(lot.base), origin=origin,
+        source_doc_id=lot.source_doc_id, trade_id=lot.open_trade_id,
         accrued=metrics["accrued"], market_value=metrics["market_value"],
         ytm=metrics["ytm"] if metrics["ytm"] is not None else bm.rate_fraction(lot.ytm),
         duration=metrics["duration"],
+        collateral=(lot.isin or (lot.instrument_code if lot.instrument_code != lot.deal_id else None)),
     )
 
 
@@ -834,19 +861,20 @@ def _deposits(db: Session, cdu_id: int, base: Optional[date], as_of: date,
         if close_date is not None and close_date <= as_of:
             if origin == "risk_report" and base is not None and close_date > base:
                 closing = bm.deposit_metrics(float(lot.principal or 0.0), rate, open_date, close_date, close_date,
-                                             base=int(lot.base or 360))
+                                             base=_deposit_base(lot.base))
                 state.implied_cash.append({
                     "date": close_date, "amount": closing["market_value"], "kind": "DEPOSIT_CLOSE",
                     "reference": lot.deal_id or str(lot.id),
                 })
             continue
         metrics = bm.deposit_metrics(float(lot.principal or 0.0), rate, open_date, close_date, as_of,
-                                     base=int(lot.base or 360))
+                                     base=_deposit_base(lot.base))
         pos = MoneyMarketPosition(
             kind="DEPOSIT", cdu_id=cdu_id, identifier=lot.deal_id, deal_id=lot.deal_id,
             open_date=open_date, close_date=close_date,
             open_amount=float(lot.principal or 0.0), close_amount=None, rate=rate,
-            base=int(lot.base or 360), origin=origin,
+            base=_deposit_base(lot.base), origin=origin,
+            source_doc_id=lot.source_doc_id, trade_id=lot.open_trade_id,
             accrued=metrics["accrued"], market_value=metrics["market_value"],
             ytm=metrics["ytm"], duration=metrics["duration"],
         )

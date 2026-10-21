@@ -334,10 +334,13 @@ class TradeReportParser:
             if val is None:
                 continue
             normalised = re.sub(r"\s+", " ", str(val).strip().lower())
+            # KASE exports of some managers append « (Код)» to coded columns
+            # («К/П (Код)», «Статус (Код)»): the bare title is matched as well.
+            bare = re.sub(r"\s*\(код\)\s*$", "", normalised)
             matched = False
             # Pass 1: per-CDU exact match (overrides win).
             for key, aliases in self.alias_overrides.items():
-                if normalised in aliases:
+                if normalised in aliases or bare in aliases:
                     if key not in index:
                         index[key] = i
                     matched = True
@@ -346,7 +349,7 @@ class TradeReportParser:
                 continue
             # Pass 2: built-in exact match.
             for key, aliases in HEADER_ALIASES.items():
-                if normalised in aliases:
+                if normalised in aliases or bare in aliases:
                     if key not in index:
                         index[key] = i
                     matched = True

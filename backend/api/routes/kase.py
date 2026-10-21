@@ -151,7 +151,7 @@ def add_manual_price(payload: dict, db: Session = Depends(get_db),
         trade_date = date.fromisoformat(trade_date)
     instrument_code = str(payload.get("instrument_code") or "").strip()
     if not trade_date or not instrument_code:
-        raise HTTPException(400, "trade_date and instrument_code are required")
+        raise HTTPException(400, "Укажите дату сделки и код инструмента")
 
     source = str(payload.get("source") or "manual").strip().lower()
     if source not in {"manual", "external", "risk_parameters"}:
@@ -212,7 +212,7 @@ def list_risk_prices(
 
 
 @router.post("/risk/upload")
-async def upload_risk_prices(
+def upload_risk_prices(
     file: UploadFile = File(...),
     report_date: Optional[str] = Form(None),
     propagate: bool = Form(True),
@@ -222,7 +222,7 @@ async def upload_risk_prices(
     """Load the KASE risk-parameter workbook («Расчетные цены_ФР», .xls/.xlsx)
     downloaded by the user — for servers without access to kase.kz."""
     from services.kase.risk_client import parse_risk_prices_xls
-    content = await file.read()
+    content = file.file.read()
     if not content:
         raise HTTPException(400, "Пустой файл")
     rd = date.fromisoformat(report_date) if report_date else None

@@ -54,10 +54,10 @@ export default function Modal({ open, onClose, title, description, children, foo
             transition={{ type: 'spring', stiffness: 320, damping: 28 }}
             role="dialog"
             aria-modal="true"
-            className={cn('relative z-10 w-full overflow-hidden rounded-2xl bg-white shadow-2xl', SIZES[size])}
+            className={cn('relative z-10 flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-2xl bg-white shadow-2xl', SIZES[size])}
           >
             {(title || description) && (
-              <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
+              <div className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
                 <div className="min-w-0">
                   {title && <h2 className="text-lg font-semibold text-slate-900">{title}</h2>}
                   {description && <p className="mt-0.5 text-sm text-slate-500">{description}</p>}
@@ -72,8 +72,8 @@ export default function Modal({ open, onClose, title, description, children, foo
                 </button>
               </div>
             )}
-            {children && <div className="px-5 py-4">{children}</div>}
-            {footer && <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50/60 px-5 py-3">{footer}</div>}
+            {children && <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>}
+            {footer && <div className="flex shrink-0 justify-end gap-2 border-t border-slate-100 bg-slate-50/60 px-5 py-3">{footer}</div>}
           </motion.div>
         </div>
       )}

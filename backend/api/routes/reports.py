@@ -135,10 +135,16 @@ def regenerate(
     if not obj:
         raise HTTPException(404, "Отчёт не найден")
     if not can_be_regenerated(obj):
+        status_labels = {
+            "draft": "черновик",
+            "pending_approval": "на утверждении",
+            "approved": "утверждён",
+            "rejected": "отклонён",
+        }
         raise HTTPException(
             409,
-            f"Регенерация запрещена в статусе {obj.status!r}. "
-            f"Создайте новую версию через /api/export.",
+            f"Отчёт со статусом «{status_labels.get(obj.status, 'неизвестный')}» нельзя пересобрать. "
+            "Сформируйте новую версию отчёта.",
         )
     if obj.report_type == "DAILY_PDF":
         out = generate_pdf_report(db, obj.report_date, settings.report_path)

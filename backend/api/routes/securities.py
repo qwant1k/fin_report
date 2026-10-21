@@ -145,6 +145,8 @@ def _reference_to_dict(ref: Optional[InstrumentReference]) -> Optional[dict[str,
         "coupon_rate_pct": ref.coupon_rate_pct,
         "coupon_rate_text": ref.coupon_rate_text,
         "coupon_type": ref.coupon_type,
+        "float_index": ref.float_index,
+        "float_margin_pct": ref.float_margin_pct,
         "frequency": ref.frequency,
         "base": ref.base,
         "base_code": ref.base_code,
@@ -229,7 +231,8 @@ def summary(db: Session = Depends(get_db)) -> dict[str, Any]:
 
 _REF_FIELDS = (
     "ticker_kase", "instrument_name", "security_type", "issuer", "issuer_type", "bond_type",
-    "coupon_rate_pct", "coupon_rate_text", "coupon_type", "frequency", "base", "nominal",
+    "coupon_rate_pct", "coupon_rate_text", "coupon_type", "float_index", "float_margin_pct",
+    "frequency", "base", "nominal",
     "quotation_type", "currency", "rating", "rating_agency", "notes",
 )
 _REF_DATES = ("start_date", "maturity_date", "last_coupon_date", "next_coupon_date")
@@ -270,6 +273,17 @@ def upsert_reference(db: Session, payload: dict[str, Any], actor: Optional[str],
         mapping["nominal"] = mapping["nominal_per_unit"]
     if mapping.get("category") and not mapping.get("bond_type"):
         mapping["bond_type"] = _CATEGORY_TO_TYPE.get(mapping["category"])
+    if mapping.get("float_margin_pct") not in (None, ""):
+        try:
+            mapping["float_margin_pct"] = float(str(mapping["float_margin_pct"]).replace(" ", "").replace(",", "."))
+        except ValueError:
+            raise HTTPException(400, "Маржа плавающего купона должна быть числом (в процентах)")
+    if mapping.get("float_index"):
+        mapping["float_index"] = str(mapping["float_index"]).strip().upper()
+    for f in ("float_index", "float_margin_pct"):
+        # an explicitly emptied field of the form clears the floating-rate settings
+        if overwrite and f in mapping and mapping[f] in (None, ""):
+            setattr(ref, f, None)
     for f in _REF_FIELDS:
         if f not in mapping or mapping[f] in (None, ""):
             continue
@@ -428,7 +442,8 @@ async def fetch_coupon_schedule_from_kase(identifier: str, db: Session = Depends
     write_audit(db, user=user.username if user else None, action="COUPON_SCHEDULE_FROM_KASE",
                 entity="CouponSchedule", entity_id=None, details=result)
     db.commit()
-    return {**result, **get_coupon_schedule(result["isin"], db)}
+    schedule = get_coupon_schedule(result["isin"], db)
+    return {**result, **schedule, "rows_count": len(schedule["rows"])}
 
 
 @router.post("/reference/coupons/fetch-kase-all",
@@ -457,7 +472,7 @@ async def fetch_all_coupon_schedules(
 
 @router.post("/reference/coupons/import",
              dependencies=[Depends(require_user), Depends(require_permission("securities.edit"))])
-async def import_coupon_schedule(
+def import_coupon_schedule(
     file: UploadFile = File(...),
     isin: Optional[str] = Form(None),
     db: Session = Depends(get_db),
@@ -475,7 +490,7 @@ async def import_coupon_schedule(
     if suffix not in (".xlsx", ".xlsm", ".csv", ".txt"):
         raise HTTPException(400, "Поддерживаются XLSX и CSV")
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(await file.read())
+        tmp.write(file.file.read())
         path = _Path(tmp.name)
     try:
         grouped = parse_schedule_grid(read_grid(path))

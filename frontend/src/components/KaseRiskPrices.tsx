@@ -4,6 +4,8 @@ import { RefreshCw, Search, Upload } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
+import { sourceLabel as sourceDisplayLabel } from '@/lib/displayLabels'
+import { apiErrorMessage } from '@/lib/notifications'
 import { useAuthStore } from '@/lib/auth'
 import { formatDate, formatNumber } from '@/lib/format'
 
@@ -28,7 +30,7 @@ type RiskPrice = {
 function sourceLabel(source: string) {
   if (source === 'kase_gateway' || source === 'risk_parameters') return 'KASE (риск-параметры)'
   if (source.startsWith('file:')) return `Файл: ${source.slice(5)}`
-  return source
+  return sourceDisplayLabel(source)
 }
 
 /** «Расчетные цены_ФР» — prices calculated by KASE from risk parameters.
@@ -50,10 +52,10 @@ export default function KaseRiskPrices({ reportDate }: { reportDate: string }) {
       return (await api.post('/kase/risk/refresh', null, { params: { report_date: reportDate } })).data
     },
     onSuccess: (r) => {
-      toast.success(`Цены по риск-параметрам: ${r.risk?.fetched ?? 0} строк`)
+      toast.success(`Риск-параметры KASE обновлены: загружено цен ${r.risk?.fetched ?? 0}.`)
       qc.invalidateQueries({ queryKey: ['kase-risk-prices'] })
     },
-    onError: (err: any) => toast.error(err?.response?.data?.detail ?? err?.message ?? 'KASE не вернул файл риск-параметров'),
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось получить риск-параметры KASE')),
   })
 
   const upload = useMutation({
@@ -64,10 +66,10 @@ export default function KaseRiskPrices({ reportDate }: { reportDate: string }) {
       return (await api.post('/kase/risk/upload', form)).data
     },
     onSuccess: (r) => {
-      toast.success(`Загружено ${r.risk?.fetched ?? 0} цен на ${formatDate(r.report_date)}`)
+      toast.success(`Файл риск-параметров обработан: загружено цен ${r.risk?.fetched ?? 0} на ${formatDate(r.report_date)}.`)
       qc.invalidateQueries({ queryKey: ['kase-risk-prices'] })
     },
-    onError: (err: any) => toast.error(err?.response?.data?.detail ?? 'Не удалось загрузить файл'),
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось обработать файл риск-параметров')),
   })
 
   const rows = useMemo(() => {

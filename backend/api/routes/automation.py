@@ -52,7 +52,7 @@ def daily_run(
 
     start = req.date_from or req.target_date
     if start > req.target_date:
-        raise HTTPException(400, "date_from не может быть позже target_date")
+        raise HTTPException(400, "Начальная дата не может быть позже конечной даты")
     if (req.target_date - start).days > 92:
         raise HTTPException(400, "Период догоняющего запуска не более 92 дней")
     coupons_total: dict = {}
@@ -80,7 +80,7 @@ def daily_run(
             days += 1
     except Exception as exc:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=f"Автоматическая обработка завершилась с ошибкой: {exc}")
     return DailyRunResponse(
         target_date=req.target_date.isoformat(),
         coupons=coupons_total,

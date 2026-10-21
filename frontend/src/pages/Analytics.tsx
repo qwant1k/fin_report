@@ -36,6 +36,7 @@ import clsx from 'clsx'
 import { api } from '@/lib/api'
 import { EmptyState, LoadingBlock } from '@/components/ui'
 import { formatDate, formatNumber, formatPct } from '@/lib/format'
+import { portfolioTypeLabel, sourceLabel } from '@/lib/displayLabels'
 
 type ChartType = 'line' | 'area' | 'bar' | 'pie' | 'table'
 
@@ -142,7 +143,7 @@ function seriesLabel(row: WorkbenchRow, groupBy: string[]): string {
   if (groupBy.includes('category') && groupBy.includes('cdu')) return `${row.cdu_short ?? ''} ${row.category ?? ''}`.trim()
   if (groupBy.includes('category')) return row.category || 'Категория'
   if (groupBy.includes('cdu')) return row.cdu_short || row.cdu_name || 'ЧДУ'
-  if (groupBy.includes('portfolio_type')) return row.portfolio_type ? PORTFOLIO_TYPE_RU[row.portfolio_type] ?? row.portfolio_type : 'Тип'
+  if (groupBy.includes('portfolio_type')) return row.portfolio_type ? PORTFOLIO_TYPE_RU[row.portfolio_type] ?? portfolioTypeLabel(row.portfolio_type) : 'Тип'
   return 'Значение'
 }
 
@@ -389,7 +390,7 @@ export default function AnalyticsPage() {
           </button>
         </div>
         <div className="relative grid grid-cols-2 border-t border-white/10 md:grid-cols-4">
-          <HeaderStat label="Источник" value={meta.data?.sources.find((x) => x.value === source)?.label ?? source} />
+          <HeaderStat label="Источник" value={meta.data?.sources.find((x) => x.value === source)?.label ?? sourceLabel(source)} />
           <HeaderStat label="Метрика" value={meta.data?.metrics.find((x) => x.value === metric)?.label ?? metric} />
           <HeaderStat label="Группировка" value={groupBy.length ? groupBy.join(', ') : 'нет'} />
           <HeaderStat label="Фильтры" value={formatNumber(activeFilters, 0)} />
@@ -553,7 +554,7 @@ export default function AnalyticsPage() {
             <StatCard accent="bg-cyan-500" label="Строк" value={formatNumber(workbench.data?.rows_total ?? 0, 0)} subvalue={`Показано ${formatNumber(rows.length, 0)}`} />
             <StatCard accent="bg-emerald-500" label="Market value" value={`${formatNumber(totals.total, 0)} ₸`} subvalue={formatMetric(metric, totals.metricTotal)} />
             <StatCard accent="bg-amber-500" label="YTM" value={formatPct(totals.ytm)} subvalue={`Инструментов: ${formatNumber(totals.count, 0)}`} />
-            <StatCard accent="bg-rose-500" label="Duration" value={formatNumber(totals.duration, 2)} subvalue={to ? formatDate(to) : '—'} />
+            <StatCard accent="bg-rose-500" label="Дюрация" value={formatNumber(totals.duration, 2)} subvalue={to ? formatDate(to) : '—'} />
           </section>
 
           <section className="soft-panel overflow-hidden">
@@ -704,7 +705,7 @@ function AnalyticsTable({
             <th className="px-3 py-2 text-right">Метрика</th>
             <th className="px-3 py-2 text-right">MV</th>
             <th className="px-3 py-2 text-right">YTM</th>
-            <th className="px-3 py-2 text-right">Duration</th>
+            <th className="px-3 py-2 text-right">Дюрация</th>
             <th className="px-3 py-2 text-right">Кол-во</th>
           </tr>
         </thead>
@@ -716,7 +717,7 @@ function AnalyticsTable({
               <td className="whitespace-nowrap px-3 py-2 text-slate-600">
                 {(() => {
                   const type = row.portfolio_type ?? (row.cdu_id ? cduTypeById.get(row.cdu_id) : null)
-                  return type ? PORTFOLIO_TYPE_RU[type] ?? type : '—'
+                  return type ? PORTFOLIO_TYPE_RU[type] ?? portfolioTypeLabel(type) : '—'
                 })()}
               </td>
               <td className="whitespace-nowrap px-3 py-2 text-slate-700">{row.category ?? '—'}</td>

@@ -526,7 +526,7 @@ def import_single_trade_report_xlsx(
     from .trade_report_parser import TradeReportParser
     parsed = TradeReportParser(file_path).parse()
     if parsed.cdu_name is None:
-        return {"error": "CDU not detected", "warnings": parsed.warnings}
+        return {"error": "ЧДУ не удалось определить", "warnings": parsed.warnings}
     counters = import_trades_from_parsed(db, parsed, uploaded_by=uploaded_by, source_doc_id=source_doc_id)
     return {"cdu_name": parsed.cdu_name,
             "trade_date": parsed.trade_date.isoformat() if parsed.trade_date else None,

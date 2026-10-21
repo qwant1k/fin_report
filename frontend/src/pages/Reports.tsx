@@ -24,6 +24,8 @@ import { useConfirm } from '@/lib/confirm'
 import { useWorkContextStore } from '@/lib/workContext'
 import { formatDate } from '@/lib/format'
 import { GeneratedReport, ReportStatus } from '@/lib/types'
+import { reportTypeLabel } from '@/lib/displayLabels'
+import { apiErrorMessage } from '@/lib/notifications'
 
 const STATUS_LABEL: Record<ReportStatus, string> = {
   draft: 'Черновик',
@@ -106,49 +108,60 @@ export default function ReportsPage() {
       downloadBlob(resp.data, `risk_report_${reportDate.replaceAll('-', '')}.${type}`)
       return type
     },
-    onSuccess: () => {
-      toast.success('Отчёт сформирован')
+    onSuccess: (type) => {
+      toast.success(`Отчёт за ${formatDate(reportDate)} сформирован и скачан в формате ${type.toUpperCase()}.`)
       invalidate()
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, `Не удалось сформировать отчёт за ${formatDate(reportDate)}`)),
   })
 
   const submit = useMutation({
     mutationFn: async (id: number) => (await api.post(`/reports/${id}/submit`)).data,
-    onSuccess: () => { toast.success('Отправлено на утверждение'); invalidate() },
+    onSuccess: () => { toast.success('Отчёт отправлен на утверждение.'); invalidate() },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось отправить отчёт на утверждение')),
   })
 
   const approve = useMutation({
     mutationFn: async (id: number) => (await api.post(`/reports/${id}/approve`)).data,
-    onSuccess: () => { toast.success('Отчёт утверждён'); invalidate() },
+    onSuccess: () => { toast.success('Отчёт утверждён и отмечен официальной версией.'); invalidate() },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось утвердить отчёт')),
   })
 
   const reject = useMutation({
     mutationFn: async ({ id, comment }: { id: number; comment: string }) =>
       (await api.post(`/reports/${id}/reject`, { comment })).data,
     onSuccess: () => {
-      toast.success('Отчёт отклонён')
+      toast.success('Отчёт отклонён; причина сохранена и доступна автору.')
       setRejectFor(null)
       setRejectComment('')
       invalidate()
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось отклонить отчёт')),
   })
 
   const regenerate = useMutation({
     mutationFn: async (id: number) => (await api.post(`/reports/${id}/regenerate`)).data,
-    onSuccess: () => { toast.success('Отчёт перегенерирован'); invalidate() },
+    onSuccess: () => { toast.success('Отчёт пересобран из актуальных данных; создана новая версия.'); invalidate() },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось пересобрать отчёт')),
   })
 
   const remove = useMutation({
     mutationFn: async (id: number) => (await api.delete(`/reports/${id}`)).data,
-    onSuccess: () => { toast.success('Удалено'); invalidate() },
+    onSuccess: () => { toast.success('Отчёт и файл его версии удалены.'); invalidate() },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось удалить отчёт')),
   })
 
   const handleDownload = async (report: GeneratedReport) => {
-    const resp = await api.get(`/reports/${report.id}/download`, { responseType: 'blob' })
-    downloadBlob(resp.data, filenameFromPath(report.file_path, `report_${report.id}`))
+    try {
+      const resp = await api.get(`/reports/${report.id}/download`, { responseType: 'blob' })
+      downloadBlob(resp.data, filenameFromPath(report.file_path, `report_${report.id}`))
+      toast.success(`${reportLabel(report)} скачан.`)
+    } catch (error) {
+      toast.error(apiErrorMessage(error, `Не удалось скачать ${reportLabel(report)}`))
+    }
   }
 
-  const reportLabel = (r: GeneratedReport) => `${r.report_type} v${r.version} от ${formatDate(r.report_date)}`
+  const reportLabel = (r: GeneratedReport) => `${reportTypeLabel(r.report_type)} v${r.version} от ${formatDate(r.report_date)}`
 
   const handleSubmit = async (r: GeneratedReport) => {
     const { confirmed } = await confirm({
@@ -190,7 +203,7 @@ export default function ReportsPage() {
   const confirmReject = () => {
     if (!rejectFor) return
     if (!rejectComment.trim()) {
-      toast.error('Комментарий обязателен')
+      toast.error('Укажите причину отклонения отчёта.')
       return
     }
     reject.mutate({ id: rejectFor.id, comment: rejectComment.trim() })
@@ -268,7 +281,7 @@ export default function ReportsPage() {
                     {r.report_type.includes('PDF')
                       ? <FileText className="w-4 h-4 text-red-500" />
                       : <FileSpreadsheet className="w-4 h-4 text-emerald-600" />}
-                    {r.report_type}
+                    {reportTypeLabel(r.report_type)}
                   </td>
                   <td>v{r.version}</td>
                   <td>

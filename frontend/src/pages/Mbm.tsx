@@ -7,6 +7,8 @@ import { api } from '@/lib/api'
 import { useAuthStore } from '@/lib/auth'
 import { MBM } from '@/lib/types'
 import { formatDate, formatNumber } from '@/lib/format'
+import { sourceLabel } from '@/lib/displayLabels'
+import { apiErrorMessage } from '@/lib/notifications'
 
 const DEFAULT_ARCHIVE_START = '2020-01-01'
 
@@ -41,9 +43,10 @@ export default function MbmPage() {
         },
       })).data as MBM[],
     onSuccess: (rows) => {
-      toast.success(`MBM загружен: ${rows.length} записей`)
+      toast.success(`Архив MBM обновлён: загружено записей ${rows.length}.`)
       qc.invalidateQueries({ queryKey: ['mbm'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось загрузить архив MBM с KASE')),
   })
 
   const manual = useMutation({
@@ -55,16 +58,17 @@ export default function MbmPage() {
         mod_duration: manualModDur ? Number(manualModDur) : null,
       })).data,
     onSuccess: () => {
-      toast.success('MBM сохранён')
+      toast.success(`Значение MBM за ${manualDate} сохранено вручную.`)
       qc.invalidateQueries({ queryKey: ['mbm'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось сохранить значение MBM')),
   })
 
   return (
     <div className="space-y-6">
       <header className="flex items-center justify-between flex-wrap gap-2">
         <div>
-          <h1 className="text-2xl font-bold">MBM index</h1>
+          <h1 className="text-2xl font-bold">Индекс MBM</h1>
           <p className="text-sm text-slate-500">Бенчмарк-доходность и дюрация (НБ РК / KASE)</p>
         </div>
       </header>
@@ -87,9 +91,9 @@ export default function MbmPage() {
         <h2 className="font-semibold">Ввод вручную</h2>
         <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
           <input type="date" className="input" value={manualDate} onChange={(e) => setManualDate(e.target.value)} />
-          <input className="input" placeholder="MBM index, напр. 1214.9" value={manualYtm} onChange={(e) => setManualYtm(e.target.value)} />
-          <input className="input" placeholder="Duration (лет)" value={manualDur} onChange={(e) => setManualDur(e.target.value)} />
-          <input className="input" placeholder="ModDuration" value={manualModDur} onChange={(e) => setManualModDur(e.target.value)} />
+          <input className="input" placeholder="Значение индекса MBM, например 1214,9" value={manualYtm} onChange={(e) => setManualYtm(e.target.value)} />
+          <input className="input" placeholder="Дюрация, лет" value={manualDur} onChange={(e) => setManualDur(e.target.value)} />
+          <input className="input" placeholder="Модифицированная дюрация" value={manualModDur} onChange={(e) => setManualModDur(e.target.value)} />
           <button onClick={() => manual.mutate()} className="btn-primary">
             <Plus className="w-4 h-4" /> Сохранить
           </button>
@@ -101,7 +105,7 @@ export default function MbmPage() {
         <div className="table-wrap">
           <table className="kdif-table">
             <thead>
-              <tr><th>Дата</th><th>MBM index</th><th>Duration</th><th>ModDuration</th><th>Источник</th><th>Получено</th></tr>
+              <tr><th>Дата</th><th>Индекс MBM</th><th>Дюрация</th><th>Модифицированная дюрация</th><th>Источник</th><th>Получено</th></tr>
             </thead>
             <tbody>
               {(data ?? []).map((r) => (
@@ -110,7 +114,7 @@ export default function MbmPage() {
                   <td className="text-right">{r.ytm_value != null ? formatNumber(r.ytm_value, 4) : '—'}</td>
                   <td className="text-right">{r.duration != null ? formatNumber(r.duration, 2) : '—'}</td>
                   <td className="text-right">{r.mod_duration != null ? formatNumber(r.mod_duration, 2) : '—'}</td>
-                  <td>{r.source}</td>
+                  <td>{sourceLabel(r.source)}</td>
                   <td>{formatDate(r.fetched_at)}</td>
                 </tr>
               ))}

@@ -31,7 +31,7 @@ router = APIRouter(
 
 # ─────────── Single-file upload (XLSM Risk Report) ───────────
 @router.post("/risk-report")
-async def upload_single_rr(
+def upload_single_rr(
     file: UploadFile = File(...),
     skip_if_imported: bool = Form(False),
     password: Optional[str] = Form(None),
@@ -87,7 +87,7 @@ async def upload_single_rr(
 
 # ─────────── Bulk folder import (background) ───────────
 @router.post("/risk-report/bulk-folder")
-async def import_rr_folder(
+def import_rr_folder(
     payload: dict,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -100,7 +100,7 @@ async def import_rr_folder(
     """
     folder_str = payload.get("folder_path")
     if not folder_str:
-        raise HTTPException(400, "folder_path обязателен")
+        raise HTTPException(400, "Укажите путь к папке с отчётами")
     folder = Path(folder_str)
     if not folder.exists() or not folder.is_dir():
         raise HTTPException(400, (
@@ -182,7 +182,7 @@ def list_jobs(limit: int = 50, db: Session = Depends(get_db)):
 def get_job(job_id: int, db: Session = Depends(get_db)):
     j = db.get(ImportJob, job_id)
     if not j:
-        raise HTTPException(404, "ImportJob не найден")
+        raise HTTPException(404, "Задача импорта не найдена")
     return {
         "id": j.id,
         "job_type": j.job_type,

@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
 import { api } from '@/lib/api'
+import { sourceLabel } from '@/lib/displayLabels'
+import { apiErrorMessage } from '@/lib/notifications'
 import { useWorkContextStore } from '@/lib/workContext'
 import { Table2, Calendar, Building2 } from 'lucide-react'
+import toast from 'react-hot-toast'
 
 interface PositionRow {
   cdu_id: number
@@ -23,7 +26,7 @@ interface PositionRow {
 }
 
 const PRICE_SOURCE_LABEL: Record<string, string> = {
-  risk_report: 'Risk Report',
+  risk_report: 'Отчёт о рисках',
   market: 'KASE рынок',
   risk_parameters: 'KASE риск-параметры',
   market_stale: 'KASE (старая дата)',
@@ -74,8 +77,8 @@ export default function PositionsPage() {
       if (cduId) params.cdu_id = cduId
       const res = await api.get<PositionsResponse>('/positions/as-of', { params })
       setData(res.data)
-    } catch {
-      alert('Ошибка загрузки позиций')
+    } catch (error) {
+      toast.error(apiErrorMessage(error, 'Не удалось загрузить позиции'))
     } finally {
       setLoading(false)
     }
@@ -146,7 +149,7 @@ export default function PositionsPage() {
           </div>
           {data.base_dates && Object.keys(data.base_dates).length > 0 && (
             <div className="px-4 py-2 text-xs text-slate-500 border-b border-slate-100">
-              База (последний Risk Report):{' '}
+              База (последний отчёт о рисках):{' '}
               {Object.entries(data.base_dates).map(([k, v]) => `${k} — ${v}`).join('; ')}.
               Далее позиции перенесены операциями Trades и переоценены на выбранную дату.
             </div>
@@ -193,7 +196,7 @@ export default function PositionsPage() {
                   <td className="px-3 py-2 text-right">{r.ytm == null ? '—' : `${(r.ytm * 100).toFixed(2)}%`}</td>
                   <td className="px-3 py-2 text-right">{fmt(r.duration, 3)}</td>
                   <td className="px-3 py-2 text-xs text-slate-500">
-                    {r.price_source ? PRICE_SOURCE_LABEL[r.price_source] ?? r.price_source : '—'}
+                    {r.price_source ? PRICE_SOURCE_LABEL[r.price_source] ?? sourceLabel(r.price_source) : '—'}
                     {r.lots && r.lots > 1 ? ` · ${r.lots} лота` : ''}
                   </td>
                   <td className="px-3 py-2">{r.last_trade_date ?? '-'}</td>
@@ -202,7 +205,7 @@ export default function PositionsPage() {
               {data.rows.length === 0 && (
                 <tr>
                   <td colSpan={13} className="px-4 py-6 text-center text-slate-400">
-                    Нет данных — загрузите Risk Report / Trade Report или измените фильтр
+                    Нет данных — загрузите отчёт о рисках или отчёт о сделках либо измените фильтр
                   </td>
                 </tr>
               )}

@@ -562,7 +562,12 @@ def test_rr_vs_holdings_reconciliation_matches_real_recon_file(in_memory_db):
         result = run_reconciliation(db, halyk.id, recon_date, "rr_vs_holdings")
 
     assert parsed["warnings"] == []
-    assert result.status == "OK"
+    # section totals agree, but the reconciliation is line by line (since 05.10.2026):
+    # one synthetic lot «KZSEC0000001» is not the manager's issues
+    details = json.loads(result.details_json)
+    assert all(s["status"] == "OK" for s in details["summary"])
+    assert result.status == "MISMATCH"
+    assert {s["status"] for s in details["securities"]} == {"ONLY_OURS", "ONLY_CDU"}
     assert result.expected_value == pytest.approx(totals["total"])
     assert result.actual_value == pytest.approx(totals["total"])
     assert abs(result.deviation) <= 0.01  # rounding of the manager's «Итого активов»

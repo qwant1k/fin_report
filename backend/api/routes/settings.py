@@ -241,7 +241,7 @@ def upsert_formula(payload: FormulaDefinitionUpsert, db: Session = Depends(get_d
     try:
         json.loads(payload.expression_json)
     except Exception as exc:
-        raise HTTPException(400, f"expression_json должен быть валидным JSON: {exc}")
+        raise HTTPException(400, f"Формула должна быть записана в корректном формате: {exc}")
     if obj:
         for k, v in payload.model_dump().items():
             setattr(obj, k, v)

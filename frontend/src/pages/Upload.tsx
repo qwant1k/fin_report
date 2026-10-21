@@ -18,6 +18,8 @@ import { AnimatePresence, motion } from 'framer-motion'
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
+import { apiErrorMessage } from '@/lib/notifications'
+import { processStatusLabel } from '@/lib/displayLabels'
 import { cn } from '@/lib/cn'
 import { Modal, PageHeader } from '@/components/ui'
 import { useAuthStore } from '@/lib/auth'
@@ -109,19 +111,19 @@ export default function UploadPage() {
   })
 
   const handleUploadResult = (r: any, jobId?: string) => {
-    toast.success(`${r.cdu_name ?? 'Файл'} • строк: ${r.rows_parsed}, пропущено: ${r.rows_skipped}`)
+    toast.success(`Отчёт ${r.cdu_name ? `ЧДУ «${r.cdu_name}»` : ''} загружен: импортировано строк ${r.rows_parsed}, пропущено ${r.rows_skipped}.`)
     const pc = r?.price_check
     if (pc) {
       if (pc.flagged > 0) {
         toast(
-          `Расхождение с KASE: ${pc.flagged} из ${pc.checked} сделок заменены на цену KASE`,
+          `Сверка с KASE: в ${pc.flagged} из ${pc.checked} сделок использована цена KASE из-за расхождения.`,
           { icon: '⚑', duration: 6000 },
         )
       } else if (pc.checked > 0) {
-        toast(`Сверка с KASE: ${pc.checked} сделок без расхождений`, { icon: '✓' })
+        toast(`Сверка с KASE завершена: ${pc.checked} сделок без расхождений.`, { icon: '✓' })
       }
       if (pc.missing_kase > 0) {
-        toast(`KASE-цена не найдена для ${pc.missing_kase} сделок`, { icon: 'ℹ️' })
+        toast(`Для ${pc.missing_kase} сделок цена KASE не найдена; сохранена исходная цена.`, { icon: 'ℹ️' })
       }
     }
     if (jobId) {
@@ -180,13 +182,9 @@ export default function UploadPage() {
         })
         return
       }
-      const message =
-        (typeof detail === 'string' && detail) ||
-        axErr.response?.statusText ||
-        axErr.message ||
-        'Ошибка загрузки'
+      const message = apiErrorMessage(err, `Не удалось загрузить файл «${file.name}»`)
       updateJob(id, { phase: 'failed', message, finishedAt: Date.now() })
-      // other errors are already surfaced by the global interceptor
+      toast.error(message)
     }
   }
 
@@ -232,14 +230,15 @@ export default function UploadPage() {
       handleUploadResult(r, jobId)
       setDuplicate(null)
     } catch (err) {
+      const message = apiErrorMessage(err, 'Не удалось обработать дубликат файла')
       if (jobId) {
         updateJob(jobId, {
           phase: 'failed',
-          message: 'Не удалось обработать дубликат',
+          message,
           finishedAt: Date.now(),
         })
       }
-      toast.error('Не удалось обработать дубликат')
+      toast.error(message)
     } finally {
       setDuplicateBusy(null)
     }
@@ -249,17 +248,19 @@ export default function UploadPage() {
     mutationFn: async ({ id, cduId }: { id: number; cduId: number }) =>
       (await api.put(`/upload/files/${id}/cdu`, null, { params: { cdu_id: cduId } })).data,
     onSuccess: () => {
-      toast.success('ЧДУ обновлён')
+      toast.success('Файл привязан к выбранному ЧДУ; импортированные данные обновлены.')
       qc.invalidateQueries({ queryKey: ['trade-files'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось изменить ЧДУ для файла')),
   })
 
   const remove = useMutation({
     mutationFn: async (id: number) => (await api.delete(`/upload/files/${id}`)).data,
     onSuccess: () => {
-      toast.success('Файл удалён')
+      toast.success('Файл и связанные с ним импортированные данные удалены.')
       qc.invalidateQueries({ queryKey: ['trade-files'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось удалить файл отчёта о сделках')),
   })
 
   return (
@@ -267,7 +268,7 @@ export default function UploadPage() {
       <PageHeader
         icon={UploadCloud}
         title="Загрузка отчётов от ЧДУ"
-        subtitle="XLSX выгрузка KASE-сделок (TradeReport)"
+        subtitle="Выгрузка сделок KASE в формате XLSX"
       />
 
       {canUpload && (
@@ -409,15 +410,15 @@ export default function UploadPage() {
                   <td>{f.rows_parsed} / {f.rows_skipped}</td>
                   <td>
                     {f.status === 'PARSED' || f.status === 'IMPORTED'
-                      ? <span className="badge-ok"><CheckCircle2 className="w-3 h-3 inline mr-1" />{f.status}</span>
-                      : <span className="badge-warn"><AlertCircle className="w-3 h-3 inline mr-1" />{f.status}</span>}
+                      ? <span className="badge-ok"><CheckCircle2 className="w-3 h-3 inline mr-1" />{processStatusLabel(f.status)}</span>
+                      : <span className="badge-warn"><AlertCircle className="w-3 h-3 inline mr-1" />{processStatusLabel(f.status)}</span>}
                   </td>
                   <td>
                     {canUpload && (
                       <button
                         onClick={async () => {
                           const { confirmed } = await confirm({
-                            title: 'Удалить файл Trade Report?',
+                            title: 'Удалить файл отчёта о сделках?',
                             description: `«${f.filename}» и связанные с ним сделки будут удалены безвозвратно.`,
                             tone: 'danger',
                             confirmLabel: 'Удалить',
@@ -470,7 +471,7 @@ export default function UploadPage() {
               <div><span className="text-slate-500">Загружено:</span> {formatDate(duplicate.existing.uploaded_at) || '—'}</div>
               <div><span className="text-slate-500">Кем:</span> {duplicate.existing.uploaded_by ?? '—'}</div>
               <div><span className="text-slate-500">Строк:</span> {duplicate.existing.rows_parsed}</div>
-              <div><span className="text-slate-500">Статус:</span> {duplicate.existing.status}</div>
+              <div><span className="text-slate-500">Статус:</span> {processStatusLabel(duplicate.existing.status)}</div>
             </div>
             <div className="grid grid-cols-1 gap-2">
               <button disabled={!!duplicateBusy} onClick={() => resolveDuplicate('replace')} className="btn-primary justify-center">

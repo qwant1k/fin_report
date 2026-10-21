@@ -9,6 +9,8 @@ import { useWorkContextStore } from '@/lib/workContext'
 import { KasePrice } from '@/lib/types'
 import { formatDate, formatNumber } from '@/lib/format'
 import KaseRiskPrices from '@/components/KaseRiskPrices'
+import { sourceLabel } from '@/lib/displayLabels'
+import { apiErrorMessage } from '@/lib/notifications'
 
 function toNumberOrNull(value: string): number | null {
   const normalized = value.trim().replace(/\s/g, '').replace(',', '.')
@@ -55,13 +57,11 @@ export default function KasePage() {
       return (await api.post('/kase/refresh', null, { params: { report_date: reportDate } })).data
     },
     onSuccess: (r) => {
-      toast.success(`Рыночные цены: ${r.fetched} (новых ${r.new_rows}); по риск-параметрам: ${r.risk?.fetched ?? 0}`)
+      toast.success(`Данные KASE обновлены: рыночных цен ${r.fetched}, новых ${r.new_rows}; риск-параметров ${r.risk?.fetched ?? 0}.`)
       qc.invalidateQueries({ queryKey: ['kase-prices'] })
       qc.invalidateQueries({ queryKey: ['kase-risk-prices'] })
     },
-    onError: (err: any) => {
-      toast.error(err?.response?.data?.detail ?? err?.message ?? 'Не удалось загрузить KASE')
-    },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось обновить данные KASE')),
   })
 
   const reconcile = useMutation({
@@ -69,8 +69,8 @@ export default function KasePage() {
       if (!reportDate) throw new Error('Выберите дату для сверки')
       return (await api.post('/kase/reconcile', null, { params: { report_date: reportDate } })).data
     },
-    onSuccess: (r) => toast.success(`Сверено цен: ${r.checked}`),
-    onError: (err: any) => toast.error(err?.message ?? 'Не удалось выполнить сверку'),
+    onSuccess: (r) => toast.success(`Сверка цен завершена: проверено ${r.checked}.`),
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось выполнить сверку цен KASE')),
   })
 
   const manual = useMutation({
@@ -98,7 +98,7 @@ export default function KasePage() {
       return (await api.post('/kase/prices/manual', payload)).data
     },
     onSuccess: () => {
-      toast.success('Цена сохранена')
+      toast.success(`Цена инструмента ${manualCode || manualIsin} сохранена для выбранной даты.`)
       setManualCode('')
       setManualIsin('')
       setManualPrice('')
@@ -106,9 +106,7 @@ export default function KasePage() {
       setManualYtm('')
       qc.invalidateQueries({ queryKey: ['kase-prices'] })
     },
-    onError: (err: any) => {
-      toast.error(err?.response?.data?.detail ?? err?.message ?? 'Не удалось сохранить цену')
-    },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось сохранить цену инструмента')),
   })
 
   const rows = data ?? []
@@ -280,7 +278,7 @@ export default function KasePage() {
             <select className="input h-10" value={source} onChange={(e) => setSource(e.target.value)}>
               <option value="">Все источники</option>
               {sources.map((item) => (
-                <option key={item} value={item}>{item}</option>
+                <option key={item} value={item}>{sourceLabel(item)}</option>
               ))}
             </select>
           </label>
@@ -359,9 +357,9 @@ export default function KasePage() {
             value={manualSource}
             onChange={(e) => setManualSource(e.target.value as 'external' | 'manual' | 'risk_parameters')}
           >
-            <option value="external">External</option>
-            <option value="risk_parameters">Risk params</option>
-            <option value="manual">Manual</option>
+            <option value="external">Внешний источник</option>
+            <option value="risk_parameters">Риск-параметры KASE</option>
+            <option value="manual">Вручную</option>
           </select>
           <button
             onClick={() => manual.mutate()}
@@ -408,7 +406,7 @@ export default function KasePage() {
                   <td className="text-right">{r.dohod != null || r.ytm != null ? formatNumber(r.dohod ?? ((r.ytm ?? 0) * 100), 2) : '—'}</td>
                   <td className="text-right">{r.dtm != null || r.duration != null ? formatNumber(r.dtm ?? r.duration, 0) : '—'}</td>
                   <td>{r.unit_ru ?? '—'}</td>
-                  <td>{r.source}</td>
+                  <td>{sourceLabel(r.source)}</td>
                   <td>{formatDate(r.fetched_at)}</td>
                   <td>{formatDate(r.trade_date)}</td>
                 </tr>

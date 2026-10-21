@@ -1,10 +1,13 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Download, Calendar } from 'lucide-react'
+import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
 import { downloadBlob, filenameFromPath } from '@/lib/download'
 import { formatDate, formatNumber, formatPct } from '@/lib/format'
+import { reportTypeLabel } from '@/lib/displayLabels'
+import { apiErrorMessage } from '@/lib/notifications'
 
 interface Row {
   date: string
@@ -28,8 +31,13 @@ export default function HistoryPage() {
   })
 
   const handleDownloadReport = async (report: any) => {
-    const resp = await api.get(`/reports/${report.id}/download`, { responseType: 'blob' })
-    downloadBlob(resp.data, filenameFromPath(report.file_path, `report_${report.id}`))
+    try {
+      const resp = await api.get(`/reports/${report.id}/download`, { responseType: 'blob' })
+      downloadBlob(resp.data, filenameFromPath(report.file_path, `report_${report.id}`))
+      toast.success(`Отчёт за ${formatDate(report.report_date)} скачан.`)
+    } catch (error) {
+      toast.error(apiErrorMessage(error, `Не удалось скачать отчёт за ${formatDate(report.report_date)}`))
+    }
   }
 
   return (
@@ -59,10 +67,10 @@ export default function HistoryPage() {
               <tr>
                 <th>Дата</th>
                 <th>ЧДУ</th>
-                <th>Total MV</th>
-                <th>YTM</th>
-                <th>Duration</th>
-                <th>Benchmark Dur</th>
+                <th>Рыночная стоимость</th>
+                <th>Доходность к погашению</th>
+                <th>Дюрация</th>
+                <th>Дюрация ориентира</th>
               </tr>
             </thead>
             <tbody>
@@ -101,7 +109,7 @@ export default function HistoryPage() {
                 <tr key={r.id}>
                   <td>{r.id}</td>
                   <td>{formatDate(r.report_date)}</td>
-                  <td>{r.report_type}</td>
+                  <td>{reportTypeLabel(r.report_type)}</td>
                   <td>{formatDate(r.generated_at)}</td>
                   <td className="text-xs text-slate-500">{r.file_path}</td>
                   <td>

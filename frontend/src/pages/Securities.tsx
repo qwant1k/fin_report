@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo, useState } from 'react'
+import { Fragment, type ReactNode, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
@@ -45,6 +45,8 @@ import { useAuthStore } from '@/lib/auth'
 import { useConfirm } from '@/lib/confirm'
 import CouponScheduleEditor from '@/components/CouponScheduleEditor'
 import ReferenceBook from '@/components/ReferenceBook'
+import { categoryLabel, couponTypeLabel, operationLabel, processStatusLabel, sourceLabel as sourceDisplayLabel } from '@/lib/displayLabels'
+import { apiErrorMessage } from '@/lib/notifications'
 
 // ─────────────── types ───────────────
 
@@ -182,7 +184,7 @@ const CATEGORY_LABEL: Record<string, string> = {
   AGENCY_BONDS: 'Квазигос',
   MFO_BONDS: 'МФО',
   FOREIGN_BONDS: 'Иностранные',
-  REVERSE_REPO: 'REPO',
+  REVERSE_REPO: 'Обратное РЕПО',
   DEPOSIT: 'Депозиты',
   CASH: 'Денежные средства',
   OTHER: 'Прочее',
@@ -276,8 +278,8 @@ const CATEGORY_ACCENT: Record<string, {
 const OPERATION_LABEL: Record<string, string> = {
   BUY: 'Покупка',
   SELL: 'Продажа',
-  REPO_OPEN: 'Открытие REPO',
-  REPO_CLOSE: 'Закрытие REPO',
+  REPO_OPEN: 'Открытие РЕПО',
+  REPO_CLOSE: 'Закрытие РЕПО',
   COUPON: 'Купон',
   REDEMPTION: 'Погашение',
   DEPOSIT_OPEN: 'Открытие депозита',
@@ -353,14 +355,6 @@ function positionStatus(h: Holding) {
   return { label: 'Историческая бумага', tone: 'bg-slate-100 text-slate-700 ring-slate-200', dot: 'bg-slate-400' }
 }
 
-function profileFacts(h: Holding): Array<{ icon: LucideIcon; label: string; value: string; sub?: string; mono?: boolean }> {
-  return [
-    { icon: WalletCards, label: 'MV', value: formatMillions(h.market_value), sub: 'рыночная стоимость' },
-    { icon: Gauge, label: 'Цена KASE', value: formatNumber(h.last_kase_price, 4), sub: formatDate(h.last_kase_date), mono: true },
-    { icon: CalendarDays, label: 'Погашение', value: formatDate(h.maturity_date), sub: formatPctPlain(h.coupon_rate_pct) },
-  ]
-}
-
 // ─────────────── page ───────────────
 
 export default function SecuritiesPage() {
@@ -408,27 +402,24 @@ export default function SecuritiesPage() {
     mutationFn: async () => (await api.post('/securities/sync')).data,
     onSuccess: (data) => {
       toast.success(
-        `Синхронизация: +${data.upserted}, −${data.deleted}, ↻ ${data.manual_refreshed}`,
+        `Справочник синхронизирован: добавлено или обновлено ${data.upserted}, удалено ${data.deleted}, ручных записей обновлено ${data.manual_refreshed}.`,
       )
       qc.invalidateQueries({ queryKey: ['securities'] })
       qc.invalidateQueries({ queryKey: ['securities-summary'] })
       if (expandedId) qc.invalidateQueries({ queryKey: ['security-history', expandedId] })
     },
-    onError: () => toast.error('Не удалось синхронизировать справочник'),
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось синхронизировать справочник ценных бумаг с KASE')),
   })
 
   const remove = useMutation({
     mutationFn: async (id: number) => (await api.delete(`/securities/${id}`)).data,
     onSuccess: () => {
-      toast.success('Запись удалена')
+      toast.success('Позиция удалена из справочника ценных бумаг.')
       qc.invalidateQueries({ queryKey: ['securities'] })
       qc.invalidateQueries({ queryKey: ['securities-summary'] })
       setExpandedId(null)
     },
-    onError: (err: any) => {
-      const detail = err?.response?.data?.detail
-      toast.error(detail?.message ?? 'Не удалось удалить запись')
-    },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось удалить позицию из справочника')),
   })
 
   const totalMV = summaryQ.data?.total_market_value ?? 0
@@ -523,7 +514,7 @@ export default function SecuritiesPage() {
               <BookMarked className="h-3.5 w-3.5" />
               {formatNumber(list.length, 0)} / {formatNumber(summaryQ.data?.total_count ?? 0, 0)}
             </div>
-            <h1 className="text-3xl font-black tracking-normal">Справочник ценных бумаг</h1>
+            <h1 className="text-2xl font-black tracking-normal text-white">Справочник ценных бумаг</h1>
           </div>
           {canWrite && (
             <div className="flex flex-wrap items-center gap-2">
@@ -575,7 +566,7 @@ export default function SecuritiesPage() {
               <CategoryButton
                 key={c.category}
                 active={categoryFilter === c.category}
-                label={CATEGORY_LABEL[c.category] ?? c.category}
+                label={CATEGORY_LABEL[c.category] ?? categoryLabel(c.category)}
                 count={c.count}
                 color={CATEGORY_COLOR[c.category] ?? CATEGORY_COLOR.OTHER}
                 onClick={() => setCategoryFilter(c.category)}
@@ -707,7 +698,7 @@ function SecurityListRow({
   const status = positionStatus(h)
 
   return (
-    <div className="border-b border-slate-100 last:border-b-0">
+    <div className="border-b border-slate-200 last:border-b-0">
       <div
         role="button"
         tabIndex={0}
@@ -718,17 +709,17 @@ function SecurityListRow({
             onToggle()
           }
         }}
-        className={`grid w-full grid-cols-1 gap-3 px-4 py-3 text-left transition hover:bg-slate-50 lg:grid-cols-[minmax(260px,1.6fr)_minmax(150px,0.7fr)_minmax(150px,0.7fr)_minmax(130px,0.55fr)_116px] lg:items-center ${
+        className={`grid w-full grid-cols-1 gap-2 px-3 py-2 text-left transition hover:bg-slate-50 lg:grid-cols-[minmax(260px,1.6fr)_minmax(150px,0.7fr)_minmax(150px,0.7fr)_minmax(130px,0.55fr)_116px] lg:items-center ${
           expanded ? 'bg-emerald-50/40' : 'bg-white'
         }`}
       >
         <div className="flex min-w-0 items-center gap-3">
-          <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-xs font-black ring-1 ${accent.avatar}`}>
+          <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[11px] font-black ring-1 ${accent.avatar}`}>
             {profileInitials(h)}
           </div>
           <div className="min-w-0">
-            <div className="line-clamp-1 font-bold text-slate-950">{h.instrument_name ?? h.isin}</div>
-            <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-xs font-medium text-slate-500">
+            <div className="line-clamp-1 text-[13px] font-semibold text-slate-900">{h.instrument_name ?? h.isin}</div>
+            <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[11px] font-medium text-slate-600">
               <span className="font-mono">{h.isin}</span>
               {h.instrument_code && <span className="font-mono">{h.instrument_code}</span>}
               <span>{h.cdu_name ?? (h.cdu_id ? `#${h.cdu_id}` : "Справочник (без ЧДУ)")}</span>
@@ -737,7 +728,7 @@ function SecurityListRow({
         </div>
 
         <div className="flex items-center justify-between gap-2 lg:block">
-          <span className="text-xs font-bold uppercase text-slate-400 lg:hidden">Тип</span>
+          <span className="text-[11px] font-semibold uppercase text-slate-500 lg:hidden">Тип</span>
           <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-bold ring-1 ${CATEGORY_COLOR[h.category ?? 'OTHER'] ?? CATEGORY_COLOR.OTHER}`}>
             <span className={`h-1.5 w-1.5 rounded-full ${accent.dot}`} />
             {CATEGORY_LABEL[h.category ?? 'OTHER'] ?? '—'}
@@ -745,13 +736,13 @@ function SecurityListRow({
         </div>
 
         <div className="flex items-center justify-between gap-2 lg:block lg:text-right">
-          <span className="text-xs font-bold uppercase text-slate-400 lg:hidden">Общая сумма</span>
-          <span className="font-black text-slate-950">{formatMillions(h.market_value)}</span>
+          <span className="text-[11px] font-semibold uppercase text-slate-500 lg:hidden">Общая сумма</span>
+          <span className="text-[13px] font-bold tabular-nums text-slate-900">{formatMillions(h.market_value)}</span>
         </div>
 
         <div className="flex items-center justify-between gap-2 lg:block lg:text-right">
-          <span className="text-xs font-bold uppercase text-slate-400 lg:hidden">Количество</span>
-          <span className="font-mono font-bold text-slate-800">{formatNumber(h.quantity, 0)}</span>
+          <span className="text-[11px] font-semibold uppercase text-slate-500 lg:hidden">Количество</span>
+          <span className="font-mono text-[13px] font-semibold text-slate-800">{formatNumber(h.quantity, 0)}</span>
         </div>
 
         <div className="flex items-center justify-between gap-2 lg:justify-end">
@@ -773,7 +764,7 @@ function SecurityListRow({
                 onShow()
               }
             }}
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-slate-950 px-3 text-xs font-bold text-white transition hover:bg-emerald-700"
+            className="inline-flex h-7 items-center justify-center gap-1.5 rounded-md bg-slate-800 px-2.5 text-xs font-semibold text-white transition hover:bg-emerald-700"
           >
             <Eye className="h-3.5 w-3.5" />
             Показать
@@ -782,8 +773,8 @@ function SecurityListRow({
       </div>
 
       {expanded && (
-        <div className="border-t border-slate-100 bg-slate-50 px-4 py-4">
-          <div className="grid gap-3 md:grid-cols-4">
+        <div className="border-t border-slate-200 bg-slate-50 px-3 py-2">
+          <div className="grid gap-2 md:grid-cols-4">
             <BriefInfo icon={Fingerprint} label="ISIN / тикер" value={h.instrument_code ? `${h.isin} · ${h.instrument_code}` : h.isin} mono />
             <BriefInfo icon={Gauge} label="Цена KASE" value={formatNumber(h.last_kase_price, 4)} sub={formatDate(h.last_kase_date)} mono />
             <BriefInfo icon={CalendarDays} label="Купон / погашение" value={formatPctPlain(h.coupon_rate_pct)} sub={formatDate(h.maturity_date)} />
@@ -810,7 +801,6 @@ function SecurityProfilePage({
   const catColor = CATEGORY_COLOR[h.category ?? 'OTHER'] ?? CATEGORY_COLOR.OTHER
   const accent = categoryAccent(h.category)
   const status = positionStatus(h)
-  const facts = profileFacts(h)
   const historyQ = useQuery<HoldingHistoryResponse>({
     queryKey: ['security-history', h.id],
     queryFn: async () => (await api.get(`/securities/${h.id}/history`)).data,
@@ -822,34 +812,52 @@ function SecurityProfilePage({
   const referenceParams = useMemo(() => buildReferenceParams(history?.reference), [history?.reference])
 
   return (
-    <article className={`overflow-hidden rounded-lg border bg-white shadow-card ${accent.border}`}>
-      <div className={`h-1.5 ${accent.strip}`} />
+    <article className={`overflow-hidden rounded-lg border border-slate-300 bg-white`}>
+      <div className={`h-1 ${accent.strip}`} />
 
-      <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-white px-5 py-3">
+      {/* header: back, identity, badges, actions — one compact line */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-300 bg-slate-50 px-3 py-2">
         <button
           type="button"
           onClick={onBack}
-          className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 transition hover:bg-slate-50 hover:text-slate-950"
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-100"
         >
-          <ArrowLeft className="h-4 w-4" />
-          Назад к списку
+          <ArrowLeft className="h-3.5 w-3.5" /> К списку
         </button>
-        <div className="flex items-center gap-1">
+        <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[11px] font-black ring-1 ${accent.avatar}`}>
+          {profileInitials(h)}
+        </div>
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-base font-bold leading-tight text-slate-900" title={h.instrument_name ?? h.isin}>
+            {h.instrument_name ?? h.isin}
+          </h2>
+          <div className="flex flex-wrap items-center gap-x-2 text-xs text-slate-600">
+            <span className="font-mono font-semibold text-slate-800">{h.isin}</span>
+            {h.instrument_code && <span className="font-mono">· {h.instrument_code}</span>}
+            <span>· {h.cdu_name ?? 'Справочник (без ЧДУ)'}</span>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold ring-1 ${catColor}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${accent.dot}`} />
+            {CATEGORY_LABEL[h.category ?? 'OTHER'] ?? '—'}
+          </span>
+          <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold ring-1 ${status.tone}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
+            {status.label}
+          </span>
+          <span className={`rounded px-1.5 py-0.5 text-[11px] font-semibold ring-1 ${
+            h.source === 'MANUAL' ? 'bg-amber-50 text-amber-800 ring-amber-300' : 'bg-white text-slate-700 ring-slate-300'
+          }`}>
+            {sourceLabel(h.source)}
+          </span>
           {canWrite && (
             <>
-              <button
-                onClick={onEdit}
-                className="flex h-9 w-9 items-center justify-center rounded-md text-slate-500 transition hover:bg-emerald-50 hover:text-emerald-700"
-                title="Редактировать"
-              >
+              <button onClick={onEdit} className="flex h-8 w-8 items-center justify-center rounded-md text-slate-600 hover:bg-emerald-100 hover:text-emerald-800" title="Редактировать">
                 <Pencil className="h-4 w-4" />
               </button>
               {h.source === 'MANUAL' && (
-                <button
-                  onClick={onDelete}
-                  className="flex h-9 w-9 items-center justify-center rounded-md text-slate-500 transition hover:bg-red-50 hover:text-red-600"
-                  title="Удалить"
-                >
+                <button onClick={onDelete} className="flex h-8 w-8 items-center justify-center rounded-md text-slate-600 hover:bg-red-100 hover:text-red-700" title="Удалить">
                   <Trash2 className="h-4 w-4" />
                 </button>
               )}
@@ -858,151 +866,87 @@ function SecurityProfilePage({
         </div>
       </div>
 
-      <div className="border-b border-slate-100">
-        <div className="grid gap-0 lg:grid-cols-[1fr_230px]">
-          <div className="p-5">
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex min-w-0 gap-4">
-                <div className={`relative flex h-16 w-16 shrink-0 items-center justify-center rounded-lg text-lg font-black ring-1 ${accent.avatar}`}>
-                  {profileInitials(h)}
-                  <span className={`absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-md ring-4 ring-white ${accent.icon}`}>
-                    <Fingerprint className="h-3 w-3" />
-                  </span>
-                </div>
-
-                <div className="min-w-0">
-                  <div className="mb-2 flex flex-wrap items-center gap-2">
-                    <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-semibold ring-1 ${catColor}`}>
-                      <span className={`h-1.5 w-1.5 rounded-full ${accent.dot}`} />
-                      {CATEGORY_LABEL[h.category ?? 'OTHER'] ?? '—'}
-                    </span>
-                    <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-semibold ring-1 ${status.tone}`}>
-                      <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
-                      {status.label}
-                    </span>
-                    <span className={`inline-flex rounded-md px-2 py-0.5 text-xs font-semibold ring-1 ${
-                      h.source === 'MANUAL'
-                        ? 'bg-amber-50 text-amber-800 ring-amber-200'
-                        : 'bg-slate-50 text-slate-600 ring-slate-200'
-                    }`}>
-                      {sourceLabel(h.source)}
-                    </span>
-                  </div>
-
-                  <h2 className="line-clamp-2 text-xl font-black leading-snug text-slate-950" title={h.instrument_name ?? h.isin}>
-                    {h.instrument_name ?? h.isin}
-                  </h2>
-
-                  <div className="mt-3 grid gap-2 text-xs font-medium text-slate-600 sm:grid-cols-3">
-                    <IdentityPill icon={Fingerprint} label="ISIN" value={h.isin} mono />
-                    <IdentityPill icon={Hash} label="Тикер" value={h.instrument_code ?? '—'} mono />
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="border-t border-slate-100 bg-slate-50/70 p-5 lg:border-l lg:border-t-0">
-            <div className="flex items-center justify-between gap-2">
-              <div className="text-xs font-bold uppercase text-slate-500">Профиль позиции</div>
-              <span className={`rounded-md px-2 py-0.5 text-xs font-black ring-1 ${accent.soft}`}>
-                {h.currency}
-              </span>
-            </div>
-            <div className="mt-3 text-2xl font-black text-slate-950">{formatMillions(h.market_value)}</div>
-            <div className="mt-1 text-xs font-medium text-slate-500">по последней доступной оценке</div>
-            <div className="mt-4 space-y-2">
-              <ProfileLine label="KASE" value={formatNumber(h.last_kase_price, 4)} />
-              <ProfileLine label="Синхронизация" value={formatDateTime(h.last_synced_at)} />
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-px bg-slate-100 md:grid-cols-4">
-          {facts.map((fact) => (
-            <ProfileFact key={fact.label} {...fact} />
-          ))}
-        </div>
+      {/* key figures: one strip with column rules */}
+      <div className="grid grid-cols-2 border-b border-slate-300 sm:grid-cols-4 xl:grid-cols-8">
+        <KeyFigure label="Стоимость" value={formatMillions(h.market_value)} strong />
+        <KeyFigure label="Количество" value={formatNumber(h.quantity, 0)} />
+        <KeyFigure label="Цена KASE" value={formatNumber(h.last_kase_price, 4)} sub={formatDate(h.last_kase_date)} />
+        <KeyFigure label="Купон" value={formatPctPlain(h.coupon_rate_pct)} />
+        <KeyFigure label="Погашение" value={formatDate(h.maturity_date)} />
+        <KeyFigure label="В портфеле с" value={formatDate(history?.stats.first_date)} />
+        <KeyFigure label="Посл. операция" value={formatDate(history?.stats.last_date)} />
+        <KeyFigure label="Операций / срезов" value={`${formatNumber(history?.stats.operations_count ?? 0, 0)} / ${formatNumber(history?.stats.snapshots_count ?? 0, 0)}`} />
       </div>
 
-      <div className="space-y-5 bg-white p-5">
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-            <MiniStat icon={CalendarDays} label="В портфеле с" value={formatDate(history?.stats.first_date)} />
-            <MiniStat icon={Clock3} label="Последняя операция" value={formatDate(history?.stats.last_date)} />
-            <MiniStat icon={Activity} label="Операций" value={formatNumber(history?.stats.operations_count ?? 0, 0)} />
-            <MiniStat icon={FileText} label="Срезов" value={formatNumber(history?.stats.snapshots_count ?? 0, 0)} />
-          </div>
-
-          {historyQ.isLoading ? (
-            <div className="flex h-56 items-center justify-center rounded-lg bg-slate-50 text-sm font-medium text-slate-500">
-              Загрузка истории...
-            </div>
-          ) : historyQ.isError ? (
-            <div className="rounded-lg bg-red-50 px-4 py-3 text-sm font-medium text-red-700 ring-1 ring-red-100">
-              Не удалось загрузить историю
-            </div>
-          ) : (
-            <>
+      <div className="space-y-3 p-3">
+        {historyQ.isLoading ? (
+          <div className="flex h-32 items-center justify-center rounded-md bg-slate-50 text-sm text-slate-600">Загрузка истории…</div>
+        ) : historyQ.isError ? (
+          <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700 ring-1 ring-red-200">Не удалось загрузить историю</div>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
               <section>
-                <SectionTitle icon={ShieldCheck} title="Профиль бумаги" />
+                <SectionTitle icon={ShieldCheck} title="Позиция" />
                 <ParamGrid items={currentParams} />
               </section>
-
               {referenceParams.length > 0 && (
                 <section>
                   <SectionTitle icon={BookMarked} title="Паспорт выпуска" />
                   <ParamGrid items={referenceParams} />
                 </section>
               )}
+            </div>
 
-              <CouponScheduleEditor isin={h.isin} canEdit={canWrite} />
+            <CouponScheduleEditor isin={h.isin} canEdit={canWrite} />
 
-              {chartData.length > 0 && (
-                <section>
-                  <SectionTitle icon={Activity} title="Динамика в портфеле" />
-                  <div className="h-56 rounded-lg bg-slate-50 p-3 ring-1 ring-slate-100">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={chartData}>
-                        <defs>
-                          <linearGradient id={`securityMv-${h.id}`} x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#059669" stopOpacity={0.28} />
-                            <stop offset="95%" stopColor="#059669" stopOpacity={0.02} />
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                        <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={formatDate} />
-                        <YAxis tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v) => `${(Number(v) / 1_000_000).toFixed(0)} млн`} />
-                        <Tooltip
-                          formatter={(value: unknown) => formatMoney(Number(value), 0)}
-                          labelFormatter={(label) => formatDate(String(label))}
-                        />
-                        <Area
-                          type="monotone"
-                          dataKey="market_value"
-                          stroke="#059669"
-                          strokeWidth={2.5}
-                          fill={`url(#securityMv-${h.id})`}
-                        />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  </div>
-                </section>
-              )}
+            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+              <section>
+                <SectionTitle icon={Activity} title="Операции" />
+                <TimelineList events={history?.timeline ?? []} />
+              </section>
+              <section>
+                <SectionTitle icon={Layers} title="Срезы портфеля" />
+                <SnapshotList snapshots={history?.snapshots ?? []} />
+              </section>
+            </div>
 
-              <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <div>
-                  <SectionTitle icon={Activity} title="Операции" />
-                  <TimelineList events={history?.timeline ?? []} />
-                </div>
-                <div>
-                  <SectionTitle icon={Layers} title="Срезы портфеля" />
-                  <SnapshotList snapshots={history?.snapshots ?? []} />
+            {chartData.length > 0 && (
+              <section>
+                <SectionTitle icon={Activity} title="Динамика стоимости" />
+                <div className="h-40 rounded-md border border-slate-300 bg-white p-2">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={chartData}>
+                      <defs>
+                        <linearGradient id={`securityMv-${h.id}`} x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#059669" stopOpacity={0.28} />
+                          <stop offset="95%" stopColor="#059669" stopOpacity={0.02} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#475569' }} tickFormatter={formatDate} />
+                      <YAxis tick={{ fontSize: 10, fill: '#475569' }} tickFormatter={(v) => `${(Number(v) / 1_000_000).toFixed(0)} млн`} />
+                      <Tooltip formatter={(value: unknown) => formatMoney(Number(value), 0)} labelFormatter={(label) => formatDate(String(label))} />
+                      <Area type="monotone" dataKey="market_value" stroke="#059669" strokeWidth={2} fill={`url(#securityMv-${h.id})`} />
+                    </AreaChart>
+                  </ResponsiveContainer>
                 </div>
               </section>
-            </>
-          )}
+            )}
+          </>
+        )}
       </div>
     </article>
+  )
+}
+
+function KeyFigure({ label, value, sub, strong }: { label: string; value: string; sub?: string; strong?: boolean }) {
+  return (
+    <div className="border-b border-r border-slate-200 px-3 py-1.5 last:border-r-0 xl:border-b-0">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
+      <div className={`truncate tabular-nums ${strong ? 'text-[15px] font-bold text-emerald-800' : 'text-[13px] font-semibold text-slate-900'}`}>{value}</div>
+      {sub && <div className="truncate text-[10px] text-slate-500">{sub}</div>}
+    </div>
   )
 }
 
@@ -1012,7 +956,7 @@ function buildCurrentParams(h: Holding): ParamItem[] {
     { label: 'ISIN / ключ', value: <span className="font-mono">{h.isin}</span> },
     { label: 'Тикер', value: h.instrument_code ? <span className="font-mono">{h.instrument_code}</span> : '—' },
     { label: 'Название', value: h.instrument_name ?? '—', wide: true },
-    { label: 'Категория', value: CATEGORY_LABEL[h.category ?? 'OTHER'] ?? h.category ?? '—' },
+    { label: 'Категория', value: CATEGORY_LABEL[h.category ?? 'OTHER'] ?? categoryLabel(h.category) },
     { label: 'Валюта', value: h.currency },
     { label: 'Цена KASE', value: formatNumber(h.last_kase_price, 4) },
     { label: 'Дата KASE', value: formatDate(h.last_kase_date) },
@@ -1039,7 +983,7 @@ function buildReferenceParams(ref: HoldingReference | null | undefined): ParamIt
     { label: 'Тип ценной бумаги', value: ref.security_type ?? '—' },
     { label: 'Тип выпуска', value: ref.bond_type ?? '—' },
     { label: 'Купон', value: ref.coupon_rate_text ?? formatPctPlain(ref.coupon_rate_pct) },
-    { label: 'Тип купона', value: ref.coupon_type ?? '—' },
+    { label: 'Тип купона', value: couponTypeLabel(ref.coupon_type) },
     { label: 'Частота', value: ref.frequency ?? '—' },
     { label: 'База', value: ref.base ?? ref.base_code ?? '—' },
     { label: 'Номинал', value: formatNumber(ref.nominal, 2) },
@@ -1052,7 +996,7 @@ function buildReferenceParams(ref: HoldingReference | null | undefined): ParamIt
     { label: 'Рейтинг эмитента', value: ref.rating ?? '—' },
     { label: 'Источник рейтинга', value: ref.rating_source ?? '—', wide: true },
     { label: 'Рейтинговое агентство', value: ref.rating_agency ?? '—' },
-    { label: 'Источник данных', value: ref.source ?? '—' },
+    { label: 'Источник данных', value: sourceDisplayLabel(ref.source) },
     { label: 'Дата загрузки источника', value: formatDateTime(ref.source_updated_at) },
     { label: 'Статус', value: ref.is_active ? 'Активен' : 'Неактивен' },
     { label: 'Обновлено', value: formatDateTime(ref.updated_at) },
@@ -1165,28 +1109,6 @@ function CategoryButton({
   )
 }
 
-function IdentityPill({
-  icon: Icon,
-  label,
-  value,
-  mono,
-}: {
-  icon: LucideIcon
-  label: string
-  value: string
-  mono?: boolean
-}) {
-  return (
-    <div className="flex min-h-10 items-center gap-2 rounded-lg bg-slate-50 px-2.5 py-2 ring-1 ring-slate-100">
-      <Icon className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-      <div className="min-w-0">
-        <div className="text-[10px] font-bold uppercase text-slate-400">{label}</div>
-        <div className={`truncate text-xs font-bold text-slate-800 ${mono ? 'font-mono' : ''}`}>{value}</div>
-      </div>
-    </div>
-  )
-}
-
 function BriefInfo({
   icon: Icon,
   label,
@@ -1201,183 +1123,117 @@ function BriefInfo({
   mono?: boolean
 }) {
   return (
-    <div className="rounded-lg bg-white p-3 ring-1 ring-slate-200">
-      <div className="flex items-center gap-2 text-[11px] font-bold uppercase text-slate-500">
-        <Icon className="h-3.5 w-3.5 text-emerald-600" />
+    <div className="rounded-md bg-white px-2.5 py-1.5 ring-1 ring-slate-300">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase text-slate-600">
+        <Icon className="h-3 w-3 text-emerald-700" />
         {label}
       </div>
-      <div className={`mt-1 truncate text-sm font-black text-slate-950 ${mono ? 'font-mono' : ''}`}>{value}</div>
-      {sub && <div className="mt-0.5 truncate text-xs font-medium text-slate-500">{sub}</div>}
-    </div>
-  )
-}
-
-function ProfileLine({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3 text-xs">
-      <span className="font-semibold text-slate-500">{label}</span>
-      <span className="truncate text-right font-bold text-slate-900">{value}</span>
-    </div>
-  )
-}
-
-function ProfileFact({
-  icon: Icon,
-  label,
-  value,
-  sub,
-  mono,
-}: {
-  icon: LucideIcon
-  label: string
-  value: string
-  sub?: string
-  mono?: boolean
-}) {
-  return (
-    <div className="min-h-[92px] bg-white p-3">
-      <div className="flex items-center gap-2 text-[11px] font-bold uppercase text-slate-500">
-        <Icon className="h-3.5 w-3.5 text-slate-400" />
-        {label}
-      </div>
-      <div className={`mt-2 truncate text-base font-black text-slate-950 ${mono ? 'font-mono' : ''}`}>{value}</div>
-      {sub && <div className="mt-1 truncate text-[11px] font-semibold text-slate-500">{sub}</div>}
-    </div>
-  )
-}
-
-function MiniStat({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: LucideIcon
-  label: string
-  value: string
-}) {
-  return (
-    <div className="rounded-lg bg-slate-50 p-3 ring-1 ring-slate-100">
-      <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase text-slate-500">
-        <Icon className="h-3.5 w-3.5 text-emerald-600" />
-        {label}
-      </div>
-      <div className="mt-1 truncate text-sm font-black text-slate-950">{value}</div>
+      <div className={`truncate text-[13px] font-semibold text-slate-900 ${mono ? 'font-mono' : ''}`}>{value}</div>
+      {sub && <div className="truncate text-[11px] text-slate-600">{sub}</div>}
     </div>
   )
 }
 
 function SectionTitle({ icon: Icon, title }: { icon: LucideIcon; title: string }) {
   return (
-    <div className="mb-2 flex items-center gap-2 text-sm font-black text-slate-950">
-      <Icon className="h-4 w-4 text-emerald-600" />
+    <div className="mb-1 flex items-center gap-1.5 text-[13px] font-bold uppercase tracking-wide text-slate-700">
+      <Icon className="h-3.5 w-3.5 text-emerald-700" />
       {title}
     </div>
   )
 }
 
 function ParamGrid({ items }: { items: ParamItem[] }) {
+  // label | value | label | value; long values («wide») take the whole row
+  const rows: ParamItem[][] = []
+  let pending: ParamItem[] = []
+  for (const item of items) {
+    if (item.wide) {
+      if (pending.length) { rows.push(pending); pending = [] }
+      rows.push([item])
+    } else {
+      pending.push(item)
+      if (pending.length === 2) { rows.push(pending); pending = [] }
+    }
+  }
+  if (pending.length) rows.push(pending)
   return (
-    <div className="grid grid-cols-1 gap-px overflow-hidden rounded-lg bg-slate-100 ring-1 ring-slate-200 md:grid-cols-2">
-      {items.map((item) => (
-        <div
-          key={item.label}
-          className={`bg-white px-3 py-2.5 ${
-            item.wide ? 'md:col-span-2' : ''
-          }`}
-        >
-          <div className="text-[11px] font-semibold uppercase text-slate-500">{item.label}</div>
-          <div className="mt-0.5 break-words text-sm font-semibold text-slate-900">{item.value}</div>
-        </div>
-      ))}
+    <div className="overflow-hidden rounded-md border border-slate-300">
+      <table className="detail-table table-fixed">
+        <colgroup><col className="w-[22%]" /><col className="w-[28%]" /><col className="w-[22%]" /><col className="w-[28%]" /></colgroup>
+        <tbody>
+          {rows.map((row, i) => (
+            <tr key={i}>
+              {row.map((item) => (
+                <Fragment key={item.label}>
+                  <td className="!bg-slate-100 text-[12px] text-slate-600">{item.label}</td>
+                  <td colSpan={item.wide ? 3 : row.length === 1 ? 3 : 1} className="break-words font-medium text-slate-900">{item.value}</td>
+                </Fragment>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
 
 function TimelineList({ events }: { events: HoldingHistoryEvent[] }) {
   if (!events.length) {
-    return (
-      <div className="flex h-40 items-center justify-center rounded-lg bg-slate-50 text-sm font-medium text-slate-500 ring-1 ring-slate-100">
-        Операций нет
-      </div>
-    )
+    return <div className="rounded-md border border-dashed border-slate-300 py-6 text-center text-sm text-slate-500">Операций нет</div>
   }
   return (
-    <div className="max-h-80 overflow-auto rounded-lg bg-slate-50 p-2 ring-1 ring-slate-200">
-      {events.map((event) => (
-        <div key={event.id} className="relative mb-2 rounded-lg bg-white p-3 shadow-sm ring-1 ring-slate-100 last:mb-0">
-          <div className={`absolute left-0 top-3 h-10 w-1 rounded-r ${event.signed_quantity < 0 ? 'bg-red-400' : 'bg-emerald-500'}`} />
-          <div className="flex items-start justify-between gap-3">
-            <div className="pl-2">
-              <div className="text-sm font-black text-slate-950">
-                {OPERATION_LABEL[event.operation_type] ?? event.operation_type}
-              </div>
-              <div className="mt-0.5 text-xs font-medium text-slate-500">
-                {formatDate(event.date)}
-                {event.deal_id ? ` · ${event.deal_id}` : ''}
-              </div>
-            </div>
-            <div className={`rounded-md px-2 py-0.5 text-xs font-bold ${
-              event.signed_quantity < 0 ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'
-            }`}>
-              {event.signed_quantity < 0 ? '' : '+'}{formatNumber(event.signed_quantity, 0)}
-            </div>
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-2 pl-2 text-xs text-slate-600">
-            <EventMetric label="Цена" value={formatNumber(event.price, 4)} />
-            <EventMetric label="Сумма" value={formatMoney(event.amount_kzt)} />
-            <EventMetric label="YTM" value={formatPctPlain(event.ytm)} />
-            <EventMetric label="Номинал" value={formatNumber(event.face_value, 0)} />
-          </div>
-          {event.description && (
-            <div className="mt-2 line-clamp-2 pl-2 text-xs text-slate-500">{event.description}</div>
-          )}
-        </div>
-      ))}
+    <div className="max-h-72 overflow-auto rounded-md border border-slate-300">
+      <table className="detail-table">
+        <thead className="sticky top-0">
+          <tr><th>Дата</th><th>Операция</th><th className="num">Кол-во</th><th className="num">Цена</th><th className="num">Сумма, ₸</th><th className="num">YTM</th></tr>
+        </thead>
+        <tbody>
+          {events.map((event) => (
+            <tr key={event.id} title={event.description ?? undefined}>
+              <td className="whitespace-nowrap">{formatDate(event.date)}</td>
+              <td>
+                <div className="font-semibold">{OPERATION_LABEL[event.operation_type] ?? operationLabel(event.operation_type)}</div>
+                {event.deal_id && <div className="text-[11px] text-slate-500">{event.deal_id}</div>}
+              </td>
+              <td className={`num font-semibold ${event.signed_quantity < 0 ? 'text-red-700' : 'text-emerald-700'}`}>
+                {event.signed_quantity < 0 ? '' : '+'}{formatNumber(event.signed_quantity, 0)}
+              </td>
+              <td className="num">{formatNumber(event.price, 4)}</td>
+              <td className="num">{formatMoney(event.amount_kzt)}</td>
+              <td className="num">{formatPctPlain(event.ytm)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
 
 function SnapshotList({ snapshots }: { snapshots: HoldingHistorySnapshot[] }) {
   if (!snapshots.length) {
-    return (
-      <div className="flex h-40 items-center justify-center rounded-lg bg-slate-50 text-sm font-medium text-slate-500 ring-1 ring-slate-100">
-        Срезов нет
-      </div>
-    )
+    return <div className="rounded-md border border-dashed border-slate-300 py-6 text-center text-sm text-slate-500">Срезов нет</div>
   }
   return (
-    <div className="max-h-80 overflow-auto rounded-lg bg-slate-50 p-2 ring-1 ring-slate-200">
-      {snapshots.map((snapshot) => (
-        <div key={`${snapshot.source}-${snapshot.id}`} className="mb-2 rounded-lg bg-white p-3 shadow-sm ring-1 ring-slate-100 last:mb-0">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-sm font-black text-slate-950">{snapshot.source_label}</div>
-              <div className="mt-0.5 text-xs font-medium text-slate-500">
-                {formatDate(snapshot.date)}
-                {snapshot.status ? ` · ${snapshot.status}` : ''}
-              </div>
-            </div>
-            <div className="rounded-md bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-700">
-              {formatMillions(snapshot.market_value)}
-            </div>
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600">
-            <EventMetric label="Кол-во" value={formatNumber(snapshot.quantity, 0)} />
-            <EventMetric label="Цена" value={formatNumber(snapshot.price, 4)} />
-            <EventMetric label="YTM" value={formatPctPlain(snapshot.ytm)} />
-            <EventMetric label="Duration" value={formatNumber(snapshot.duration, 2)} />
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function EventMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md bg-slate-50 px-2 py-1.5">
-      <div className="text-[10px] font-bold uppercase text-slate-400">{label}</div>
-      <div className="mt-0.5 truncate font-bold text-slate-800">{value}</div>
+    <div className="max-h-72 overflow-auto rounded-md border border-slate-300">
+      <table className="detail-table">
+        <thead className="sticky top-0">
+          <tr><th>Дата</th><th>Источник</th><th className="num">Количество</th><th className="num">Цена</th><th className="num">Стоимость</th><th className="num">Доходность</th><th className="num">Дюрация</th></tr>
+        </thead>
+        <tbody>
+          {snapshots.map((snapshot) => (
+            <tr key={`${snapshot.source}-${snapshot.id}`}>
+              <td className="whitespace-nowrap">{formatDate(snapshot.date)}</td>
+              <td>{snapshot.source_label}{snapshot.status ? <span className="text-[11px] text-slate-500"> · {processStatusLabel(snapshot.status)}</span> : null}</td>
+              <td className="num">{formatNumber(snapshot.quantity, 0)}</td>
+              <td className="num">{formatNumber(snapshot.price, 4)}</td>
+              <td className="num font-semibold">{formatMillions(snapshot.market_value)}</td>
+              <td className="num">{formatPctPlain(snapshot.ytm)}</td>
+              <td className="num">{formatNumber(snapshot.duration, 2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
@@ -1483,13 +1339,10 @@ function HoldingFormModal({
       return (await api.post('/securities/', payload)).data
     },
     onSuccess: () => {
-      toast.success(isEdit ? 'Запись обновлена' : 'Запись добавлена')
+      toast.success(isEdit ? 'Изменения позиции сохранены.' : 'Позиция добавлена в справочник ценных бумаг.')
       onSaved()
     },
-    onError: (err: any) => {
-      const detail = err?.response?.data?.detail
-      toast.error(detail?.message ?? detail ?? 'Не удалось сохранить запись')
-    },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось сохранить позицию в справочнике')),
   })
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>

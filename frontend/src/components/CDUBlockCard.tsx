@@ -1,15 +1,18 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import clsx from 'clsx'
 
-import { api } from '@/lib/api'
-import { CategoryRow, CDUBlock, InstrumentDetailRow } from '@/lib/types'
-import { formatDate, formatNumber, formatPct } from '@/lib/format'
+import { CDUBlock } from '@/lib/types'
+import { formatNumber, formatPct } from '@/lib/format'
+import CategoryBreakdown from '@/components/CategoryBreakdown'
+import { CduIndicatorChips } from '@/components/CustomIndicators'
+import type { IndicatorValue } from '@/lib/indicators'
 
 interface Props {
   block: CDUBlock
   periodFrom?: string
   periodTo: string
+  indicators?: IndicatorValue[]
 }
 
 const COLUMN_LABELS = [
@@ -19,7 +22,7 @@ const COLUMN_LABELS = [
   'CMV',
   '% портф.',
   'YTM',
-  'Duration',
+  'Дюрация',
   'Min',
   'Max',
   'Hard',
@@ -27,7 +30,7 @@ const COLUMN_LABELS = [
   'Свободно (млн ₸)',
 ]
 
-export default function CDUBlockCard({ block, periodFrom, periodTo }: Props) {
+export default function CDUBlockCard({ block, periodTo, indicators }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null)
 
   return (
@@ -51,6 +54,7 @@ export default function CDUBlockCard({ block, periodFrom, periodTo }: Props) {
           </span>
         </span>
       </div>
+      {!block.is_stale && <CduIndicatorChips items={indicators} />}
       <div className="table-wrap">
         <table className="kdif-table">
           <thead>
@@ -73,6 +77,7 @@ export default function CDUBlockCard({ block, periodFrom, periodTo }: Props) {
                         type="button"
                         onClick={() => setExpanded(isOpen ? null : row.category)}
                         className="inline-flex min-w-0 items-center gap-2 text-left hover:text-emerald-700"
+                        title="Показать расшифровку: позиции, даты, цены и источники"
                       >
                         {isOpen ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
                         <span>{row.label}</span>
@@ -104,12 +109,7 @@ export default function CDUBlockCard({ block, periodFrom, periodTo }: Props) {
                   {isOpen && (
                     <tr key={`${row.category}-details`}>
                       <td colSpan={12} className="bg-slate-50 p-0">
-                        <InstrumentDetails
-                          block={block}
-                          row={row}
-                          periodFrom={periodFrom}
-                          periodTo={periodTo}
-                        />
+                        <CategoryBreakdown cduId={block.cdu_id} category={row.category} date={block.as_of_date || periodTo} />
                       </td>
                     </tr>
                   )}
@@ -132,7 +132,7 @@ export default function CDUBlockCard({ block, periodFrom, periodTo }: Props) {
 
       {block.benchmark_duration != null && (
         <div className="px-4 py-3 border-t border-slate-200 text-sm flex flex-wrap items-center gap-x-6 gap-y-1">
-          <span className="text-slate-500">Duration портфеля:</span>
+          <span className="text-slate-500">Дюрация портфеля:</span>
           <span className="font-semibold">{formatNumber(block.duration_weighted, 2)}</span>
           <span className="text-slate-500">benchmark MBM:</span>
           <span className="font-semibold">{formatNumber(block.benchmark_duration, 2)}</span>
@@ -145,109 +145,6 @@ export default function CDUBlockCard({ block, periodFrom, periodTo }: Props) {
           </span>
         </div>
       )}
-    </div>
-  )
-}
-
-function InstrumentDetails({
-  block,
-  row,
-  periodFrom,
-  periodTo,
-}: {
-  block: CDUBlock
-  row: CategoryRow
-  periodFrom?: string
-  periodTo: string
-}) {
-  const [from, setFrom] = useState(periodFrom ?? '')
-  const [to, setTo] = useState(periodTo)
-  const [items, setItems] = useState<InstrumentDetailRow[]>([])
-  const [loading, setLoading] = useState(false)
-
-  useEffect(() => {
-    setFrom(periodFrom ?? '')
-    setTo(periodTo)
-  }, [periodFrom, periodTo])
-
-  useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      setLoading(true)
-      try {
-        const params: Record<string, string | number> = {
-          cdu_id: block.cdu_id,
-          category: row.category,
-          to,
-        }
-        if (from) params.from = from
-        const res = await api.get('/dashboard/instrument-details', { params })
-        if (!cancelled) setItems(res.data.rows ?? [])
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-    load()
-    return () => {
-      cancelled = true
-    }
-  }, [block.cdu_id, row.category, from, to])
-
-  return (
-    <div className="space-y-3 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="text-sm font-semibold text-slate-700">{row.label}</div>
-          <div className="text-xs text-slate-500">{block.cdu_name}</div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="input h-9 w-40" />
-          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="input h-9 w-40" />
-        </div>
-      </div>
-
-      <div className="overflow-x-auto rounded-md border border-slate-200 bg-white">
-        <table className="w-full table-fixed text-sm">
-          <thead className="bg-slate-100 text-xs text-slate-600">
-            <tr>
-              <th className="w-36 px-3 py-2 text-left">Код</th>
-              <th className="w-36 px-3 py-2 text-left">ISIN</th>
-              <th className="w-44 px-3 py-2 text-right">Количество</th>
-              <th className="w-44 px-3 py-2 text-right">Номинал</th>
-              <th className="w-44 px-3 py-2 text-right">Сумма</th>
-              <th className="w-24 px-3 py-2 text-right">YTM</th>
-              <th className="w-24 px-3 py-2 text-right">Duration</th>
-              <th className="w-32 px-3 py-2 text-left">Первая дата</th>
-              <th className="w-32 px-3 py-2 text-left">Последняя дата</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((item) => (
-              <tr key={`${item.instrument_code}-${item.isin ?? ''}`} className="border-t border-slate-100">
-                <td className="px-3 py-2 font-mono text-xs">{item.instrument_code}</td>
-                <td className="px-3 py-2 font-mono text-xs">{item.isin ?? '—'}</td>
-                <td className="px-3 py-2 text-right">{formatNumber(item.quantity, 2)}</td>
-                <td className="px-3 py-2 text-right">{formatNumber(item.face_value, 0)}</td>
-                <td className="px-3 py-2 text-right font-medium">{formatNumber(item.amount, 0)}</td>
-                <td className="px-3 py-2 text-right">{item.ytm != null ? formatPct(item.ytm) : '—'}</td>
-                <td className="px-3 py-2 text-right">{item.duration != null ? formatNumber(item.duration, 2) : '—'}</td>
-                <td className="px-3 py-2">{item.first_date ? formatDate(item.first_date) : '—'}</td>
-                <td className="px-3 py-2">{item.last_date ? formatDate(item.last_date) : '—'}</td>
-              </tr>
-            ))}
-            {!loading && items.length === 0 && (
-              <tr>
-                <td colSpan={9} className="px-3 py-6 text-center text-slate-400">Нет детализации за выбранный период</td>
-              </tr>
-            )}
-            {loading && (
-              <tr>
-                <td colSpan={9} className="px-3 py-6 text-center text-slate-400">Загрузка…</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
     </div>
   )
 }

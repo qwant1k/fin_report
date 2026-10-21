@@ -13,6 +13,7 @@ import {
   FileText,
   GitCompare,
   ListChecks,
+  Plus,
   RefreshCw,
   ShieldAlert,
   UploadCloud,
@@ -27,6 +28,18 @@ import { useWorkContextStore } from '@/lib/workContext'
 import { formatDate, formatNumber, formatPct } from '@/lib/format'
 import { EmptyState, PageHeader, StatCard } from '@/components/ui'
 import DayProcessTimeline, { type DayProcessStep, type StepStatus } from '@/components/workday/DayProcessTimeline'
+import QuickUpload from '@/components/workday/QuickUpload'
+import OperationWizard from '@/components/OperationWizard'
+import { useUploadProgress } from '@/lib/uploadQueue'
+import {
+  categoryLabel,
+  documentTypeLabel,
+  operationLabel,
+  processStatusLabel,
+  reportTypeLabel,
+  workflowStatusLabel,
+} from '@/lib/displayLabels'
+import { apiErrorMessage } from '@/lib/notifications'
 
 interface WorkdayCdu {
   cdu_id: number
@@ -159,15 +172,6 @@ const STATUS_META = {
   },
 } as const
 
-const DOC_LABEL: Record<string, string> = {
-  TRADE_REPORT: 'TradeReport',
-  HOLDINGS: 'Holdings',
-  RECONCILIATION: 'Сверка',
-  CERTIFICATE: 'Биржевик',
-  STATEMENT_PDF: 'Выписка',
-  RISK_REPORT_XLSM: 'Risk Report',
-}
-
 interface ReconciliationLite {
   recon_date: string
   status: string
@@ -188,6 +192,7 @@ export default function WorkdayPage() {
   // Позиций, KASE, Сверки и Отчётов.
   const workDate = useWorkContextStore((s) => s.workDate)
   const [detail, setDetail] = useState<WorkdayDetail>(null)
+  const [wizardOpen, setWizardOpen] = useState(false)
 
   const summary = useQuery<WorkdaySummary>({
     queryKey: ['workday', workDate],
@@ -214,6 +219,11 @@ export default function WorkdayPage() {
     queryKey: ['workday-alerts'],
     queryFn: async () => (await api.get('/dashboard/alerts', { params: { since_days: 60 } })).data,
   })
+  const uploadProgress = useUploadProgress()
+  // как только очередная загрузка завершилась — обновляем сводку дня
+  useEffect(() => {
+    if (uploadProgress.done + uploadProgress.failed > 0) qc.invalidateQueries({ queryKey: ['workday'] })
+  }, [uploadProgress.done, uploadProgress.failed, qc])
   const missingCdus = useMemo(() => data?.cdus.filter((c) => c.status === 'missing') ?? [], [data])
   const loadedButUncalculated = useMemo(() => data?.cdus.filter((c) => c.status === 'loaded') ?? [], [data])
   const flaggedCount = useMemo(
@@ -242,10 +252,11 @@ export default function WorkdayPage() {
   const recalc = useMutation({
     mutationFn: async () => (await api.post('/calculate/', { report_date: effectiveWorkDate, recalculate: true })).data,
     onSuccess: (result) => {
-      toast.success(`Расчет завершен: ЧДУ ${result.cdus_processed}, нарушений ${result.breaches_count}`)
+      toast.success(`Расчёт завершён: обработано ЧДУ ${result.cdus_processed}, найдено нарушений ${result.breaches_count}.`)
       qc.invalidateQueries({ queryKey: ['workday'] })
       qc.invalidateQueries({ queryKey: ['dashboard'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, `Не удалось выполнить расчёт за ${formatDate(effectiveWorkDate)}`)),
   })
 
   // Coupons / redemptions / FIFO control / AR closing + calculation for the
@@ -257,10 +268,11 @@ export default function WorkdayPage() {
       const coupons = result?.coupons?.trades ?? 0
       const redemptions = result?.redemptions?.trades ?? 0
       const ar = result?.ar_close?.closed ?? 0
-      toast.success(`Автоматизация: купонов ${coupons}, погашений ${redemptions}, закрыто дебиторки ${ar}`)
+      toast.success(`Автоматическая обработка завершена: купонов ${coupons}, погашений ${redemptions}, закрыто задолженностей ${ar}.`)
       qc.invalidateQueries({ queryKey: ['workday'] })
       qc.invalidateQueries({ queryKey: ['dashboard'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, `Не удалось выполнить автоматическую обработку за ${formatDate(effectiveWorkDate)}`)),
   })
 
   const exportReport = useMutation({
@@ -272,10 +284,12 @@ export default function WorkdayPage() {
       downloadBlob(resp.data, `risk_report_${effectiveWorkDate.replaceAll('-', '')}.${type}`)
       return type
     },
-    onSuccess: () => {
+    onSuccess: (type) => {
+      toast.success(`Отчёт за ${formatDate(effectiveWorkDate)} сформирован и скачан в формате ${type.toUpperCase()}.`)
       qc.invalidateQueries({ queryKey: ['workday'] })
       qc.invalidateQueries({ queryKey: ['reports'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, `Не удалось сформировать отчёт за ${formatDate(effectiveWorkDate)}`)),
   })
 
   // Единый операционный центр рабочего дня: 5 стадий вместо перехода по 6-8 экранам.
@@ -284,7 +298,9 @@ export default function WorkdayPage() {
   const steps: DayProcessStep[] = useMemo(() => {
     if (!data) return []
 
-    const uploadStatus: StepStatus = missingCdus.length === 0 ? 'done' : data.loaded_cdus > 0 ? 'in_progress' : 'pending'
+    const uploadsRunning = uploadProgress.active + uploadProgress.waiting > 0
+    const uploadStatus: StepStatus =
+      missingCdus.length === 0 && !uploadsRunning ? 'done' : data.loaded_cdus > 0 || uploadsRunning ? 'in_progress' : 'pending'
     const calcStatus: StepStatus =
       data.active_cdus > 0 && data.ready_cdus === data.active_cdus ? 'done' : data.loaded_cdus > 0 ? 'in_progress' : 'pending'
     const reconStatus: StepStatus = mismatches.length > 0 ? 'error' : reconciliationForDate.length > 0 ? 'done' : 'pending'
@@ -304,16 +320,27 @@ export default function WorkdayPage() {
         title: 'Загрузка',
         icon: UploadCloud,
         status: uploadStatus,
-        meta: `${data.loaded_cdus}/${data.active_cdus} ЧДУ загружено`,
-        action: uploadStatus !== 'done' && can('upload.trade_report')
-          ? { label: 'Загрузить документы', onClick: () => navigate('/documents') }
+        // загружены не все ЧДУ — это не повод стоять: следующие шаги доступны сразу
+        nonBlocking: data.loaded_cdus > 0 || uploadsRunning,
+        busy: uploadsRunning,
+        meta: uploadsRunning
+          ? `идёт загрузка ${uploadProgress.done}/${uploadProgress.total} · ${data.loaded_cdus}/${data.active_cdus} ЧДУ`
+          : `${data.loaded_cdus}/${data.active_cdus} ЧДУ загружено`,
+        action: uploadStatus !== 'done' && (can('upload.trade_report') || can('primary_data.upload'))
+          ? { label: 'Открыть загрузку', onClick: () => navigate('/documents') }
           : undefined,
         detail: (
-          <p className="text-sm text-slate-600">
-            {missingCdus.length > 0
-              ? `Нет данных по ${missingCdus.length} ЧДУ: ${missingCdus.map((c) => c.short_name).join(', ')}.`
-              : 'Документы получены по всем активным ЧДУ.'}
-          </p>
+          <div>
+            <p className="text-sm text-slate-600">
+              {missingCdus.length > 0
+                ? `Нет данных по ${missingCdus.length} ЧДУ: ${missingCdus.map((c) => c.short_name).join(', ')}.`
+                : 'Документы получены по всем активным ЧДУ.'}
+              {missingCdus.length > 0 && data.loaded_cdus > 0 && ' Остальные шаги уже доступны — недостающие документы можно догрузить позже.'}
+            </p>
+            {(can('upload.trade_report') || can('primary_data.upload')) && (
+              <QuickUpload workDate={effectiveWorkDate} />
+            )}
+          </div>
         ),
       },
       {
@@ -321,6 +348,8 @@ export default function WorkdayPage() {
         title: 'Парсинг и расчёт',
         icon: FileSearch,
         status: calcStatus,
+        // все загруженные ЧДУ рассчитаны — недостающие не мешают сверке и отчёту
+        nonBlocking: data.ready_cdus > 0 && data.ready_cdus >= data.loaded_cdus,
         meta: `${data.ready_cdus}/${data.active_cdus} ЧДУ рассчитано · KASE/MBM обновляются по расписанию`,
         action: calcStatus !== 'done' && can('dashboard.calculate')
           ? { label: 'Пересчитать', onClick: () => recalc.mutate() }
@@ -359,7 +388,7 @@ export default function WorkdayPage() {
         icon: FileText,
         status: reportStatus,
         meta: data.reports[0]
-          ? `${data.reports[0].report_type} v${data.reports[0].version} · ${data.reports[0].status}`
+          ? `${reportTypeLabel(data.reports[0].report_type)} v${data.reports[0].version} · ${workflowStatusLabel(data.reports[0].status)}`
           : 'Отчёты ещё не выпускались',
         blockedReason:
           reportStatus === 'blocked'
@@ -372,7 +401,7 @@ export default function WorkdayPage() {
     ]
   }, [
     data, missingCdus, mismatches, reconciliationForDate, unresolvedAlerts, unresolvedCritical,
-    flaggedCount, can, recalc, exportReport, navigate,
+    flaggedCount, can, recalc, exportReport, navigate, uploadProgress, effectiveWorkDate,
   ])
 
   const openStepFullScreen = (stepId: string) => {
@@ -401,6 +430,7 @@ export default function WorkdayPage() {
       />
 
       <DayProcessTimeline steps={steps} onOpenFullScreen={openStepFullScreen} />
+      <OperationWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
 
       <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
@@ -436,7 +466,7 @@ export default function WorkdayPage() {
           title="Отчеты"
           value={data?.reports.length ?? 0}
           format={(n) => formatNumber(n, 0)}
-          subtitle={data?.reports[0] ? `${data.reports[0].report_type} v${data.reports[0].version}` : 'Еще не выпускались'}
+          subtitle={data?.reports[0] ? `${reportTypeLabel(data.reports[0].report_type)} v${data.reports[0].version}` : 'Еще не выпускались'}
           icon={FileText}
           accent="violet"
           active={detail?.type === 'reports'}
@@ -472,6 +502,13 @@ export default function WorkdayPage() {
                   <UploadCloud className="h-4 w-4" />
                   Загрузить документы
                 </Link>
+              )}
+              {(can('manual.cash.manage') || can('manual.trades.manage')) && (
+                <button className="btn-secondary" onClick={() => setWizardOpen(true)}
+                  title="Поступление денег, покупка ЦБ, закрытие дебиторки и другие ручные операции">
+                  <Plus className="h-4 w-4" />
+                  Новая операция
+                </button>
               )}
               {can('automation.run') && (
                 <button
@@ -579,7 +616,7 @@ export default function WorkdayPage() {
               <ActionRow
                 tone={data?.reports.length ? 'ok' : 'neutral'}
                 title={data?.reports.length ? 'Отчеты сформированы' : 'Отчеты еще не сформированы'}
-                text={data?.reports.map((r) => `${r.report_type} v${r.version}`).join(', ') || 'Сформируйте XLSX/PDF после проверки'}
+                text={data?.reports.map((r) => `${reportTypeLabel(r.report_type)} v${r.version}`).join(', ') || 'Сформируйте отчёт Excel или PDF после проверки'}
                 to="/reports"
               />
             </div>
@@ -621,7 +658,7 @@ export default function WorkdayPage() {
                   className="flex w-full items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-left transition hover:border-emerald-200 hover:bg-emerald-50"
                 >
                   <div>
-                    <div className="text-sm font-semibold">{DOC_LABEL[doc.doc_type] ?? doc.doc_type}</div>
+                    <div className="text-sm font-semibold">{documentTypeLabel(doc.doc_type)}</div>
                     <div className="text-xs text-slate-500">строк: {formatNumber(doc.rows_imported, 0)}</div>
                   </div>
                   <span className="badge-neutral">{doc.count}</span>
@@ -631,7 +668,7 @@ export default function WorkdayPage() {
                 <EmptyState
                   icon={FileSpreadsheet}
                   title="Документов за дату нет"
-                  description="Загрузите TradeReport или пакет первичных документов."
+                  description="Загрузите отчёт о сделках или пакет первичных документов."
                   className="py-8"
                 />
               )}
@@ -662,8 +699,8 @@ export default function WorkdayPage() {
               {(data?.recent_documents ?? []).map((doc) => (
                 <tr key={doc.id}>
                   <td className="max-w-[420px] truncate font-medium" title={doc.file_name}>{doc.file_name}</td>
-                  <td>{DOC_LABEL[doc.doc_type] ?? doc.doc_type}</td>
-                  <td>{doc.parse_status}</td>
+                  <td>{documentTypeLabel(doc.doc_type)}</td>
+                  <td>{processStatusLabel(doc.parse_status)}</td>
                   <td className="text-right">{formatNumber(doc.rows_imported, 0)}</td>
                   <td>{formatDate(doc.uploaded_at)}</td>
                 </tr>
@@ -709,7 +746,7 @@ function WorkdayDetailPanel({
     : data.recent_documents
   const titleByType: Record<Exclude<WorkdayDetail, null>['type'], string> = {
     readiness: 'Детализация готовности ЧДУ',
-    operations: 'Операции за день в формате Trade Report',
+    operations: 'Операции за день из отчёта о сделках',
     assets: 'Активы по расчёту',
     reports: 'Отчёты за дату',
     documents: 'Документы дня',
@@ -776,7 +813,7 @@ function WorkdayDetailPanel({
                 <th>Цена</th>
                 <th>Объём</th>
                 <th>Доходность</th>
-                <th>REPO</th>
+                <th>РЕПО</th>
                 <th>Файл</th>
               </tr>
             </thead>
@@ -796,7 +833,7 @@ function WorkdayDetailPanel({
                   <td>{row.regime_code ?? '—'}</td>
                   <td>
                     <div className="font-medium">{row.instrument_code ?? '—'}</div>
-                    <div className="text-xs text-slate-500">{row.instrument_category ?? row.operation_type ?? ''}</div>
+                    <div className="text-xs text-slate-500">{row.instrument_category ? categoryLabel(row.instrument_category) : row.operation_type ? operationLabel(row.operation_type) : ''}</div>
                   </td>
                   <td className="text-right">{formatNumber(row.price, 4)}</td>
                   <td className="text-right">
@@ -818,7 +855,7 @@ function WorkdayDetailPanel({
               {!rawTradesLoading && rawTrades.length === 0 && (
                 <tr>
                   <td colSpan={11} className="py-10 text-center text-slate-400">
-                    Исходных строк Trade Report за выбранную дату нет.
+                    Исходных строк отчёта о сделках за выбранную дату нет.
                   </td>
                 </tr>
               )}
@@ -846,7 +883,7 @@ function WorkdayDetailPanel({
                 <th>MV</th>
                 <th>Изменение</th>
                 <th>YTM</th>
-                <th>Duration</th>
+                <th>Дюрация</th>
                 <th>Документ</th>
               </tr>
             </thead>
@@ -899,9 +936,9 @@ function WorkdayDetailPanel({
                 {data.reports.map((report) => (
                   <tr key={report.id}>
                     <td>{report.id}</td>
-                    <td>{report.report_type}</td>
+                    <td>{reportTypeLabel(report.report_type)}</td>
                     <td>v{report.version}</td>
-                    <td>{report.status}</td>
+                    <td>{workflowStatusLabel(report.status)}</td>
                     <td>{formatDate(report.generated_at)}</td>
                   </tr>
                 ))}
@@ -932,8 +969,8 @@ function WorkdayDetailPanel({
               {documents.map((doc) => (
                 <tr key={doc.id}>
                   <td className="max-w-[520px] truncate font-medium" title={doc.file_name}>{doc.file_name}</td>
-                  <td>{DOC_LABEL[doc.doc_type] ?? doc.doc_type}</td>
-                  <td>{doc.parse_status}</td>
+                  <td>{documentTypeLabel(doc.doc_type)}</td>
+                  <td>{processStatusLabel(doc.parse_status)}</td>
                   <td className="text-right">{formatNumber(doc.rows_imported, 0)}</td>
                   <td>{formatDate(doc.uploaded_at)}</td>
                 </tr>

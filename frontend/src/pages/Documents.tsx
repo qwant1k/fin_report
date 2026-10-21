@@ -1,7 +1,7 @@
-import { useCallback, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import { useDropzone } from 'react-dropzone'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AxiosError } from 'axios'
 import {
   AlertCircle,
   Building2,
@@ -26,56 +26,23 @@ import { useConfirm } from '@/lib/confirm'
 import { useWorkContextStore } from '@/lib/workContext'
 import { CDU, TradeFile } from '@/lib/types'
 import { formatDate } from '@/lib/format'
+import { apiErrorMessage } from '@/lib/notifications'
+import { documentTypeLabel, processStatusLabel } from '@/lib/displayLabels'
+import {
+  GUESS_LABEL, makeQueueItems, useUploadProgress, useUploadQueue,
+  type QueueItem, type QueueStatus, type UploadRoute,
+} from '@/lib/uploadQueue'
 
-// ─────────────────────────── маршрутизация файлов ───────────────────────────
-// В системе два независимых загрузчика:
-//  - /upload/trade-report — специализированный: проверка цен KASE, авто-ЧДУ,
-//    явная обработка дублей. Клиент явно указывает, что это Trade Report.
-//  - /primary-data/upload — общий импортёр Holdings/Сверки/Биржевых свидетельств/
-//    Выписок. Он САМ определяет подтип по названию файла на сервере — клиент
-//    не может выбрать конкретный подтип, поэтому мы не показываем это как
-//    редактируемый выбор (это было бы обманом: выбор ничего не меняет).
-type UploadRoute = 'trade_report' | 'primary'
-
-// Тот же эвристический guess, что использует backend (_detect_file_type в
-// primary_data_routes.py) — только для превью пользователю, не для реальной
-// классификации: окончательное решение всегда принимает сервер.
-type GuessedType = 'trade_report' | 'holdings' | 'reconciliation' | 'exchange_certificate' | 'pdf_statement' | 'unknown'
-
-const GUESS_LABEL: Record<GuessedType, string> = {
-  trade_report: 'Trade Report',
-  holdings: 'Holdings',
-  reconciliation: 'Сверка',
-  exchange_certificate: 'Биржевое свидетельство',
-  pdf_statement: 'Выписка PDF',
-  unknown: 'не определён — сервер может отклонить файл',
+const AUTO_KEY = 'kdif.upload.autostart'
+function readAutoStart(): boolean {
+  try { return localStorage.getItem(AUTO_KEY) !== '0' } catch { return true }
 }
 
-function guessType(filename: string): GuessedType {
-  const f = filename.toLowerCase()
-  if (/\.(xlsx|xlsm)$/.test(f) && (f.includes('trade report') || f.includes('trade_report') || f.includes('сделки') || f.includes('trade'))) {
-    return 'trade_report'
-  }
-  if (f.endsWith('.xlsx') && (f.includes('holdings') || f.includes('позиции') || f.includes('активах'))) return 'holdings'
-  if (f.endsWith('.xlsx') && (f.includes('сверка') || f.includes('recon'))) return 'reconciliation'
-  if (/\.(pdf|png|jpe?g|docx)$/.test(f) && (f.includes('биржев') || f.includes('certificate') || f.includes('cert'))) return 'exchange_certificate'
-  if (f.endsWith('.pdf') && (f.includes('выписка') || f.includes('statement'))) return 'pdf_statement'
-  if (/\.(xlsx|xlsm)$/.test(f)) return 'trade_report'
-  return 'unknown'
-}
-
+// Очередь загрузки — глобальная (lib/uploadQueue.ts): файлы импортируются в фоне,
+// по несколько одновременно, и каждый документ доступен сразу после своей загрузки.
+// Можно уйти со страницы и продолжать работу — прогресс виден в шапке.
 // Реальные коды типа документа, которые хранит backend (см. Workday.tsx DOC_LABEL
 // и api/routes/primary_data_routes.py::_to_doc_type) — используются в истории загрузок.
-const BACKEND_DOC_LABEL: Record<string, string> = {
-  TRADE_REPORT: 'Trade Report',
-  HOLDINGS: 'Holdings',
-  RECONCILIATION: 'Сверка',
-  CERTIFICATE: 'Биржевое свидетельство',
-  STATEMENT_PDF: 'Выписка PDF',
-  RISK_REPORT_XLSM: 'Risk Report',
-  OTHER: 'Прочее',
-}
-
 const BACKEND_DOC_ICON: Record<string, ReactNode> = {
   TRADE_REPORT: <FileSpreadsheet className="h-4 w-4 text-emerald-600" />,
   HOLDINGS: <FileSpreadsheet className="h-4 w-4 text-sky-600" />,
@@ -83,29 +50,6 @@ const BACKEND_DOC_ICON: Record<string, ReactNode> = {
   CERTIFICATE: <FileText className="h-4 w-4 text-violet-600" />,
   STATEMENT_PDF: <FileText className="h-4 w-4 text-red-600" />,
   RISK_REPORT_XLSM: <FileText className="h-4 w-4 text-emerald-600" />,
-}
-
-type QueueStatus = 'queued' | 'uploading' | 'done' | 'error' | 'duplicate'
-
-interface QueueItem {
-  id: string
-  file: File
-  guess: GuessedType
-  route: UploadRoute
-  cduId: number | ''
-  tradeDate: string
-  status: QueueStatus
-  message?: string
-}
-
-interface DuplicateExisting {
-  file_id: number
-  filename: string
-  uploaded_at: string | null
-  uploaded_by: string | null
-  trade_date: string | null
-  status: string
-  rows_parsed: number
 }
 
 interface SourceDoc {
@@ -133,10 +77,17 @@ export default function DocumentsPage() {
   const canPrimary = useAuthStore((s) => s.can('primary_data.upload'))
   const canUploadAny = canTradeReport || canPrimary
 
-  const [queue, setQueue] = useState<QueueItem[]>([])
+  const queue = useUploadQueue((s) => s.items)
+  const duplicate = useUploadQueue((s) => s.duplicate)
+  const { add, update: updateItem, remove: removeItem, clearDone, start, resolveDuplicate: resolveDup } = useUploadQueue.getState()
+  const progress = useUploadProgress()
   const [historyTab, setHistoryTab] = useState<'trade_report' | 'primary'>('trade_report')
-  const [duplicate, setDuplicate] = useState<{ item: QueueItem; existing: DuplicateExisting } | null>(null)
   const [duplicateBusy, setDuplicateBusy] = useState<'replace' | 'new_version' | null>(null)
+  const [autoStart, setAutoStart] = useState(readAutoStart)
+  const toggleAutoStart = (v: boolean) => {
+    setAutoStart(v)
+    try { localStorage.setItem(AUTO_KEY, v ? '1' : '0') } catch { /* private mode */ }
+  }
 
   const cdus = useQuery<CDU[]>({
     queryKey: ['cdus'],
@@ -155,27 +106,13 @@ export default function DocumentsPage() {
     enabled: historyTab === 'primary',
   })
 
-  const updateItem = (id: string, patch: Partial<QueueItem>) =>
-    setQueue((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)))
-  const removeItem = (id: string) => setQueue((prev) => prev.filter((it) => it.id !== id))
-
   const onDrop = useCallback(
     (accepted: File[]) => {
-      const items: QueueItem[] = accepted.map((file) => {
-        const guess = guessType(file.name)
-        return {
-          id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          file,
-          guess,
-          route: guess === 'trade_report' ? 'trade_report' : 'primary',
-          cduId: '',
-          tradeDate: workDate,
-          status: 'queued',
-        }
-      })
-      setQueue((prev) => [...prev, ...items])
+      if (!accepted.length) return
+      add(makeQueueItems(accepted, workDate), autoStart)
+      if (autoStart) toast(`Начата загрузка файлов: ${accepted.length}. Прогресс доступен в верхней панели.`, { icon: '⏳' })
     },
-    [workDate],
+    [workDate, autoStart, add],
   )
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -184,77 +121,12 @@ export default function DocumentsPage() {
     disabled: !canUploadAny,
   })
 
-  const uploadTradeReport = async (item: QueueItem, onDuplicate?: 'replace' | 'new_version') => {
-    const fd = new FormData()
-    fd.append('file', item.file)
-    if (item.cduId) fd.append('cdu_id', String(item.cduId))
-    if (item.tradeDate) fd.append('trade_date', item.tradeDate)
-    if (onDuplicate) fd.append('on_duplicate', onDuplicate)
-    return (await api.post('/upload/trade-report', fd, { headers: { 'Content-Type': 'multipart/form-data' } })).data
-  }
-
-  const uploadPrimary = async (item: QueueItem) => {
-    const fd = new FormData()
-    fd.append('file', item.file)
-    return (await api.post('/primary-data/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })).data
-  }
-
-  const processItem = async (item: QueueItem, onDuplicate?: 'replace' | 'new_version') => {
-    updateItem(item.id, { status: 'uploading', message: undefined })
-    try {
-      if (item.route === 'trade_report') {
-        const r = await uploadTradeReport(item, onDuplicate)
-        const pc = r?.price_check
-        toast.success(`${r.cdu_name ?? item.file.name} • строк: ${r.rows_parsed}, пропущено: ${r.rows_skipped}`)
-        if (pc?.flagged > 0) {
-          toast(`Расхождение с KASE: ${pc.flagged} из ${pc.checked} сделок заменены на цену KASE`, { icon: '⚑', duration: 6000 })
-        }
-        updateItem(item.id, { status: 'done', message: `${r.rows_parsed} строк импортировано` })
-        qc.invalidateQueries({ queryKey: ['trade-files'] })
-      } else {
-        const r = await uploadPrimary(item)
-        // Важно: при ошибке импорта backend отвечает HTTP 200 с status="FAILED" в теле
-        // (см. api/routes/primary_data_routes.py), а не HTTP-ошибкой — если не проверить
-        // это явно, неудачный импорт выглядел бы как успешный.
-        if (r.status === 'FAILED') {
-          toast.error(r.message ?? 'Импорт не выполнен')
-          updateItem(item.id, { status: 'error', message: r.message ?? 'Импорт не выполнен' })
-        } else if (r.status === 'SKIPPED') {
-          toast('Пропущено — файл уже был импортирован ранее', { icon: 'ℹ️' })
-          updateItem(item.id, { status: 'done', message: 'Пропущено (дубликат)' })
-        } else {
-          toast.success('Импорт завершён')
-          updateItem(item.id, { status: 'done', message: r.message ?? 'Импортировано' })
-        }
-        qc.invalidateQueries({ queryKey: ['primary-documents'] })
-      }
-    } catch (err) {
-      const axErr = err as AxiosError<{ detail?: any }>
-      const detail = axErr.response?.data?.detail
-      if (item.route === 'trade_report' && axErr.response?.status === 409 && detail?.error === 'duplicate_file') {
-        setDuplicate({ item, existing: detail.existing as DuplicateExisting })
-        updateItem(item.id, { status: 'duplicate', message: 'Дубликат — выберите действие' })
-        return
-      }
-      const message = (typeof detail === 'string' && detail) || axErr.message || 'Ошибка импорта'
-      updateItem(item.id, { status: 'error', message })
-    }
-  }
-
-  const importAll = async () => {
-    const pending = queue.filter((it) => it.status === 'queued' || it.status === 'error')
-    for (const item of pending) {
-      // Загружаем последовательно — так проще читать статус каждого файла и не перегружать сервер.
-      await processItem(item)
-    }
-  }
+  const importAll = () => start()
 
   const resolveDuplicate = async (action: 'replace' | 'new_version') => {
-    if (!duplicate) return
     setDuplicateBusy(action)
     try {
-      await processItem(duplicate.item, action)
-      setDuplicate(null)
+      await resolveDup(action)
     } finally {
       setDuplicateBusy(null)
     }
@@ -264,17 +136,19 @@ export default function DocumentsPage() {
     mutationFn: async ({ id, cduId }: { id: number; cduId: number }) =>
       (await api.put(`/upload/files/${id}/cdu`, null, { params: { cdu_id: cduId } })).data,
     onSuccess: () => {
-      toast.success('ЧДУ обновлён')
+      toast.success('Файл привязан к выбранному ЧДУ; данные обновлены.')
       qc.invalidateQueries({ queryKey: ['trade-files'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось изменить ЧДУ для файла')),
   })
 
   const removeTradeFile = useMutation({
     mutationFn: async (id: number) => (await api.delete(`/upload/files/${id}`)).data,
     onSuccess: () => {
-      toast.success('Файл удалён')
+      toast.success('Файл и связанные с ним импортированные данные удалены.')
       qc.invalidateQueries({ queryKey: ['trade-files'] })
     },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось удалить файл')),
   })
 
   const queuedCount = useMemo(() => queue.filter((it) => it.status === 'queued' || it.status === 'error').length, [queue])
@@ -284,7 +158,7 @@ export default function DocumentsPage() {
       <PageHeader
         icon={UploadCloud}
         title="Загрузка документов"
-        subtitle="Trade Report и первичные документы ЧДУ — в одном месте, с проверкой перед импортом"
+        subtitle="Отчёты о сделках и первичные документы ЧДУ — в одном месте, с проверкой перед импортом"
       />
 
       {canUploadAny && (
@@ -304,7 +178,7 @@ export default function DocumentsPage() {
               {isDragActive ? 'Отпустите файлы для добавления в очередь' : 'Перетащите файлы сюда или кликните'}
             </div>
             <div className="mt-1 text-xs text-slate-500">
-              Trade Report, Holdings, Сверка, Биржевые свидетельства, Выписки PDF — можно вперемешку
+              Отчёты о сделках, данные портфеля, файлы сверки, биржевые свидетельства, выписки PDF и файлы НБ РК — можно вперемешку
             </div>
             <div className="mt-3 flex items-center justify-center gap-2">
               <span className="badge-neutral">.xlsx</span>
@@ -312,14 +186,29 @@ export default function DocumentsPage() {
               <span className="badge-neutral">.pdf</span>
               <span className="badge-neutral">.docx</span>
               <span className="badge-neutral">.png</span>
+              <span className="badge-neutral">.csv</span>
             </div>
           </div>
-          <p className="flex items-start gap-1.5 text-xs text-slate-500">
-            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
-            Ничего не загружается сразу после выбора файла. Trade Report обрабатывается отдельно (проверка ЧДУ, даты
-            и цен KASE) — остальные документы система классифицирует сама по содержимому при импорте; ниже показан
-            только предварительный ориентир по названию файла.
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 text-emerald-600"
+                checked={autoStart}
+                onChange={(e) => toggleAutoStart(e.target.checked)}
+              />
+              Загружать сразу после выбора файлов
+            </label>
+            <p className="flex items-start gap-1.5 text-xs text-slate-600">
+              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
+              <span>
+                Файлы грузятся в фоне по 3 одновременно. Каждый документ доступен сразу после своей загрузки —
+                не нужно ждать остальные. Можно перейти в{' '}
+                <Link to="/workday" className="font-medium text-emerald-700 underline">Рабочий день</Link>{' '}
+                или другой раздел: прогресс виден внизу экрана.
+              </span>
+            </p>
+          </div>
         </div>
       )}
 
@@ -328,12 +217,16 @@ export default function DocumentsPage() {
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-4">
             <div>
               <h2 className="section-title">Очередь на импорт</h2>
-              <p className="text-sm text-slate-500">Проверьте маршрут обработки, ЧДУ и дату перед загрузкой</p>
+              <p className="text-sm text-slate-500">
+                {progress.active + progress.waiting > 0
+                  ? `Загружается: готово ${progress.done} из ${progress.total}${progress.failed ? `, ошибок ${progress.failed}` : ''} — можно продолжать работу`
+                  : 'Для отчёта о сделках можно указать ЧДУ и дату; остальные документы сервер распознает сам'}
+              </p>
             </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setQueue((prev) => prev.filter((it) => it.status !== 'done'))}
+                onClick={clearDone}
                 className="btn-ghost h-9 px-3 text-xs"
               >
                 Скрыть завершённые
@@ -359,7 +252,8 @@ export default function DocumentsPage() {
                 onChangeRoute={(route) => updateItem(item.id, { route })}
                 onChangeCdu={(cduId) => updateItem(item.id, { cduId })}
                 onChangeDate={(tradeDate) => updateItem(item.id, { tradeDate })}
-                onImport={() => processItem(item)}
+                onImport={() => start([item.id])}
+                onResolveDuplicate={() => useUploadQueue.getState().openDuplicate(item.id)}
                 onRemove={() => removeItem(item.id)}
               />
             ))}
@@ -380,7 +274,7 @@ export default function DocumentsPage() {
               value={historyTab}
               onChange={setHistoryTab}
               options={[
-                { value: 'trade_report', label: 'Trade Report' },
+                { value: 'trade_report', label: 'Отчёты о сделках' },
                 { value: 'primary', label: 'Первичные документы' },
               ]}
             />
@@ -433,9 +327,9 @@ export default function DocumentsPage() {
                     <td>{f.rows_parsed} / {f.rows_skipped}</td>
                     <td>
                       {f.status === 'PARSED' || f.status === 'IMPORTED' ? (
-                        <span className="badge-ok"><CheckCircle2 className="mr-1 inline h-3 w-3" />{f.status}</span>
+                        <span className="badge-ok"><CheckCircle2 className="mr-1 inline h-3 w-3" />{processStatusLabel(f.status)}</span>
                       ) : (
-                        <span className="badge-warn"><AlertCircle className="mr-1 inline h-3 w-3" />{f.status}</span>
+                        <span className="badge-warn"><AlertCircle className="mr-1 inline h-3 w-3" />{processStatusLabel(f.status)}</span>
                       )}
                     </td>
                     <td>
@@ -443,7 +337,7 @@ export default function DocumentsPage() {
                         <button
                           onClick={async () => {
                             const { confirmed } = await confirm({
-                              title: 'Удалить файл Trade Report?',
+                              title: 'Удалить файл отчёта о сделках?',
                               description: `«${f.filename}» и связанные с ним сделки будут удалены безвозвратно.`,
                               tone: 'danger',
                               confirmLabel: 'Удалить',
@@ -488,12 +382,12 @@ export default function DocumentsPage() {
                     <td>
                       <span className="inline-flex items-center gap-1.5 text-xs text-slate-600">
                         {BACKEND_DOC_ICON[d.file_type] ?? <FileText className="h-4 w-4 text-slate-400" />}
-                        {BACKEND_DOC_LABEL[d.file_type] ?? d.file_type}
+                        {documentTypeLabel(d.file_type)}
                       </span>
                     </td>
                     <td>
                       <span className={cn('badge', d.import_status === 'OK' ? 'badge-ok' : d.import_status === 'ERROR' ? 'badge-breach' : 'badge-warn')}>
-                        {d.import_status}
+                        {processStatusLabel(d.import_status)}
                       </span>
                     </td>
                     <td>
@@ -520,7 +414,7 @@ export default function DocumentsPage() {
 
       <Modal
         open={!!duplicate}
-        onClose={() => { if (!duplicateBusy) setDuplicate(null) }}
+        onClose={() => { if (!duplicateBusy) resolveDup('cancel') }}
         size="lg"
         title={
           <span className="flex items-center gap-2">
@@ -529,8 +423,8 @@ export default function DocumentsPage() {
         }
         description="Контрольная сумма совпадает с существующим файлом. Выберите действие."
         footer={
-          <button disabled={!!duplicateBusy} onClick={() => setDuplicate(null)} className="btn-secondary">
-            Отменить
+          <button disabled={!!duplicateBusy} onClick={() => resolveDup('cancel')} className="btn-secondary">
+            Не загружать
           </button>
         }
       >
@@ -542,7 +436,7 @@ export default function DocumentsPage() {
               <div><span className="text-slate-500">Загружено:</span> {formatDate(duplicate.existing.uploaded_at) || '—'}</div>
               <div><span className="text-slate-500">Кем:</span> {duplicate.existing.uploaded_by ?? '—'}</div>
               <div><span className="text-slate-500">Строк:</span> {duplicate.existing.rows_parsed}</div>
-              <div><span className="text-slate-500">Статус:</span> {duplicate.existing.status}</div>
+              <div><span className="text-slate-500">Статус:</span> {processStatusLabel(duplicate.existing.status)}</div>
             </div>
             <div className="grid grid-cols-1 gap-2">
               <button disabled={!!duplicateBusy} onClick={() => resolveDuplicate('replace')} className="btn-primary justify-center">
@@ -589,6 +483,7 @@ function QueueRow({
   onChangeCdu,
   onChangeDate,
   onImport,
+  onResolveDuplicate,
   onRemove,
 }: {
   item: QueueItem
@@ -597,6 +492,7 @@ function QueueRow({
   onChangeCdu: (id: number | '') => void
   onChangeDate: (d: string) => void
   onImport: () => void
+  onResolveDuplicate: () => void
   onRemove: () => void
 }) {
   const busy = item.status === 'uploading'
@@ -613,6 +509,10 @@ function QueueRow({
         <div className="text-xs text-slate-400">
           {formatBytes(item.file.size)}
           {!isTradeReport && <span className="ml-1.5">· похоже на: {GUESS_LABEL[item.guess]}</span>}
+          {item.startedAt && item.status === 'uploading' && <Elapsed since={item.startedAt} />}
+          {item.startedAt && item.finishedAt && (
+            <span className="ml-1.5">· {Math.max(1, Math.round((item.finishedAt - item.startedAt) / 1000))} с</span>
+          )}
         </div>
       </div>
 
@@ -626,7 +526,7 @@ function QueueRow({
           disabled={locked}
           className={cn('rounded-md px-2.5 py-1 font-medium transition', isTradeReport ? 'bg-brand-gradient text-white' : 'text-slate-600 hover:bg-slate-50')}
         >
-          Trade Report
+          Отчёт о сделках
         </button>
         <button
           type="button"
@@ -674,6 +574,12 @@ function QueueRow({
             Импортировать
           </button>
         )}
+        {item.status === 'duplicate' && (
+          <button type="button" onClick={onResolveDuplicate} className="btn-secondary h-8 px-2.5 text-xs text-amber-700">
+            <AlertCircle className="h-3.5 w-3.5" />
+            Выбрать действие
+          </button>
+        )}
         {item.status !== 'uploading' && (
           <button type="button" onClick={onRemove} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600" aria-label="Убрать из очереди">
             <X className="h-4 w-4" />
@@ -682,4 +588,14 @@ function QueueRow({
       </div>
     </div>
   )
+}
+
+function Elapsed({ since }: { since: number }) {
+  const [, tick] = useState(0)
+  // re-render every second while the file is being processed (OCR can take a minute)
+  useEffect(() => {
+    const t = window.setInterval(() => tick((n) => n + 1), 1000)
+    return () => window.clearInterval(t)
+  }, [])
+  return <span className="ml-1.5">· {Math.round((Date.now() - since) / 1000)} с…</span>
 }

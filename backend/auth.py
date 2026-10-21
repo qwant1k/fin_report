@@ -81,6 +81,7 @@ PERMISSION_CATALOG: tuple[dict[str, str], ...] = (
 
 ALL_PERMISSIONS: tuple[str, ...] = tuple(item["code"] for item in PERMISSION_CATALOG)
 PAGE_PERMISSIONS: tuple[str, ...] = tuple(code for code in ALL_PERMISSIONS if code.startswith("page."))
+PERMISSION_LABELS: dict[str, str] = {item["code"]: item["label"] for item in PERMISSION_CATALOG}
 
 ANALYST_PAGES = (
     "page.dashboard", "page.analytics", "page.alerts", "page.upload",
@@ -272,7 +273,7 @@ def require_permission(permission: str):
         if not has_permission(user, permission, db):
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
-                f"Недостаточно прав: {permission}",
+                f"Недостаточно прав для действия «{PERMISSION_LABELS.get(permission, 'запрошенная операция')}»",
             )
         return user
 
@@ -287,9 +288,10 @@ def require_any_permission(*permissions: str):
         db: Session = Depends(get_db),
     ) -> User:
         if not has_any_permission(user, allowed, db):
+            labels = [PERMISSION_LABELS.get(permission, "запрошенная операция") for permission in allowed]
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
-                f"Недостаточно прав. Требуется одно из: {', '.join(allowed)}",
+                f"Недостаточно прав. Требуется одно из прав: {', '.join(labels)}",
             )
         return user
 

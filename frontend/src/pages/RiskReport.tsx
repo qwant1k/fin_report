@@ -15,6 +15,8 @@ import { api } from '@/lib/api'
 import { CDU } from '@/lib/types'
 import { useAuthStore } from '@/lib/auth'
 import { useConfirm } from '@/lib/confirm'
+import { processStatusLabel } from '@/lib/displayLabels'
+import { apiErrorMessage } from '@/lib/notifications'
 
 // ─────────────── types ───────────────
 
@@ -159,10 +161,10 @@ export default function RiskReportPage() {
   const removeNote = useMutation({
     mutationFn: async (id: number) => (await api.delete(`/risk-report/notes/${id}`)).data,
     onSuccess: () => {
-      toast.success('Заметка удалена')
+      toast.success('Заметка к отчёту о рисках удалена.')
       qc.invalidateQueries({ queryKey: ['rr-snapshot'] })
     },
-    onError: () => toast.error('Не удалось удалить'),
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось удалить заметку к отчёту о рисках')),
   })
 
   const summary = snapQ.data?.summary ?? []
@@ -182,7 +184,7 @@ export default function RiskReportPage() {
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold">
             <ShieldAlert className="h-6 w-6 text-emerald-600" />
-            Risk Report
+            Отчёт о рисках
           </h1>
           <p className="text-sm text-slate-500">
             Просмотр импортированных данных риск-отчёта и ручные дополнения / комментарии.
@@ -359,7 +361,7 @@ function SummaryTab({ rows }: { rows: RrSummary[] }) {
             <th className="text-right">Изм. за день</th>
             <th className="text-right">Доля</th>
             <th className="text-right">YTM</th>
-            <th className="text-right">Duration</th>
+            <th className="text-right">Дюрация</th>
             <th>Статус</th>
           </tr>
         </thead>
@@ -392,7 +394,7 @@ function SummaryTab({ rows }: { rows: RrSummary[] }) {
                         : 'bg-amber-50 text-amber-800 ring-amber-200'
                     }`}
                   >
-                    {r.duration_status}
+                    {processStatusLabel(r.duration_status)}
                   </span>
                 )}
               </td>
@@ -630,13 +632,10 @@ function NoteModal({
       return (await api.post('/risk-report/notes', payload)).data
     },
     onSuccess: () => {
-      toast.success(isEdit ? 'Заметка обновлена' : 'Заметка добавлена')
+      toast.success(isEdit ? 'Изменения заметки сохранены.' : 'Заметка добавлена к отчёту о рисках.')
       onSaved()
     },
-    onError: (err: any) => {
-      const detail = err?.response?.data?.detail
-      toast.error(typeof detail === 'string' ? detail : 'Не удалось сохранить')
-    },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось сохранить заметку к отчёту о рисках')),
   })
 
   return (
@@ -644,7 +643,7 @@ function NoteModal({
       <div className="card w-full max-w-xl bg-white shadow-xl">
         <div className="flex items-center justify-between border-b border-slate-200 p-4">
           <h2 className="text-lg font-semibold">
-            {isEdit ? 'Редактирование заметки' : 'Новая заметка к Risk Report'}
+            {isEdit ? 'Редактирование заметки' : 'Новая заметка к отчёту о рисках'}
           </h2>
           <button
             onClick={onClose}

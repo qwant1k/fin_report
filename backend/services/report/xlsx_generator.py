@@ -93,6 +93,8 @@ def generate_xlsx_report(db: Session, report_date: date, output_dir: Path) -> Pa
 
     wb = Workbook()
     _write_main_sheet(wb, db, report_date)
+    from services.report.detail_sheets import write_detail_sheets
+    write_detail_sheets(wb, db, report_date)
     _write_kase_sheet(wb, db, report_date)
     _write_history_sheet(wb, db, report_date)
     _write_alerts_sheet(wb, db, report_date)

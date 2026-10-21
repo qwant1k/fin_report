@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from auth import require_permission, require_user
+from auth import has_permission, require_any_permission, require_permission, require_user
 from database import get_db
 from models.db_models import (
     AccountReceivable, CashMovement, CDU, ReceivableTransaction, RepoLot,
@@ -523,6 +523,246 @@ def create_receivable_transaction(row_id: int, payload: dict[str, Any], db: Sess
     return _tx_dict(row)
 
 
+# ───────────────────── «Новая операция»: one form for all manual operations ─────────────────────
+#
+# The user picks the purpose of the operation (поступление денег, покупка ЦБ,
+# закрытие дебиторки, …); the purpose decides which ledger records are created.
+# Only the date and the amount are required.  Without a manager the operation
+# is booked in the fund's own portfolio («Собственные активы», NBRK_OWN), so it
+# still takes part in the fund total.  As every manual record it waits for the
+# approval of a second user and changes the books only after that.
+
+OPERATION_PURPOSES: list[dict[str, Any]] = [
+    {"code": "CASH_RECEIPT", "label": "Поступление денег", "group": "Деньги", "kind": "cash",
+     "movement_type": "RECEIPT", "sign": 1, "hint": "Зачисление на счёт: возврат средств, перевод, прочие поступления"},
+    {"code": "CONTRIBUTION", "label": "Передача средств в управление (взнос)", "group": "Деньги", "kind": "cash",
+     "movement_type": "CONTRIBUTION", "sign": 1, "hint": "Фонд перечислил деньги в портфель ЧДУ"},
+    {"code": "COUPON", "label": "Получение купона", "group": "Деньги", "kind": "cash",
+     "movement_type": "COUPON", "sign": 1, "hint": "Купон по бумаге — укажите ISIN, если известен"},
+    {"code": "OPENING_BALANCE", "label": "Входящий остаток денег", "group": "Деньги", "kind": "cash",
+     "movement_type": "INITIAL_BALANCE", "sign": 1, "hint": "Начальный остаток, если среза на дату нет"},
+    {"code": "CASH_PAYMENT", "label": "Оплата / списание денег", "group": "Деньги", "kind": "cash",
+     "movement_type": "PAYMENT", "sign": -1, "hint": "Списание со счёта: оплата услуг, налоги и т.п."},
+    {"code": "WITHDRAWAL", "label": "Изъятие средств из управления", "group": "Деньги", "kind": "cash",
+     "movement_type": "WITHDRAWAL", "sign": -1, "hint": "Возврат денег из портфеля ЧДУ в фонд"},
+    {"code": "COMMISSION", "label": "Комиссия", "group": "Деньги", "kind": "cash",
+     "movement_type": "COMMISSION", "sign": -1, "hint": "Комиссии биржи, кастодиана, брокера"},
+    {"code": "SECURITY_BUY", "label": "Покупка ценной бумаги", "group": "Ценные бумаги", "kind": "trade",
+     "operation_type": "BUY", "sign": -1, "hint": "Бумага попадёт в портфель на дату расчётов, деньги спишутся"},
+    {"code": "SECURITY_SELL", "label": "Продажа ценной бумаги", "group": "Ценные бумаги", "kind": "trade",
+     "operation_type": "SELL", "sign": 1, "hint": "Бумага списывается по FIFO, деньги поступают"},
+    {"code": "REDEMPTION", "label": "Погашение ценной бумаги", "group": "Ценные бумаги", "kind": "trade",
+     "operation_type": "REDEMPTION", "sign": 1, "hint": "Бумага выбывает, номинал поступает деньгами"},
+    {"code": "RECEIVABLE_CLOSE", "label": "Закрытие дебиторской задолженности", "group": "Дебиторка",
+     "kind": "receivable_close", "sign": 1,
+     "hint": "Погашение дебиторки деньгами. Если задолженность не выбрана — гасятся открытые по очереди (FIFO)"},
+    {"code": "RECEIVABLE_OPEN", "label": "Возникновение дебиторской задолженности", "group": "Дебиторка",
+     "kind": "receivable_open", "sign": 1, "hint": "Например, купон или погашение не поступили в срок"},
+    {"code": "CORRECTION", "label": "Корректировка остатка денег (±)", "group": "Прочее", "kind": "cash",
+     "movement_type": "CORRECTION", "sign": 0, "hint": "Укажите сумму со знаком: «−» уменьшает остаток"},
+    {"code": "OTHER", "label": "Прочая операция с деньгами (±)", "group": "Прочее", "kind": "cash",
+     "movement_type": "OTHER", "sign": 0, "hint": "Укажите сумму со знаком"},
+]
+_PURPOSE = {p["code"]: p for p in OPERATION_PURPOSES}
+
+
+@router.get("/operation-purposes")
+def operation_purposes(db: Session = Depends(get_db)):
+    own = _fund_portfolio(db, required=False)
+    return {"purposes": OPERATION_PURPOSES,
+            "default_portfolio": ({"id": own.id, "name": own.name} if own is not None else None)}
+
+
+def _fund_portfolio(db: Session, *, required: bool = True) -> Optional[CDU]:
+    row = db.execute(select(CDU).where(
+        CDU.portfolio_type == "NBRK_OWN", CDU.is_active.is_(True),
+    ).order_by(CDU.id.asc())).scalars().first()
+    if row is None and required:
+        raise HTTPException(400, "Не выбран ЧДУ/портфель, а портфель «Собственные активы» не найден — выберите портфель")
+    return row
+
+
+def _open_receivables(db: Session, cdu_id: int, as_of: date) -> list[AccountReceivable]:
+    rows = db.execute(select(AccountReceivable).where(
+        AccountReceivable.cdu_id == cdu_id, AccountReceivable.is_active.is_(True),
+        AccountReceivable.workflow_status.in_(EFFECTIVE_STATUSES),
+        AccountReceivable.record_date <= as_of,
+    ).order_by(AccountReceivable.due_date.asc().nulls_last(), AccountReceivable.record_date.asc(),
+               AccountReceivable.id.asc())).scalars().all()
+    return [r for r in rows if receivable_balance_as_of(db, r, as_of) > 0.005]
+
+
+@router.get("/open-receivables")
+def open_receivables(cdu_id: Optional[int] = None, as_of: Optional[date] = None, db: Session = Depends(get_db)):
+    as_of = as_of or date.today()
+    cdu = db.get(CDU, cdu_id) if cdu_id else _fund_portfolio(db, required=False)
+    if cdu is None:
+        return []
+    return [{"id": r.id, "counterparty": r.counterparty, "description": r.description,
+             "record_date": r.record_date.isoformat(), "due_date": r.due_date.isoformat() if r.due_date else None,
+             "isin": r.isin, "balance_kzt": receivable_balance_as_of(db, r, as_of)}
+            for r in _open_receivables(db, cdu.id, as_of)]
+
+
+@router.post("/operations", dependencies=[Depends(require_any_permission(
+    "manual.cash.manage", "manual.trades.manage", "manual.receivables.manage"))])
+def create_operation(payload: dict[str, Any], db: Session = Depends(get_db), user: User = Depends(require_user)):
+    """Create the ledger records for an operation of the given purpose (four-eyes)."""
+    purpose = _PURPOSE.get(str(payload.get("purpose") or "").strip().upper())
+    if purpose is None:
+        raise HTTPException(400, "Выберите назначение операции")
+    needed = {"trade": "manual.trades.manage", "receivable_close": "manual.receivables.manage",
+              "receivable_open": "manual.receivables.manage"}.get(purpose["kind"], "manual.cash.manage")
+    if not has_permission(user, needed, db):
+        raise HTTPException(403, "Недостаточно прав для операции этого вида")
+    op_date = _as_date(payload.get("operation_date"), "Дата операции")
+    amount = _as_float(payload.get("amount"), "Сумма")
+    quantity = _as_float(payload.get("quantity"), "quantity")
+    price = _as_float(payload.get("price"), "price")
+    currency = str(payload.get("currency") or "KZT").strip().upper()[:8] or "KZT"
+    if payload.get("cdu_id") not in (None, "", 0, "0"):
+        cdu = _cdu(db, payload.get("cdu_id"))
+        portfolio_note = None
+    else:
+        cdu = _fund_portfolio(db)
+        portfolio_note = f"ЧДУ не указан — операция учтена в портфеле «{cdu.short_name or cdu.name}»"
+    text = str(payload.get("purpose_text") or "").strip() or purpose["label"]
+    comment = str(payload.get("comment") or "").strip() or None
+    isin = str(payload.get("isin") or "").strip().upper() or None
+    account = payload.get("account")
+    created: list[dict[str, Any]] = []
+
+    if purpose["kind"] == "trade":
+        from services.portfolio.reference import ReferenceBook
+        if not isin:
+            raise HTTPException(400, "Для операции с ценной бумагой укажите ISIN или тикер")
+        refs = ReferenceBook(db)
+        ref = refs.get(isin)
+        nominal = float(ref.nominal) if ref is not None and ref.nominal else None
+        face = _as_float(payload.get("face_value"), "face_value")
+        if face is None and quantity is not None and nominal:
+            face = quantity * nominal
+        if amount is None and face is not None and price is not None:
+            amount = face * price / 100.0
+        if amount is None:
+            raise HTTPException(400, "Укажите сумму операции (или номинал/количество и цену)")
+        values = _trade_values(db, {
+            "cdu_id": cdu.id, "operation_type": purpose["operation_type"],
+            "trade_date": op_date, "value_date": payload.get("value_date") or op_date,
+            "instrument_category": payload.get("instrument_category") or refs.category(isin, "GOV_BONDS"),
+            "instrument_code": (ref.ticker_kase if ref is not None and ref.ticker_kase else isin),
+            "isin": (ref.isin if ref is not None else isin), "description": text,
+            "amount_kzt": amount, "currency": currency, "quantity": quantity, "face_value": face,
+            "clean_price": price, "deal_id": payload.get("deal_id"), "notes": comment,
+            "ytm": payload.get("ytm"), "change_reason": text,
+        })
+        row = Trade(**values, is_manual=True, is_active=True, workflow_status=PENDING,
+                    created_by=user.username, updated_by=user.username)
+        db.add(row); db.flush()
+        write_audit(db, user=user.username, action="MANUAL_TRADE_CREATED", entity="Trade", entity_id=row.id,
+                    details={**{k: str(v) for k, v in values.items()}, "purpose": purpose["code"]})
+        created.append({"entity": "trades", "id": row.id})
+    elif purpose["kind"] == "receivable_close":
+        if amount is None or amount <= 0:
+            raise HTTPException(400, "Укажите сумму погашения")
+        targets: list[AccountReceivable]
+        if payload.get("receivable_id"):
+            parent = db.get(AccountReceivable, int(payload["receivable_id"]))
+            if parent is None or not parent.is_active:
+                raise HTTPException(404, "Дебиторская задолженность не найдена")
+            targets = [parent]
+        else:
+            targets = _open_receivables(db, cdu.id, op_date)
+            if not targets:
+                raise HTTPException(400, "У портфеля нет открытой дебиторской задолженности на эту дату")
+        left = amount
+        for i, parent in enumerate(targets):
+            balance = receivable_balance_as_of(db, parent, op_date)
+            part = left if (i == len(targets) - 1 or payload.get("receivable_id")) else min(left, balance)
+            if part <= 0.005:
+                break
+            tx = ReceivableTransaction(
+                receivable_id=parent.id, operation_date=op_date, operation_type="REPAYMENT",
+                amount=part, amount_kzt=_to_kzt(db, amount=part, currency=currency, operation_date=op_date),
+                currency=currency, basis=text, comment=comment,
+                workflow_status=PENDING, is_active=True, created_by=user.username,
+            )
+            db.add(tx); db.flush()
+            write_audit(db, user=user.username, action="RECEIVABLE_TRANSACTION_CREATED",
+                        entity="ReceivableTransaction", entity_id=tx.id,
+                        details={"receivable_id": parent.id, "operation_type": "REPAYMENT", "amount": part,
+                                 "purpose": purpose["code"]})
+            created.append({"entity": "receivable-transactions", "id": tx.id, "receivable_id": parent.id})
+            left -= part
+    elif purpose["kind"] == "receivable_open":
+        if amount is None or amount <= 0:
+            raise HTTPException(400, "Укажите сумму дебиторской задолженности")
+        values = _receivable_values(db, {
+            "cdu_id": cdu.id, "record_date": op_date, "amount": amount, "currency": currency,
+            "counterparty": payload.get("counterparty") or "не указан", "description": text,
+            "isin": isin, "due_date": payload.get("due_date"), "notes": comment, "change_reason": text,
+        })
+        row = AccountReceivable(**values, status="OPEN", is_manual=True, is_active=True,
+                                workflow_status=PENDING, created_by=user.username, updated_by=user.username)
+        db.add(row); db.flush()
+        write_audit(db, user=user.username, action="RECEIVABLE_CREATED", entity="AccountReceivable",
+                    entity_id=row.id, details={k: str(v) for k, v in values.items()})
+        created.append({"entity": "receivables", "id": row.id})
+    else:
+        if amount is None:
+            raise HTTPException(400, "Укажите сумму")
+        values = _cash_values(db, {
+            "cdu_id": cdu.id, "operation_date": op_date, "amount": amount, "currency": currency,
+            "movement_type": purpose["movement_type"], "basis": text, "account": account,
+            "related_isin": isin, "comment": comment, "change_reason": text,
+            "amount_kzt": payload.get("amount_kzt"),
+        })
+        row = CashMovement(**values, is_manual=True, is_active=True, workflow_status=PENDING,
+                           created_by=user.username, updated_by=user.username)
+        db.add(row); db.flush()
+        write_audit(db, user=user.username, action="MANUAL_CASH_CREATED", entity="CashMovement",
+                    entity_id=row.id, details={**{k: str(v) for k, v in values.items()}, "purpose": purpose["code"]})
+        created.append({"entity": "cash-movements", "id": row.id})
+
+    db.commit()
+    message = (f"«{purpose['label']}» сохранена и ждёт согласования вторым пользователем. "
+               "После согласования она войдёт в сводку и отчёт.")
+    return {"ok": True, "purpose": purpose["code"], "cdu_id": cdu.id, "cdu_name": cdu.short_name or cdu.name,
+            "created": created, "message": message, "portfolio_note": portfolio_note}
+
+
+def _operation_date(row: Any) -> Optional[date]:
+    if isinstance(row, Trade):
+        return min(row.trade_date, row.value_date or row.trade_date)
+    if isinstance(row, AccountReceivable):
+        return row.record_date
+    return getattr(row, "operation_date", None)
+
+
+def _recalculate_after(db: Session, start: Optional[date]) -> list[str]:
+    """Refresh the already calculated summaries affected by an approved change."""
+    if start is None:
+        return []
+    from models.db_models import PortfolioSummary
+    from services.calculator.portfolio_calculator import calculate_for_date
+    later = set(db.execute(select(PortfolioSummary.summary_date).where(
+        PortfolioSummary.summary_date > start,
+    )).scalars())
+    dates = [start] + sorted(later)[:30]
+    done: list[str] = []
+    for d in dates:
+        try:
+            calculate_for_date(db, d, recalculate=True)
+            db.commit()
+            done.append(d.isoformat())
+        except Exception as exc:  # the approval itself is already saved
+            db.rollback()
+            from loguru import logger
+            logger.warning(f"recalculation after approval failed for {d}: {exc!r}")
+            break
+    return done
+
+
 ENTITY_MAP = {
     "trades": Trade,
     "cash-movements": CashMovement,
@@ -618,6 +858,7 @@ def approve(entity: str, row_id: int, payload: dict[str, Any] | None = None,
     elif isinstance(row, ReceivableTransaction):
         parent = db.get(AccountReceivable, row.receivable_id)
         if parent:
+            db.flush()   # the balance query must see the new status of this transaction
             _sync_receivable_current(db, parent)
             _sync_receivable_transaction_cash(db, row, parent)
     write_audit(db, user=user.username, action="MANUAL_OPERATION_APPROVED",
@@ -627,7 +868,8 @@ def approve(entity: str, row_id: int, payload: dict[str, Any] | None = None,
     db.commit()
     if isinstance(row, Trade):
         sync_holdings(db, cdu_id=row.cdu_id, actor=user.username); db.commit()
-    return {"ok": True, "status": row.workflow_status}
+    recalculated = _recalculate_after(db, _operation_date(row))
+    return {"ok": True, "status": row.workflow_status, "recalculated_dates": recalculated}
 
 
 @router.post("/{entity}/{row_id}/reject", dependencies=[Depends(require_permission("manual.operations.approve"))])
@@ -647,6 +889,7 @@ def reject(entity: str, row_id: int, payload: dict[str, Any], db: Session = Depe
     elif isinstance(row, ReceivableTransaction):
         parent = db.get(AccountReceivable, row.receivable_id)
         if parent:
+            db.flush()   # the balance query must see the new status of this transaction
             _sync_receivable_current(db, parent)
             _sync_receivable_transaction_cash(db, row, parent)
     write_audit(db, user=user.username, action="MANUAL_OPERATION_REJECTED",
@@ -678,6 +921,7 @@ def cancel(entity: str, row_id: int, payload: dict[str, Any] | None = None,
     elif isinstance(row, ReceivableTransaction):
         parent = db.get(AccountReceivable, row.receivable_id)
         if parent:
+            db.flush()   # the balance query must see the new status of this transaction
             _sync_receivable_current(db, parent)
             _sync_receivable_transaction_cash(db, row, parent)
     write_audit(db, user=user.username, action="MANUAL_OPERATION_CANCEL_REQUESTED",

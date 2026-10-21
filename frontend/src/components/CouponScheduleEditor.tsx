@@ -4,6 +4,8 @@ import { CalendarClock, CloudDownload, Plus, Save, Trash2, Upload, Wand2 } from 
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
+import { sourceLabel } from '@/lib/displayLabels'
+import { apiErrorMessage } from '@/lib/notifications'
 
 type Row = {
   seq?: number | null
@@ -44,29 +46,30 @@ export default function CouponScheduleEditor({ isin, canEdit }: { isin: string; 
       rows: rows.map((r) => ({ ...r, rate_pct: r.rate_pct === '' ? null : r.rate_pct, amount_per_unit: r.amount_per_unit === '' ? null : r.amount_per_unit })),
     })).data,
     onSuccess: () => {
-      toast.success('График купонов сохранён')
+      toast.success(`График купонов сохранён: выплат ${rows.length}.`)
       setDirty(false)
       qc.invalidateQueries({ queryKey: ['coupon-schedule', isin] })
     },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Не удалось сохранить график'),
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось сохранить график купонов')),
   })
   const generate = useMutation({
     mutationFn: async () => (await api.post(`/securities/reference/${encodeURIComponent(isin)}/coupons/generate`)).data,
     onSuccess: (r) => {
       setRows(r.rows); setDirty(true)
-      toast.success('График заполнен по параметрам выпуска — проверьте и сохраните')
+      toast.success('График рассчитан по параметрам выпуска. Проверьте даты и сохраните изменения.')
     },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Не удалось сформировать график'),
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось рассчитать график купонов')),
   })
   const fromKase = useMutation({
     mutationFn: async () => (await api.post(`/securities/reference/${encodeURIComponent(isin)}/coupons/fetch-kase`)).data,
     onSuccess: (r) => {
-      toast.success(`KASE (${r.code}): выплат ${r.rows}; ручные строки сохранены`)
+      const payments = Number(r.rows_count ?? (Array.isArray(r.rows) ? r.rows.length : r.rows ?? 0))
+      toast.success(`График выплат для выпуска «${r.code}» обновлён с KASE: в графике ${payments} выплат. Ручные строки не изменены.`)
       setDirty(false)
       qc.invalidateQueries({ queryKey: ['coupon-schedule', isin] })
       qc.invalidateQueries({ queryKey: ['reference-book'] })
     },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'KASE недоступна'),
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось загрузить график купонов с KASE')),
   })
   const upload = useMutation({
     mutationFn: async (file: File) => {
@@ -77,11 +80,11 @@ export default function CouponScheduleEditor({ isin, canEdit }: { isin: string; 
     },
     onSuccess: (r) => {
       const n = Object.values(r.imported ?? {}).reduce((a: number, b: any) => a + Number(b), 0)
-      toast.success(`Импортировано выплат: ${n}`)
+      toast.success(`График купонов импортирован из файла: выплат ${n}.`)
       setDirty(false)
       qc.invalidateQueries({ queryKey: ['coupon-schedule', isin] })
     },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Не удалось импортировать файл'),
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось импортировать график купонов из файла')),
   })
 
   // an edited or added row becomes MANUAL: a later refresh from KASE keeps it
@@ -137,13 +140,13 @@ export default function CouponScheduleEditor({ isin, canEdit }: { isin: string; 
           </div>
         )}
       </div>
-      <p className="mb-2 text-xs text-slate-500">
+      <p className="mb-2 text-xs leading-snug text-slate-600">
         «С KASE» загружает график и параметры выпуска с kase.kz; строки, исправленные или добавленные вручную, сохраняются.
         Импорт файла принимает ту же таблицу, скопированную в Excel. Если график заполнен, НКД, купоны и дюрация
         считаются по нему: по ставке каждого периода (плавающий купон — индекс + маржа) и фактическим датам выплат.
       </p>
-      <div className="table-wrap rounded-lg ring-1 ring-slate-100">
-        <table className="kdif-table text-xs">
+      <div className="overflow-x-auto rounded-lg border border-slate-300">
+        <table className="detail-table">
           <thead>
             <tr>
               <th>№</th><th>Дата выплаты</th><th>Ставка, % год.</th>{isFloating && <><th>Маржа, %</th><th>Индекс, %</th></>}<th>Сумма на 1 бумагу</th>
@@ -153,17 +156,17 @@ export default function CouponScheduleEditor({ isin, canEdit }: { isin: string; 
           <tbody>
             {rows.map((r, i) => (
               <tr key={i}>
-                <td className="text-right">{r.seq ?? i + 1}</td>
-                <td>{canEdit ? <input type="date" className="input h-8" value={r.payment_date ?? ''} onChange={(e) => update(i, 'payment_date', e.target.value)} /> : r.payment_date}</td>
-                <td>{canEdit ? <input type="number" step="any" className="input h-8 w-24 text-right" value={r.rate_pct ?? ''} onChange={(e) => update(i, 'rate_pct', e.target.value)} /> : r.rate_pct}</td>
+                <td className="num text-slate-500">{r.seq ?? i + 1}</td>
+                <td>{canEdit ? <input type="date" className="cell-input" value={r.payment_date ?? ''} onChange={(e) => update(i, 'payment_date', e.target.value)} /> : r.payment_date}</td>
+                <td>{canEdit ? <input type="number" step="any" className="cell-input w-24 text-right tabular-nums" value={r.rate_pct ?? ''} onChange={(e) => update(i, 'rate_pct', e.target.value)} /> : r.rate_pct}</td>
                 {isFloating && <>
-                  <td>{canEdit ? <input type="number" step="any" className="input h-8 w-20 text-right" value={r.margin_pct ?? ''} onChange={(e) => update(i, 'margin_pct', e.target.value)} /> : r.margin_pct ?? '—'}</td>
-                  <td>{canEdit ? <input type="number" step="any" className="input h-8 w-20 text-right" value={r.index_rate_pct ?? ''} onChange={(e) => update(i, 'index_rate_pct', e.target.value)} /> : r.index_rate_pct ?? '—'}</td>
+                  <td>{canEdit ? <input type="number" step="any" className="cell-input w-20 text-right tabular-nums" value={r.margin_pct ?? ''} onChange={(e) => update(i, 'margin_pct', e.target.value)} /> : r.margin_pct ?? '—'}</td>
+                  <td>{canEdit ? <input type="number" step="any" className="cell-input w-20 text-right tabular-nums" value={r.index_rate_pct ?? ''} onChange={(e) => update(i, 'index_rate_pct', e.target.value)} /> : r.index_rate_pct ?? '—'}</td>
                 </>}
-                <td>{canEdit ? <input type="number" step="any" className="input h-8 w-28 text-right" value={r.amount_per_unit ?? ''} onChange={(e) => update(i, 'amount_per_unit', e.target.value)} /> : r.amount_per_unit ?? '—'}</td>
-                <td>{canEdit ? <input type="date" className="input h-8" value={r.record_date ?? ''} onChange={(e) => update(i, 'record_date', e.target.value)} /> : r.record_date ?? '—'}</td>
-                <td>{canEdit ? <input type="date" className="input h-8" value={r.payment_end_date ?? ''} onChange={(e) => update(i, 'payment_end_date', e.target.value)} /> : r.payment_end_date ?? '—'}</td>
-                <td className={r.source === 'MANUAL' ? 'font-semibold text-amber-700' : 'text-slate-500'}>{SOURCE_LABEL[r.source ?? ''] ?? r.source ?? '—'}</td>
+                <td>{canEdit ? <input type="number" step="any" className="cell-input w-28 text-right tabular-nums" value={r.amount_per_unit ?? ''} onChange={(e) => update(i, 'amount_per_unit', e.target.value)} /> : r.amount_per_unit ?? '—'}</td>
+                <td>{canEdit ? <input type="date" className="cell-input" value={r.record_date ?? ''} onChange={(e) => update(i, 'record_date', e.target.value)} /> : r.record_date ?? '—'}</td>
+                <td>{canEdit ? <input type="date" className="cell-input" value={r.payment_end_date ?? ''} onChange={(e) => update(i, 'payment_end_date', e.target.value)} /> : r.payment_end_date ?? '—'}</td>
+                <td className={r.source === 'MANUAL' ? 'font-semibold text-amber-700' : 'text-slate-500'}>{SOURCE_LABEL[r.source ?? ''] ?? sourceLabel(r.source)}</td>
                 {canEdit && <td><button type="button" className="text-slate-400 hover:text-red-600" onClick={() => removeRow(i)} title="Удалить"><Trash2 className="h-4 w-4" /></button></td>}
               </tr>
             ))}

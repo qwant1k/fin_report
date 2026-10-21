@@ -14,6 +14,7 @@ import {
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
+import { apiErrorMessage, notificationText } from '@/lib/notifications'
 import { useAuthStore } from '@/lib/auth'
 import { formatDate } from '@/lib/format'
 
@@ -140,17 +141,15 @@ export default function ImportPage() {
         Number(r.rows.report_summaries ?? 0) +
         Number(r.rows.report_positions ?? 0)
       if (r.skipped) {
-        toast.success(`Файл уже импортирован (${r.warnings?.[0] ?? 'дубликат'})`)
+        toast.success(`Файл пропущен: он уже был импортирован. ${notificationText(r.warnings?.[0], 'Дубликат')}`)
       } else {
         toast.success(
-          `Импортировано: cash=${r.rows.cash} mv=${r.rows.mv} лоты=${r.rows.bond_lots} repo=${r.rows.repo_lots} dep=${r.rows.deposit_lots} ar=${r.rows.accounts_receivable} • всего: ${total}`,
+          `Отчёт импортирован: денежных строк ${r.rows.cash}, оценок ${r.rows.mv}, облигаций ${r.rows.bond_lots}, РЕПО ${r.rows.repo_lots}, депозитов ${r.rows.deposit_lots}, задолженностей ${r.rows.accounts_receivable}; всего ${total}.`,
         )
       }
       invalidatePortfolioViews()
     },
-    onError: (err: any) => {
-      toast.error(err?.response?.data?.detail || 'Не удалось импортировать Risk Report')
-    },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось импортировать отчёт о рисках')),
   })
 
   // ───── Bulk folder import ─────
@@ -163,19 +162,17 @@ export default function ImportPage() {
         skip_if_imported: false,
       })).data,
     onSuccess: (r) => {
-      toast.success(`Запущен job #${r.job_id} — папка: ${r.folder}`)
+      toast.success(`Запущен импорт папки «${r.folder}»; задача №${r.job_id}.`)
       setActiveJobId(r.job_id)
       qc.invalidateQueries({ queryKey: ['import-jobs'] })
     },
-    onError: (err: any) => {
-      toast.error(err?.response?.data?.detail || 'Не удалось запустить импорт Risk Report')
-    },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось запустить импорт папки с отчётами о рисках')),
   })
 
   const submitBulk = (e: FormEvent) => {
     e.preventDefault()
     if (!folder.trim()) {
-      toast.error('Укажите путь к папке')
+      toast.error('Укажите путь к папке с отчётами для импорта.')
       return
     }
     bulkImport.mutate()
@@ -184,7 +181,7 @@ export default function ImportPage() {
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-bold">Импорт исторических Risk Report</h1>
+        <h1 className="text-2xl font-bold">Импорт исторических отчётов о рисках</h1>
         <p className="text-sm text-slate-500">
           Загрузка XLSM-отчётов за прошлые периоды для построения истории и графиков
         </p>

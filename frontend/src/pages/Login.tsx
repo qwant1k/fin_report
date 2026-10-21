@@ -16,6 +16,7 @@ import toast from 'react-hot-toast'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/lib/auth'
 import { Spinner } from '@/components/ui'
+import { apiErrorMessage } from '@/lib/notifications'
 
 const HIGHLIGHTS = [
   { icon: TrendingUp, title: 'Аналитика портфеля', text: 'Динамика, доходность и дюрация в реальном времени' },
@@ -39,8 +40,8 @@ export default function LoginPage() {
       setSession(data.access_token, data.role, data.full_name ?? null, data.permissions ?? [])
       toast.success(`Добро пожаловать${data.full_name ? `, ${data.full_name}` : ''}!`)
       nav('/', { replace: true })
-    } catch {
-      // toast handled in interceptor
+    } catch (error) {
+      toast.error(apiErrorMessage(error, 'Не удалось войти в систему'))
     } finally {
       setLoading(false)
     }

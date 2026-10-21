@@ -169,17 +169,29 @@ def test_nbrk_cash_reconciliation_by_ac_balance(stand):
         client.post("/api/primary-data/upload", files={"file": (n, (LOG_DIR / n).read_bytes())})
     with Session() as db:
         own = db.query(CDU).filter_by(portfolio_code="310138-1").one()
-        # opening balance so that cash at the end of 24.09 equals the NBRK AC balance
-        db.add(CashMovement(cdu_id=own.id, operation_date=date(2026, 9, 23), amount=7_284_611_478.69,
-                            amount_kzt=7_284_611_478.69, currency="KZT", movement_type="INITIAL_BALANCE",
-                            basis="Входящий остаток", is_manual=True, workflow_status="APPROVED",
-                            approved_by="checker", approved_at=datetime.utcnow()))
+        # our cash = AC balance of 23.09 + movements of 24.09: the placement of the file
+        # (−7 180 000 000) and the return of a deposit placed before the first file
+        # (not in the sample files) entered by hand with the bank charges.
+        for amount, kind in ((7_179_449_722.22, "RECEIPT"), (-491_388.89, "COMMISSION")):
+            db.add(CashMovement(cdu_id=own.id, operation_date=date(2026, 9, 24), amount=amount,
+                                amount_kzt=amount, currency="KZT", movement_type=kind,
+                                basis="Возврат депозита / комиссия", is_manual=True, workflow_status="APPROVED",
+                                approved_by="checker", approved_at=datetime.utcnow()))
         db.commit()
         own_id = own.id
     res = client.post("/api/reconciliation/run", json={"cdu_id": own_id, "recon_date": "2026-09-24",
                                                        "recon_type": "nbrk_fallback"}).json()
     assert res["status"] == "OK", res
     assert res["actual_value"] == pytest.approx(104_611_478.69)
+    assert "остаток 23.09.2026" in res["details_json"]
+
+    # a missing movement is a real difference now (no more «balance vs itself»)
+    with Session() as db:
+        db.query(CashMovement).filter_by(cdu_id=own_id, movement_type="COMMISSION").delete()
+        db.commit()
+    res = client.post("/api/reconciliation/run", json={"cdu_id": own_id, "recon_date": "2026-09-24",
+                                                       "recon_type": "nbrk_fallback"}).json()
+    assert res["status"] == "MISMATCH" and res["deviation"] == pytest.approx(491_388.89)
 
 
 # ───────────── Halyk / Centras Trade Reports (п.5 журнала) ─────────────

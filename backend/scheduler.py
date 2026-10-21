@@ -19,6 +19,7 @@ from services.automation.ar_closer import close_ar_items
 from services.kase import KaseClient
 from services.kase.propagation import apply_kase_update
 from services.mbm import MBMClient
+from services.market import tonia
 
 scheduler = AsyncIOScheduler(timezone=settings.app_tz)
 
@@ -126,6 +127,23 @@ async def fetch_mbm_job():
     )
 
 
+async def fetch_tonia_job():
+    """Download recent TONIA Compounded values from the official KASE archive."""
+    today = _today()
+    logger.info(f"Scheduled TONIA Compounded fetch starting for {today}…")
+    try:
+        with session_scope() as db:
+            result = await tonia.refresh_from_kase(db, actor="scheduler", today=today)
+    except Exception as exc:  # noqa: BLE001 -- a later scheduled run will retry
+        logger.warning(f"Scheduled TONIA Compounded fetch failed: {exc!r}")
+        return
+    logger.info(
+        "TONIA Compounded fetch done: "
+        f"dates={result['dates']} inserted={result['inserted']} "
+        f"updated={result['updated']} unchanged={result['unchanged']}"
+    )
+
+
 def _today() -> date:
     """Business date in the configured time zone (server may run in UTC)."""
     try:
@@ -200,6 +218,17 @@ def start_scheduler() -> None:
         id="mbm_fetch",
         replace_existing=True,
     )
+    tonia_label = "disabled"
+    if settings.kase_tonia_fetch_daily:
+        tonia_h = settings.kase_tonia_cron_hour % 24
+        tonia_m = settings.kase_tonia_cron_minute % 60
+        scheduler.add_job(
+            fetch_tonia_job,
+            CronTrigger(hour=tonia_h, minute=tonia_m),
+            id="tonia_fetch",
+            replace_existing=True,
+        )
+        tonia_label = f"{tonia_h:02d}:{tonia_m:02d}"
     # Daily automation: 15 min after MBM
     auto_total = mbm_h * 60 + mbm_m + 15
     auto_h = (auto_total // 60) % 24
@@ -214,7 +243,7 @@ def start_scheduler() -> None:
         scheduler.start()
     logger.info(
         f"Scheduler started: KASE @{kase_h:02d}:{kase_m:02d}, "
-        f"MBM @{mbm_h:02d}:{mbm_m:02d}, AUTO @{auto_h:02d}:{auto_m:02d}"
+        f"MBM @{mbm_h:02d}:{mbm_m:02d}, TONIA @{tonia_label}, AUTO @{auto_h:02d}:{auto_m:02d}"
     )
 
 

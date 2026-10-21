@@ -62,7 +62,8 @@ def duration_band(benchmark):
     """(lower, upper) duration corridor for a benchmark duration, or (None, None)."""
     if benchmark is None:
         return None, None
-    return benchmark * DURATION_LOWER_MULT, benchmark * DURATION_UPPER_MULT
+    from services.formulas import params      # editable in «Формулы → Параметры расчёта»
+    return benchmark * params.get("duration_lower_mult"), benchmark * params.get("duration_upper_mult")
 
 # Tolerance for reconciliation (per spec section 8)
 RECON_TOLERANCE_KZT = 0.01    # ±0.01 KZT
@@ -143,6 +144,7 @@ CDU_NAME_ALIASES: Dict[str, str] = {
     "kibam": "BCC Invest",
     "jusan invest": "Jusan Invest",
     "jusan": "Jusan Invest",
+    "ji": "Jusan Invest",            # «Приложение 3 Сверка_JI_…»
     "jysan": "Jusan Invest",
     "жусан": "Jusan Invest",
     "centras": "Centras Securities",

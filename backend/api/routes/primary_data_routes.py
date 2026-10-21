@@ -44,7 +44,8 @@ class ImportResponse(BaseModel):
 
 
 @router.post("/upload", response_model=ImportResponse)
-async def upload_primary_data(
+def upload_primary_data(  # plain def: FastAPI runs it in a worker thread, so OCR of a
+    # certificate (30–60 s) does not freeze the server for other users and uploads
     file: UploadFile = File(...),
     cdu_id: Optional[int] = Form(None),
     doc_date: Optional[str] = Form(None),
@@ -81,7 +82,7 @@ async def upload_primary_data(
         try:
             override_date = date.fromisoformat(doc_date)
         except ValueError:
-            raise HTTPException(400, "doc_date должен быть в формате YYYY-MM-DD")
+            raise HTTPException(400, "Дата документа должна быть в формате ГГГГ-ММ-ДД")
 
     content = target.read_bytes()
     sha = hashlib.sha256(content).hexdigest()
@@ -150,18 +151,27 @@ async def upload_primary_data(
         if file_type == "nbrk_daily":
             message += (f": депозитов {counters.get('deposits', 0)}, РЕПО {counters.get('repos', 0)}, "
                         f"сделок с ЦБ {counters.get('securities', 0)}; остатки по {len(counters.get('accounts') or [])} счетам "
-                        "сохранены для сверки")
+                        "сохранены: это входящие деньги портфелей НБ РК в «Сводке» и база сверки")
             if counters.get("warnings"):
                 message += f"; предупреждений: {len(counters['warnings'])}"
+        elif file_type == "tonia_compounded":
+            message += (f": дат {counters.get('dates', 0)}, новых значений {counters.get('inserted', 0)}, "
+                        f"обновлено {counters.get('updated', 0)}")
         elif source_doc.cdu_id is None:
             message += " — ЧДУ не определён, укажите его вручную"
+        elif file_type == "reconciliation" and source_doc.doc_date:
+            message += _auto_reconcile(db, source_doc)
         write_audit(db, user=user.username, action="PRIMARY_DOCUMENT_UPLOADED",
                     entity="SourceDocument", entity_id=source_doc.id,
                     details={"file_type": file_type, "file_name": original_name,
                              "cdu_id": source_doc.cdu_id,
                              "doc_date": source_doc.doc_date.isoformat() if source_doc.doc_date else None})
     except Exception as exc:
-        logger.exception("Primary data import failed")
+        from services.import_primary.recon_parser import ProtectedWorkbookError
+        if isinstance(exc, ProtectedWorkbookError):
+            logger.warning(f"Protected workbook: {original_name}")
+        else:
+            logger.exception("Primary data import failed")
         db.rollback()
         job = ImportJob(
             job_type="FOLDER_PRIMARY", status="FAILED", triggered_by=user.username,
@@ -200,17 +210,22 @@ def bind_document(
         try:
             doc.doc_date = date.fromisoformat(str(payload["doc_date"]))
         except ValueError:
-            raise HTTPException(400, "doc_date должен быть в формате YYYY-MM-DD")
+            raise HTTPException(400, "Дата документа должна быть в формате ГГГГ-ММ-ДД")
     write_audit(db, user=user.username, action="PRIMARY_DOCUMENT_BOUND",
                 entity="SourceDocument", entity_id=doc.id,
                 details={"before": before, "after": {"cdu_id": doc.cdu_id,
                          "doc_date": doc.doc_date.isoformat() if doc.doc_date else None}})
     db.commit()
-    return {"ok": True, "cdu_id": doc.cdu_id, "doc_date": doc.doc_date.isoformat() if doc.doc_date else None}
+    message = ""
+    if doc.doc_type == "RECONCILIATION" and doc.cdu_id and doc.doc_date:
+        message = _auto_reconcile(db, doc).lstrip(". ")
+        db.commit()
+    return {"ok": True, "cdu_id": doc.cdu_id, "doc_date": doc.doc_date.isoformat() if doc.doc_date else None,
+            "message": message}
 
 
 @router.post("/bulk-folder")
-async def bulk_import_primary_folder(
+def bulk_import_primary_folder(
     payload: dict,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -219,7 +234,7 @@ async def bulk_import_primary_folder(
     """Queue recursive folder import for primary-data packages."""
     folder_path = payload.get("folder_path")
     if not folder_path:
-        raise HTTPException(400, "folder_path обязателен")
+        raise HTTPException(400, "Укажите путь к папке с первичными документами")
     folder = Path(folder_path)
     if not folder.exists() or not folder.is_dir():
         raise HTTPException(400, (
@@ -273,7 +288,37 @@ _TYPE_LABELS = {
     "exchange_certificate": "Биржевое свидетельство",
     "pdf_statement": "Выписка по счёту",
     "nbrk_daily": "Файл НБ РК (КФГД_ГГГГММДД)",
+    "tonia_compounded": "TONIA Compounded (KASE)",
 }
+
+
+def _auto_reconcile(db: Session, source_doc: SourceDocument) -> str:
+    """A manager reconciliation file is compared with our calculation at once."""
+    from services.reconciliation.engine import run_reconciliation
+    try:
+        db.flush()
+        res = run_reconciliation(db, source_doc.cdu_id, source_doc.doc_date, "rr_vs_holdings")
+    except Exception as exc:  # noqa: BLE001 — the upload itself succeeded
+        logger.warning(f"auto reconciliation failed: {exc!r}")
+        return ""
+    if res.status == "OK":
+        return f". Сверка с нашим расчётом на {source_doc.doc_date:%d.%m.%Y}: расхождений нет"
+    if res.status == "MISMATCH":
+        details = json.loads(res.details_json or "{}")
+        c = details.get("counts") or {}
+        n = (c.get("securities_diff") or 0) + (c.get("repos_diff") or 0) + sum(
+            1 for x in details.get("summary") or [] if x.get("status") != "OK")
+        parts = []
+        if c.get("securities_diff"):
+            parts.append(f"бумаг {c['securities_diff']}")
+        if c.get("repos_diff"):
+            parts.append(f"сделок РЕПО {c['repos_diff']}")
+        dev = res.deviation or 0.0
+        if abs(dev) > 1:
+            parts.append("разница «Итого активов» " + f"{dev:,.2f}".replace(",", " ").replace(".", ",") + " ₸")
+        return (f". Сверка с нашим расчётом на {source_doc.doc_date:%d.%m.%Y}: есть расхождения"
+                f" ({', '.join(parts) or n}) — откройте раздел «Сверка»")
+    return ""
 
 
 def _detect_file_type(filename: str, path: Optional[Path] = None) -> str:
@@ -285,6 +330,9 @@ def _detect_file_type(filename: str, path: Optional[Path] = None) -> str:
         filename, path.read_bytes()[:4000] if path is not None and path.exists() else None,
     ):
         return "nbrk_daily"
+    from services.market.tonia import looks_like_tonia_file
+    if looks_like_tonia_file(filename) and f.endswith((".xlsx", ".xls")):
+        return "tonia_compounded"
     if any(k in f for k in ("trade report", "trade_report", "сделки", "trade")) and f.endswith((".xlsx", ".xlsm")):
         return "trade_report"
     if any(k in f for k in ("holdings", "позиции", "отчет об активах", "активах")) and f.endswith(".xlsx"):
@@ -317,6 +365,8 @@ def _detect_file_type(filename: str, path: Optional[Path] = None) -> str:
                 )
             finally:
                 wb.close()
+            if "tcr_1m" in head or "tcr_3m" in head:
+                return "tonia_compounded"
             if "к/п" in head and ("код инструмента" in head or "код режима" in head):
                 return "trade_report"
             if "суммарно-текущая рыночная стоимость" in head or "итого активов" in head or "остатки на инвест" in head:
@@ -342,7 +392,10 @@ def _run_import(db: Session, file_path: str, file_type: str, source_doc_id: int 
     if file_type == "nbrk_daily":
         from services.import_primary.nbrk_parser import import_nbrk_file
         return import_nbrk_file(db, file_path, source_doc_id=source_doc_id, actor=user)
-    raise ValueError(f"Unsupported file_type {file_type}")
+    if file_type == "tonia_compounded":
+        from services.market.tonia import import_file
+        return import_file(db, file_path, source_doc_id=source_doc_id, actor=user)
+    raise ValueError("Тип документа не поддерживается")
 
 
 def _to_doc_type(file_type: str) -> str:
@@ -353,6 +406,7 @@ def _to_doc_type(file_type: str) -> str:
         "exchange_certificate": "CERTIFICATE",
         "pdf_statement": "STATEMENT_PDF",
         "nbrk_daily": "NBRK_DAILY",
+        "tonia_compounded": "TONIA_COMPOUNDED",
     }.get(file_type, "OTHER")
 
 
@@ -396,7 +450,7 @@ def _finalize_source_doc(
         if source_doc.cdu_id is None and source_doc.doc_type == "STATEMENT_PDF":
             source_doc.cdu_id = _cdu_from_accounts(db, counters.get("accounts_found") or [])
 
-    report_date = doc_date or counters.get("trade_date") or counters.get("report_date")
+    report_date = doc_date or counters.get("trade_date") or counters.get("report_date") or counters.get("date_to")
     if hasattr(report_date, "isoformat"):
         source_doc.doc_date = report_date
     elif isinstance(report_date, str):

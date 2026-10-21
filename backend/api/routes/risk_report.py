@@ -233,17 +233,17 @@ def create_note(
 ) -> dict[str, Any]:
     report_date_raw = payload.get("report_date")
     if not report_date_raw:
-        raise HTTPException(400, "report_date обязателен")
+        raise HTTPException(400, "Укажите дату отчёта")
     try:
         report_date_v = date.fromisoformat(str(report_date_raw))
     except ValueError:
-        raise HTTPException(400, "Неверный формат report_date")
+        raise HTTPException(400, "Дата отчёта должна быть в формате ГГГГ-ММ-ДД")
     section = (payload.get("section") or "other").strip()
     if section not in _SECTIONS:
-        raise HTTPException(400, f"section должен быть одним из {sorted(_SECTIONS)}")
+        raise HTTPException(400, "Выбран неизвестный раздел отчёта")
     field_key = (payload.get("field_key") or "").strip()
     if not field_key:
-        raise HTTPException(400, "field_key обязателен")
+        raise HTTPException(400, "Укажите поле отчёта для заметки")
 
     n = RiskReportNote(
         report_date=report_date_v,

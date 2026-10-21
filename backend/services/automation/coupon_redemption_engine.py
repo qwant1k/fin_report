@@ -158,6 +158,7 @@ def _upsert_ar(
     due_date: Optional[date] = None,
     amount_kzt: Optional[float] = None,
     description: Optional[str] = None,
+    counterparty: Optional[str] = None,
 ) -> AccountReceivable:
     existing = db.execute(select(AccountReceivable).where(
         AccountReceivable.cdu_id == cdu_id,
@@ -176,6 +177,7 @@ def _upsert_ar(
         existing.due_date = due_date
         existing.related_trade_id = related_trade_id
         existing.description = description or existing.description
+        existing.counterparty = counterparty or existing.counterparty
         existing.is_active = True
         if existing.status not in ("CLOSED", "PARTIAL"):
             existing.status = "OPEN"
@@ -193,6 +195,7 @@ def _upsert_ar(
         balance_kzt=kzt,
         due_date=due_date,
         description=description,
+        counterparty=counterparty,
         related_event_type=related_event_type,
         related_trade_id=related_trade_id,
         status="OPEN",
@@ -206,6 +209,33 @@ def _upsert_ar(
     db.add(ar)
     db.flush()
     return ar
+
+
+def _ru(value: float, digits: int = 2) -> str:
+    return f"{value:,.{digits}f}".replace(",", " ").replace(".", ",")
+
+
+def _ar_has_receipts(db: Session, cdu_id: int, isin: str, record_date: date) -> bool:
+    from models.db_models import ReceivableTransaction
+    return db.execute(select(ReceivableTransaction.id).join(
+        AccountReceivable, AccountReceivable.id == ReceivableTransaction.receivable_id,
+    ).where(
+        AccountReceivable.cdu_id == cdu_id, AccountReceivable.isin == isin,
+        AccountReceivable.record_date == record_date, AccountReceivable.related_event_type == "COUPON",
+        AccountReceivable.is_manual == False,  # noqa: E712
+        ReceivableTransaction.is_active == True,  # noqa: E712
+        ReceivableTransaction.workflow_status.not_in(("REJECTED", "CANCELLED")),
+    ).limit(1)).scalar() is not None
+
+
+def _drop_auto_ar(db: Session, trade_id: int) -> None:
+    for ar in db.execute(select(AccountReceivable).where(
+        AccountReceivable.related_trade_id == trade_id,
+        AccountReceivable.is_manual == False,  # noqa: E712
+        AccountReceivable.is_active == True,  # noqa: E712
+    )).scalars():
+        if ar.status in ("OPEN", "PENDING"):
+            ar.is_active = False
 
 
 def _holdings_before(db: Session, cdu_id: int, target_date: date, refs: ReferenceBook,
@@ -238,6 +268,8 @@ def run_daily_auto_events(db: Session, target_date: date) -> Dict[str, Dict[str,
     """Generate coupon and redemption events of ``target_date`` for all CDUs."""
     refs = ReferenceBook(db)
     market = MarketData(db, target_date - timedelta(days=1))
+    from services.formulas import params
+    coupon_cash_on_t = params.get("coupon_settlement") == "cash"
     coupons = {"events": 0, "trades": 0, "ar_created": 0, "skipped": 0, "deactivated": 0}
     redemptions = {"events": 0, "trades": 0, "ar_created": 0, "coupon_trades": 0, "skipped": 0, "deactivated": 0}
     touched: set[int] = set()
@@ -252,8 +284,10 @@ def run_daily_auto_events(db: Session, target_date: date) -> Dict[str, Dict[str,
             category = h["category"]
             currency = (h["currency"] or "KZT").upper()
             fx = _fx(db, currency, target_date)
-            cash_now = category in CASH_ON_T_CATEGORIES
+            cash_now = category in CASH_ON_T_CATEGORIES      # redemption of ГЦБ: cash on T
+            coupon_cash = cash_now and coupon_cash_on_t       # coupon: receivable unless set otherwise
             rate = bm.rate_fraction(ref.coupon_rate_pct) or 0.0
+            label = h.get("ticker") or isin
             freq = int(ref.frequency) if ref.frequency else None
             basis = bm.normalize_basis(ref.base)
 
@@ -277,13 +311,17 @@ def run_daily_auto_events(db: Session, target_date: date) -> Dict[str, Dict[str,
                 if prev is None or amount is None:
                     coupons["skipped"] += 1
                 else:
+                    amount = round(amount, 2)        # money: whole tiyn
+                    # the receipt of this coupon is already recorded against its
+                    # receivable: it stays a receivable, otherwise cash would double
+                    this_coupon_cash = coupon_cash and not _ar_has_receipts(db, cdu.id, isin, target_date)
                     trade = _upsert_synthetic_trade(
                         db, cdu_id=cdu.id, trade_date=target_date, value_date=target_date,
                         operation_type="COUPON", isin=isin, instrument_category=category,
-                        amount_kzt=amount * fx, amount_ccy=amount, currency=currency,
+                        amount_kzt=round(amount * fx, 2), amount_ccy=amount, currency=currency,
                         face_value=face, instrument_code=h.get("ticker"),
-                        notes=f"Купон {isin}: {face:,.2f} × {rate:.4%} за {prev:%d.%m.%Y}–{target_date:%d.%m.%Y} ({ref.base or '30/360'})",
-                        book_cash=cash_now,
+                        notes=f"Купон {label} ({isin}): {_ru(face)} × {_ru(rate * 100, 4)}% за {prev:%d.%m.%Y}–{target_date:%d.%m.%Y} ({ref.base or '30/360'})",
+                        book_cash=this_coupon_cash,
                     )
                     touched.add(trade.id)
                     coupons["trades"] += 1
@@ -301,18 +339,21 @@ def run_daily_auto_events(db: Session, target_date: date) -> Dict[str, Dict[str,
                     ev.base = ref.base
                     ev.value_date = target_date
                     ev.trade_id = trade.id
-                    if not cash_now:
+                    if not this_coupon_cash:
                         ar = _upsert_ar(
                             db, cdu_id=cdu.id, record_date=target_date, isin=isin,
-                            amount=amount, amount_kzt=amount * fx, currency=currency,
+                            amount=amount, amount_kzt=round(amount * fx, 2), currency=currency,
                             related_event_type="COUPON", related_trade_id=trade.id,
-                            description=f"Сумма вознаграждения в пути по ISIN {isin}",
+                            due_date=target_date, counterparty=ref.issuer,
+                            description=(f"Купон {label} ({isin}) за {prev:%d.%m.%Y}–{target_date:%d.%m.%Y}: "
+                                         "ожидается поступление"),
                         )
                         ev.ar_id = ar.id
                         ev.status = "PENDING"
                         coupons["ar_created"] += 1
                     else:
                         ev.status = "PAID"
+                        _drop_auto_ar(db, trade.id)   # settlement mode changed: no receivable any more
 
             # ── redemption ──
             if ref.maturity_date == target_date:
@@ -321,7 +362,7 @@ def run_daily_auto_events(db: Session, target_date: date) -> Dict[str, Dict[str,
                     operation_type="REDEMPTION", isin=isin, instrument_category=category,
                     amount_kzt=face * fx, amount_ccy=face, currency=currency,
                     face_value=face, instrument_code=h.get("ticker"),
-                    notes=f"Погашение {isin}: номинал {face:,.2f}",
+                    notes=f"Погашение {label} ({isin}): номинал {_ru(face)}",
                     book_cash=cash_now,
                 )
                 touched.add(trade.id)
@@ -353,7 +394,8 @@ def run_daily_auto_events(db: Session, target_date: date) -> Dict[str, Dict[str,
                         db, cdu_id=cdu.id, record_date=target_date, isin=isin,
                         amount=face, amount_kzt=face * fx, currency=currency,
                         related_event_type="REDEMPTION", related_trade_id=trade.id,
-                        description=f"Сумма погашения в пути по ISIN {isin}",
+                        due_date=target_date, counterparty=ref.issuer,
+                        description=f"Погашение {label} ({isin}): ожидается поступление номинала",
                     )
                     ev.ar_id = ar.id
                     ev.status = "PENDING"

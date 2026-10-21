@@ -589,6 +589,68 @@ class FormulaDefinition(Base):
     updated_by: Mapped[Optional[str]] = mapped_column(String(80))
 
 
+# ─────────────── Параметры расчёта (раздел «Формулы») ───────────────
+class CalcParameter(Base):
+    """Value of a calculation parameter changed by a user (definitions and
+    defaults live in ``services.formulas.params``)."""
+    __tablename__ = "calc_parameters"
+
+    code: Mapped[str] = mapped_column(String(60), primary_key=True)
+    value_text: Mapped[str] = mapped_column(String(200))
+    updated_by: Mapped[Optional[str]] = mapped_column(String(80))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class CalcParameterChange(Base):
+    __tablename__ = "calc_parameter_changes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(60), index=True)
+    old_value: Mapped[Optional[str]] = mapped_column(String(200))
+    new_value: Mapped[str] = mapped_column(String(200))
+    reason: Mapped[Optional[str]] = mapped_column(Text)
+    changed_by: Mapped[Optional[str]] = mapped_column(String(80))
+    changed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ─────────────── Пользовательские показатели (конструктор формул) ───────────────
+class CustomIndicator(Base):
+    """A user indicator: an Excel-like formula over portfolio figures of a
+    manager (level ``cdu``) or of the whole fund (level ``fund``)."""
+    __tablename__ = "custom_indicators"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(60), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    level: Mapped[str] = mapped_column(String(10), default="cdu")          # cdu | fund
+    unit: Mapped[str] = mapped_column(String(10), default="NUMBER")        # KZT | PCT | NUMBER | DAYS
+    expression: Mapped[str] = mapped_column(Text, nullable=False)
+    decimals: Mapped[int] = mapped_column(Integer, default=2)
+    show_on_dashboard: Mapped[bool] = mapped_column(Boolean, default=True)
+    alert_op: Mapped[Optional[str]] = mapped_column(String(4))              # > < >= <=
+    alert_threshold: Mapped[Optional[float]] = mapped_column(Float)
+    alert_severity: Mapped[Optional[str]] = mapped_column(String(10))       # WARN | CRITICAL
+    status: Mapped[str] = mapped_column(String(12), default="DRAFT")        # DRAFT | ACTIVE | ARCHIVED
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[Optional[str]] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_by: Mapped[Optional[str]] = mapped_column(String(80))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class CustomIndicatorVersion(Base):
+    __tablename__ = "custom_indicator_versions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    indicator_id: Mapped[int] = mapped_column(ForeignKey("custom_indicators.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    snapshot_json: Mapped[str] = mapped_column(Text)
+    comment: Mapped[Optional[str]] = mapped_column(Text)
+    created_by: Mapped[Optional[str]] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 # ─────────────── CDU-специфичный формат файла (маппинг колонок) ───────────────
 class CDUFileFormat(Base):
     """Перекрытия имён колонок для конкретного CDU.
@@ -834,6 +896,9 @@ class InstrumentReference(Base):
     coupon_rate_pct: Mapped[Optional[float]] = mapped_column(Float)
     coupon_rate_text: Mapped[Optional[str]] = mapped_column(String(120))  # FIX number or FLOAT formula, e.g. TONIA + 1.5%
     coupon_type: Mapped[Optional[str]] = mapped_column(String(40))  # fix/float/zero/indexed
+    # floating coupon = TONIA Compounded indicator (TCR_1M / TCR_3M / TCR_6M) + margin
+    float_index: Mapped[Optional[str]] = mapped_column(String(12))
+    float_margin_pct: Mapped[Optional[float]] = mapped_column(Float)
     frequency: Mapped[Optional[int]] = mapped_column(Integer)       # 1/2/4
     base: Mapped[Optional[str]] = mapped_column(String(20))         # 30/360, act/360, act/act
     base_code: Mapped[Optional[str]] = mapped_column(String(10))
@@ -1019,6 +1084,38 @@ class FXRate(Base):
 
 
 # ─────────────── Coupon / Redemption events ───────────────
+class AutoEventDay(Base):
+    """A date for which coupon / redemption events were generated.
+
+    ``data_stamp`` fingerprints the data the events were built from (documents,
+    ledger, reference book); a changed stamp makes the catch-up run the date
+    again, so events follow re-uploaded files and approved operations.
+    """
+    __tablename__ = "auto_event_days"
+
+    event_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    data_stamp: Mapped[str] = mapped_column(String(200))
+    processed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class ToniaCompounded(Base):
+    """KASE «TONIA Compounded» indicators (TCI, TCR_1M/3M/6M) by calculation date."""
+    __tablename__ = "tonia_compounded"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    calc_date: Mapped[date] = mapped_column(Date, index=True)
+    indicator: Mapped[str] = mapped_column(String(12), index=True)   # TCI / TCR_1M / TCR_3M / TCR_6M
+    value: Mapped[float] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(40), default="kase_xlsx")
+    source_doc_id: Mapped[Optional[int]] = mapped_column(ForeignKey("source_documents.id"))
+    updated_by: Mapped[Optional[str]] = mapped_column(String(80))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("calc_date", "indicator", name="uq_tonia_date_indicator"),
+    )
+
+
 class CouponEvent(Base):
     """Событие купонной выплаты по позиции на дату T (Last coupon date = T)."""
     __tablename__ = "coupon_events"

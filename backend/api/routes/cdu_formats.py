@@ -67,11 +67,11 @@ def create_or_update_cdu_format(
     """Создать или полностью заменить формат CDU."""
     cdu = db.query(CDU).filter(CDU.id == cdu_id).first()
     if not cdu:
-        raise HTTPException(404, detail="CDU not found")
+        raise HTTPException(404, detail="ЧДУ не найден")
 
     aliases = data.get("field_aliases", {})
     if not isinstance(aliases, dict):
-        raise HTTPException(400, detail="field_aliases must be a dict")
+        raise HTTPException(400, detail="Правила соответствия полей должны быть переданы как объект")
 
     header_row_index = data.get("header_row_index", 0)
     is_active = data.get("is_active", True)
@@ -108,12 +108,12 @@ def patch_cdu_format(
     """Частично обновить формат CDU."""
     row = db.query(CDUFileFormat).filter(CDUFileFormat.cdu_id == cdu_id).first()
     if not row:
-        raise HTTPException(404, detail="Format not found")
+        raise HTTPException(404, detail="Правила распознавания файла не найдены")
 
     if "field_aliases" in data:
         aliases = data["field_aliases"]
         if not isinstance(aliases, dict):
-            raise HTTPException(400, detail="field_aliases must be a dict")
+            raise HTTPException(400, detail="Правила соответствия полей должны быть переданы как объект")
         row.field_aliases = json.dumps(aliases, ensure_ascii=False)
     if "header_row_index" in data:
         row.header_row_index = int(data["header_row_index"])
@@ -129,7 +129,7 @@ def delete_cdu_format(cdu_id: int, db: Session = Depends(get_db)) -> dict[str, A
     """Удалить формат CDU."""
     row = db.query(CDUFileFormat).filter(CDUFileFormat.cdu_id == cdu_id).first()
     if not row:
-        raise HTTPException(404, detail="Format not found")
+        raise HTTPException(404, detail="Правила распознавания файла не найдены")
     db.delete(row)
     db.commit()
-    return {"detail": "deleted", "cdu_id": cdu_id}
+    return {"detail": "Правила распознавания файла удалены", "cdu_id": cdu_id}

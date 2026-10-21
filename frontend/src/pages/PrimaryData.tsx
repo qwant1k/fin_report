@@ -2,6 +2,9 @@ import { useState, useCallback, useEffect, ReactNode } from 'react'
 import { FileUp, CheckCircle, AlertTriangle, Clock, FileSpreadsheet, FileText, Building2, Trash2, RefreshCw } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/lib/auth'
+import { documentTypeLabel, processStatusLabel } from '@/lib/displayLabels'
+import { apiErrorMessage, notificationText } from '@/lib/notifications'
+import toast from 'react-hot-toast'
 
 interface SourceDoc {
   id: number
@@ -24,16 +27,6 @@ interface CduOption {
 // Реальные коды, которые хранит backend (см. api/routes/primary_data_routes.py::_to_doc_type
 // и Workday.tsx::DOC_LABEL) — раньше здесь были lowercase-ключи, которые никогда не совпадали
 // с приходящими от API значениями, поэтому тип документа всегда показывался как "неизвестно".
-const FILE_TYPE_LABELS: Record<string, string> = {
-  TRADE_REPORT: 'Trade Report',
-  HOLDINGS: 'Holdings',
-  RECONCILIATION: 'Сверка',
-  CERTIFICATE: 'Биржевое свидетельство',
-  STATEMENT_PDF: 'Выписка PDF',
-  RISK_REPORT_XLSM: 'Risk Report',
-  OTHER: 'Прочее',
-}
-
 const FILE_TYPE_ICONS: Record<string, ReactNode> = {
   TRADE_REPORT: <FileSpreadsheet className="w-4 h-4 text-emerald-600" />,
   HOLDINGS: <FileSpreadsheet className="w-4 h-4 text-blue-600" />,
@@ -67,8 +60,8 @@ export default function PrimaryDataPage() {
     try {
       await api.put(`/primary-data/documents/${docId}`, { cdu_id: Number(cduId) })
       fetchDocs()
-    } catch {
-      // toast is shown by the api interceptor
+    } catch (error) {
+      toast.error(apiErrorMessage(error, 'Не удалось привязать документ к выбранному ЧДУ'))
     }
   }
 
@@ -115,9 +108,18 @@ export default function PrimaryDataPage() {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       setResult(res.data)
+      if (res.data?.status === 'FAILED') {
+        toast.error(notificationText(res.data?.message, 'Документ загружен, но импорт не выполнен'))
+      } else if (res.data?.status === 'SKIPPED') {
+        toast.success(notificationText(res.data?.message, 'Документ пропущен, поскольку уже был загружен'))
+      } else {
+        toast.success(notificationText(res.data?.message, 'Документ загружен и успешно обработан'))
+      }
       fetchDocs()
     } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Ошибка загрузки')
+      const message = apiErrorMessage(err, 'Не удалось загрузить и обработать документ')
+      setError(message)
+      toast.error(message)
     } finally {
       setLoading(false)
       setFile(null)
@@ -173,7 +175,7 @@ export default function PrimaryDataPage() {
             Перетащите файл сюда или <span className="text-emerald-700 font-medium">нажмите для выбора</span>
           </p>
           <p className="text-xs text-slate-400 mt-1">
-            Trade Report XLSX, Holdings, Сверка, Биржевые свидетельства (PDF/PNG/DOCX), Выписки PDF, файлы НБ РК КФГД_ГГГГММДД (CSV)
+            Отчёты о сделках XLSX, данные портфеля, файлы сверки, биржевые свидетельства (PDF/PNG/DOCX), выписки PDF и файлы НБ РК (CSV)
           </p>
           <input
             type="file"
@@ -286,12 +288,12 @@ export default function PrimaryDataPage() {
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-1.5 text-xs text-slate-600">
                       {FILE_TYPE_ICONS[d.file_type] || <FileText className="w-4 h-4 text-slate-400" />}
-                      {FILE_TYPE_LABELS[d.file_type] || d.file_type}
+                      {documentTypeLabel(d.file_type)}
                     </div>
                   </td>
                   <td className="px-4 py-2">
                     <span className={`text-xs px-2 py-0.5 rounded border ${statusColor(d.import_status)}`}>
-                      {d.import_status}
+                      {processStatusLabel(d.import_status)}
                     </span>
                   </td>
                   <td className="px-4 py-2 text-slate-600">

@@ -38,7 +38,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from models.db_models import (
-    BondLot, CashMovement, CDU, DepositLot, FXRate, RepoLot, Trade,
+    BondLot, CashMovement, CashSnapshot, CDU, DepositLot, FXRate, RepoLot, Trade,
 )
 
 OWN, RESERVE = "310138-1", "300138-1"
@@ -211,6 +211,42 @@ def _trade(db: Session, *, cdu_id: int, deal_id: str, op: str, trade_date: date,
     return t
 
 
+def _store_account_balances(db: Session, accounts: List[Dict[str, Any]],
+                            source_doc_id: Optional[int]) -> int:
+    """AC rows → opening cash of the NBRK portfolios.
+
+    The balance of an account on TRADE.DATE (end of the previous business day)
+    is the cash of the portfolio («Собственные активы» / «Спецрезерв»); the
+    deposits and REPO of the file move it from the next day on.  Without it the
+    portfolio had only the outflows of the placements and its value in
+    «Сводка» was close to zero.
+    """
+    n = 0
+    for acc in accounts:
+        if acc.get("date") is None or acc.get("balance") is None:
+            continue
+        cdu = _cdu_for_portfolio(db, acc.get("portfolio"))
+        if cdu is None:
+            continue
+        currency = (acc.get("currency") or "KZT").upper()
+        row = db.execute(select(CashSnapshot).where(
+            CashSnapshot.cdu_id == cdu.id,
+            CashSnapshot.snapshot_date == acc["date"],
+            CashSnapshot.currency == currency,
+            CashSnapshot.portfolio_code == acc.get("account"),
+        )).scalars().first()
+        if row is None:
+            row = CashSnapshot(cdu_id=cdu.id, snapshot_date=acc["date"], currency=currency,
+                               portfolio_code=acc.get("account"))
+            db.add(row)
+        row.amount = float(acc["balance"])
+        row.amount_kzt = None if currency != "KZT" else float(acc["balance"])
+        row.source = "nbrk_ac"
+        row.source_doc_id = source_doc_id
+        n += 1
+    return n
+
+
 def import_nbrk_file(db: Session, file_path: str | Path, *, source_doc_id: Optional[int] = None,
                      actor: Optional[str] = None, file_name: Optional[str] = None) -> Dict[str, Any]:
     path = Path(file_path)
@@ -334,6 +370,7 @@ def import_nbrk_file(db: Session, file_path: str | Path, *, source_doc_id: Optio
             continue
 
         counters["warnings"].append(f"{module} {t24}: тип операции {ttype!r} не поддерживается — строка пропущена")
+    counters["cash_balances"] = _store_account_balances(db, parsed["accounts"], source_doc_id)
     db.flush()
     logger.info(f"NBRK file {parsed['file_name']}: { {k: v for k, v in counters.items() if k != 'accounts'} }")
     return counters

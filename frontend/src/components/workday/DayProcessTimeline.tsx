@@ -38,6 +38,10 @@ export interface DayProcessStep {
   blockedReason?: string
   /** содержимое разворачиваемой детали (остаёмся на том же экране) */
   detail?: ReactNode
+  /** шаг частично выполнен, но не мешает идти дальше (напр. загружены не все ЧДУ) */
+  nonBlocking?: boolean
+  /** реально идёт фоновая работа (крутится индикатор) */
+  busy?: boolean
 }
 
 const STATUS_LABEL: Record<StepStatus, string> = {
@@ -105,7 +109,9 @@ function StepIcon({ step }: { step: DayProcessStep }) {
   if (step.status === 'in_progress') {
     return (
       <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-sky-500 text-white shadow-soft">
-        <Loader2 className="h-5 w-5 motion-safe:animate-spin" />
+        {step.busy || !step.nonBlocking
+          ? <Loader2 className="h-5 w-5 motion-safe:animate-spin" />
+          : <Icon className="h-5 w-5" />}
       </div>
     )
   }
@@ -145,14 +151,17 @@ export default function DayProcessTimeline({ steps, onOpenFullScreen, className 
   const allDone = steps.length > 0 && doneCount === steps.length
 
   // Правило приоритета: ошибка > предупреждение > выполняется > не начато.
-  const nextAction = useMemo(
-    () =>
+  // Частично выполненный шаг (nonBlocking) не держит процесс: следующий шаг уже доступен.
+  const nextAction = useMemo(() => {
+    const blocking = steps.filter((s) => !s.nonBlocking)
+    return (
       steps.find((s) => s.status === 'error') ??
-      steps.find((s) => s.status === 'warning') ??
-      steps.find((s) => s.status === 'in_progress') ??
-      steps.find((s) => s.status === 'pending'),
-    [steps],
-  )
+      blocking.find((s) => s.status === 'warning') ??
+      blocking.find((s) => s.status === 'in_progress') ??
+      blocking.find((s) => s.status === 'pending') ??
+      steps.find((s) => s.status === 'warning' || s.status === 'in_progress' || s.status === 'pending')
+    )
+  }, [steps])
 
   const expandedStep = steps.find((s) => s.id === expandedId) ?? null
 

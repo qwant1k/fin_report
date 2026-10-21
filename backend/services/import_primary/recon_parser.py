@@ -1,18 +1,24 @@
-"""Parser of the reconciliation workbook sent by a manager («Сверка КФГД …»).
+"""Parser of the reconciliation workbook sent by a manager («Сверка КФГД …»,
+«Приложение 3 Сверка»).
 
-Implements business process 6.5 B — anchors instead of fixed cells, because
-every manager has its own layout:
+Every manager fills the same template (business process 6.5 B), but with its
+own layout: an extra «№» column, nominal per security instead of the total,
+rates as 0.1067 instead of 10.67, dates as text, totals with or without the
+«ИТОГО» label.  The parser therefore finds tables by their headers and maps
+columns by header text, never by fixed cells.
 
-* B.1 Cash — the number next to the cell «KZT» located within two rows /
-  columns of the label «Остатки на инвест. счетах».
-* B.2 Securities — total of the column «Суммарно-текущая рыночная стоимость»
-  of the «ЦБ» table (footer row «ИТОГО» or an unlabeled footer; if there is
-  no footer, the sum of the data rows).
-* B.3 Reverse REPO — total of «Суммарная текущая стоимость, в тг».
-* B.4 Receivables — total of «Остаток в тенге» in «Прочие активы …».
-* B.5 Total — the number to the right of «Итого активов».
+Extracted (all amounts in tenge):
 
-Labels are compared case/space-insensitively with a small fuzzy tolerance.
+* ``securities`` — lines of the «ЦБ» table: ISIN, quantity, total nominal,
+  coupon rate, purchase date, maturity, clean purchase cost, clean price,
+  dirty price, accrued coupon, market value;
+* ``cash`` — balances of «Остатки на инвест. счетах» by currency/account;
+* ``repos`` — lines of «Обратное репо»: ISIN, quantity, open/close dates and
+  amounts, rate, accrued reward, current value;
+* ``receivables`` — lines of «Прочие активы (дебиторская задолженность)»;
+* ``liabilities`` — commissions and other payables (information only);
+* ``totals`` — section totals as stated in the file (``*_file``) and as the sum
+  of the parsed lines; ``total`` is «Итого активов».
 """
 from __future__ import annotations
 
@@ -28,10 +34,19 @@ from services.calculator.constants import normalize_cdu_name
 
 Grid = List[List[Any]]
 
+ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+CURRENCIES = ("KZT", "USD", "EUR", "RUB", "CNY", "GBP")
+
+
+class ProtectedWorkbookError(ValueError):
+    """The workbook is encrypted with a password."""
+
+
+# ───────────────────────────── cell helpers ─────────────────────────────
 
 def _norm(value: Any) -> str:
     text = str(value or "").lower().replace("ё", "е").replace("\xa0", " ")
-    text = re.sub(r"[\s\-–—.,:;«»\"'()]+", " ", text)
+    text = re.sub(r"[\s\-–—.,:;«»\"'()_]+", " ", text)
     return text.strip()
 
 
@@ -48,85 +63,20 @@ def _num(value: Any) -> Optional[float]:
         return None
     if isinstance(value, (int, float)):
         return None if value != value else float(value)
+    if isinstance(value, (datetime, date)):
+        return None
     text = str(value).replace("\xa0", "").replace(" ", "").strip()
-    if not text:
+    if not text or text in ("-", "–", "—"):
         return None
     if "," in text and "." in text:
         text = text.replace(",", "")
     else:
         text = text.replace(",", ".")
+    text = text.rstrip("%")
     try:
         return float(text)
     except ValueError:
         return None
-
-
-def _find(grid: Grid, *needles: str, start_row: int = 0) -> Optional[Tuple[int, int]]:
-    for r in range(start_row, len(grid)):
-        for c, value in enumerate(grid[r]):
-            if isinstance(value, str):
-                text = _norm(value)
-                if any(_similar(text, _norm(n)) for n in needles):
-                    return r, c
-    return None
-
-
-def _first_number_right(grid: Grid, r: int, c: int) -> Optional[float]:
-    for value in grid[r][c + 1:]:
-        n = _num(value)
-        if n is not None:
-            return n
-    return None
-
-
-def _column_total(grid: Grid, header_r: int, col: int, key_col: Optional[int],
-                  stop_needles: Tuple[str, ...]) -> Optional[float]:
-    """Footer total of a column; falls back to the sum of the data rows."""
-    data_sum = 0.0
-    has_data = False
-    for r in range(header_r + 1, len(grid)):
-        row = grid[r]
-        texts = [_norm(v) for v in row if isinstance(v, str) and v.strip()]
-        if any(any(_similar(t, _norm(s)) for s in stop_needles) for t in texts):
-            break
-        value = _num(row[col]) if col < len(row) else None
-        key = row[key_col] if key_col is not None and key_col < len(row) else None
-        key_text = _norm(key) if isinstance(key, str) else ""
-        is_footer = (
-            any(t in ("итого", "итого:", "всего", "total") for t in texts)
-            or (key_col is not None and (key is None or key_text in ("", "итого")) and value is not None and has_data)
-        )
-        if is_footer and value is not None:
-            return value
-        if value is not None and not is_footer:
-            data_sum += value
-            has_data = True
-        if not any(v not in (None, "") for v in row) and has_data:
-            # blank line after the table body
-            continue
-    return data_sum if has_data else None
-
-
-def _report_date(grid: Grid, file_name: str) -> Optional[date]:
-    hit = _find(grid, "дата сверки", "на дату", "по состоянию на")
-    if hit:
-        r, c = hit
-        for value in grid[r][c + 1:]:
-            d = _to_date(value)
-            if d:
-                return d
-    # a real date cell in the first rows (numbers are NOT taken as Excel serials)
-    for r in range(min(5, len(grid))):
-        for value in grid[r]:
-            if isinstance(value, (datetime, date)):
-                return value.date() if isinstance(value, datetime) else value
-    m = re.search(r"(\d{2})[.\s_](\d{2})[.\s_](\d{4})", file_name)
-    if m:
-        try:
-            return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-        except ValueError:
-            return None
-    return None
 
 
 def _to_date(value: Any) -> Optional[date]:
@@ -135,114 +85,484 @@ def _to_date(value: Any) -> Optional[date]:
     if isinstance(value, date):
         return value
     if isinstance(value, str):
-        for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y"):
+        text = value.strip()
+        for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y", "%d.%m.%y", "%Y-%m-%d %H:%M:%S"):
             try:
-                return datetime.strptime(value.strip(), fmt).date()
+                return datetime.strptime(text, fmt).date()
             except ValueError:
                 continue
     return None
 
 
+def _cell(row: List[Any], col: Optional[int]) -> Any:
+    if col is None or col >= len(row):
+        return None
+    return row[col]
+
+
+def _isin(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().upper().replace(" ", "")
+    return text if ISIN_RE.match(text) else None
+
+
+def _row_texts(row: List[Any]) -> List[str]:
+    return [_norm(v) for v in row if isinstance(v, str) and v.strip()]
+
+
+def _find(grid: Grid, *needles: str, start_row: int = 0, end_row: Optional[int] = None) -> Optional[Tuple[int, int]]:
+    for r in range(start_row, min(end_row if end_row is not None else len(grid), len(grid))):
+        for c, value in enumerate(grid[r]):
+            if isinstance(value, str):
+                text = _norm(value)
+                if any(_similar(text, _norm(n)) for n in needles):
+                    return r, c
+    return None
+
+
+def _first_number_right(row: List[Any], c: int) -> Optional[float]:
+    for value in row[c + 1:]:
+        n = _num(value)
+        if n is not None:
+            return n
+    return None
+
+
+def _header_map(row: List[Any], spec: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]]) -> Dict[str, int]:
+    """Column index for every field: (needles, excluded words)."""
+    out: Dict[str, int] = {}
+    for c, value in enumerate(row):
+        if not isinstance(value, str):
+            continue
+        text = _norm(value)
+        for field, (needles, excluded) in spec.items():
+            if field in out:
+                continue
+            if any(n in text for n in needles) and not any(x in text for x in excluded):
+                out[field] = c
+                break
+    return out
+
+
+# ───────────────────────────── sections ─────────────────────────────
+
+SEC_SPEC = {
+    "name": (("наименование эмитента", "наименование"), ()),
+    "isin": (("isin",), ()),
+    "quantity": (("количество",), ()),
+    "nominal": (("номинальн",), ()),
+    "rate": (("ставка",), ()),
+    "purchase_date": (("дата зачисления", "приобрет"), ()),
+    "maturity_date": (("дата погашения",), ()),
+    "purchase_cost": (("покупная",), ()),
+    "dirty_price": (("грязная",), ()),
+    "price": (("расчетная цена", "цена"), ("грязная", "покупная")),
+    "accrued": (("накопленный купон", "накопленное", "нкд"), ()),
+    "value": (("суммарно текущая", "рыночная стоимость", "текущая рыночная"), ()),
+    "weight": (("вес",), ()),
+}
+
+REPO_SPEC = {
+    "name": (("наименование",), ()),
+    "isin": (("isin", "нин"), ()),
+    "quantity": (("количество",), ()),
+    "currency": (("валюта",), ()),
+    "open_date": (("дата открытия",), ()),
+    "close_date": (("дата закрытия",), ()),
+    "open_price": (("цена открытия",), ()),
+    "close_price": (("цена закрытия",), ()),
+    "open_amount": (("сумма открытия",), ()),
+    "close_amount": (("сумма закрытия",), ()),
+    "rate": (("ставка",), ()),
+    "accrued": (("начисленн",), ()),
+    "value": (("текущая стоимость", "суммарная текущая"), ()),
+}
+
+AR_SPEC = {
+    "name": (("наименование",), ()),
+    "currency": (("валюта",), ()),
+    "record_date": (("дата постановки",), ()),
+    "quantity": (("количество",), ()),
+    "amount_ccy": (("остаток в валюте",), ()),
+    "amount_kzt": (("остаток в тенге",), ()),
+}
+
+_STOP_SEC = ("остатки на инвест", "обратное репо", "прочие активы", "итого активов")
+_STOP_REPO = ("прочие активы", "итого активов", "кредиторская")
+
+
+def _is_total_row(row: List[Any]) -> bool:
+    return any(t.startswith(("итого", "всего", "total")) for t in _row_texts(row))
+
+
+def _hits_stop(row: List[Any], stops: Tuple[str, ...]) -> bool:
+    return any(any(s in t for s in stops) for t in _row_texts(row))
+
+
+def _rate_pct(value: Any) -> Optional[float]:
+    n = _num(value)
+    if n is None:
+        return None
+    return round(n * 100.0, 10) if 0 < abs(n) < 1 else n
+
+
+def _parse_securities(grid: Grid, warnings: List[str]) -> Tuple[List[Dict[str, Any]], Optional[float], Optional[int]]:
+    header_r = None
+    for r, row in enumerate(grid):
+        texts = _row_texts(row)
+        if any("isin" in t for t in texts) and any("количество" in t for t in texts) and \
+                any("рыночн" in t or "суммарно" in t for t in texts):
+            header_r = r
+            break
+    if header_r is None:
+        warnings.append("Не найдена таблица «ЦБ» (заголовок с ISIN, количеством и рыночной стоимостью)")
+        return [], None, None
+    cols = _header_map(grid[header_r], SEC_SPEC)
+    lines: List[Dict[str, Any]] = []
+    file_total: Optional[float] = None
+    end_r = header_r
+    for r in range(header_r + 1, len(grid)):
+        row = grid[r]
+        if _hits_stop(row, _STOP_SEC):
+            end_r = r
+            break
+        isin = _isin(_cell(row, cols.get("isin")))
+        if isin is None:
+            # footer: «ИТОГО» or an unlabeled line with the total of the value column
+            value = _num(_cell(row, cols.get("value")))
+            if value is not None and lines and file_total is None and (
+                _is_total_row(row) or _cell(row, cols.get("isin")) in (None, "")
+            ):
+                file_total = value
+            end_r = r
+            continue
+        qty = _num(_cell(row, cols.get("quantity")))
+        nominal_raw = _num(_cell(row, cols.get("nominal")))
+        dirty = _num(_cell(row, cols.get("dirty_price")))
+        value = _num(_cell(row, cols.get("value")))
+        face = _total_nominal(qty, nominal_raw, dirty, value)
+        lines.append({
+            "row": r + 1,
+            "name": str(_cell(row, cols.get("name")) or "").strip() or None,
+            "isin": isin,
+            "quantity": qty,
+            "face_value": face,
+            "rate_pct": _rate_pct(_cell(row, cols.get("rate"))),
+            "purchase_date": _iso(_to_date(_cell(row, cols.get("purchase_date")))),
+            "maturity_date": _iso(_to_date(_cell(row, cols.get("maturity_date")))),
+            "purchase_cost": _num(_cell(row, cols.get("purchase_cost"))),
+            "price": _num(_cell(row, cols.get("price"))),
+            "dirty_price": dirty,
+            "accrued": _num(_cell(row, cols.get("accrued"))),
+            "value": value,
+        })
+        end_r = r
+    return lines, file_total, end_r
+
+
+def _total_nominal(qty: Optional[float], nominal: Optional[float], dirty: Optional[float],
+                   value: Optional[float]) -> Optional[float]:
+    """«Номинальная стоимость» is the total of the line, but some managers put
+    the nominal of one security there (Tansar: 1000).  Pick the reading that
+    agrees with value = nominal × dirty price."""
+    if nominal is None:
+        return None
+    if qty in (None, 0):
+        return nominal
+    candidates = [nominal, nominal * qty]
+    if dirty and value:
+        return min(candidates, key=lambda f: abs(f * dirty / 100.0 - value))
+    return nominal * qty if nominal < qty else nominal
+
+
+def _parse_cash(grid: Grid, start: int) -> List[Dict[str, Any]]:
+    hit = _find(grid, "остатки на инвест", "остатки на инвестиционных", start_row=max(start - 2, 0))
+    if not hit:
+        return []
+    lr, _ = hit
+    out: List[Dict[str, Any]] = []
+    for r in range(lr, min(lr + 6, len(grid))):
+        row = grid[r]
+        if r > lr and _hits_stop(row, ("обратное репо", "прочие активы", "итого активов")):
+            break
+        for c, value in enumerate(row):
+            if not isinstance(value, str):
+                continue
+            text = value.strip().upper()
+            if text in CURRENCIES:
+                amount = _first_number_right(row, c)
+                if amount is not None:
+                    out.append({"currency": text, "account": None, "amount": amount, "row": r + 1})
+                break
+            if re.match(r"^KZ\d{2}[0-9A-Z]{10,30}$", text.replace(" ", "")):
+                amount = _first_number_right(row, c)
+                if amount is not None and out:
+                    out[-1]["account"] = text.replace(" ", "")
+                break
+    return out
+
+
+def _parse_repos(grid: Grid, start: int, warnings: List[str]) -> Tuple[List[Dict[str, Any]], Optional[float]]:
+    header_r = None
+    for r in range(start, len(grid)):
+        texts = _row_texts(grid[r])
+        if any("дата открытия" in t for t in texts) and any("сумма открытия" in t for t in texts):
+            header_r = r
+            break
+    if header_r is None:
+        return [], None
+    cols = _header_map(grid[header_r], REPO_SPEC)
+    lines: List[Dict[str, Any]] = []
+    file_total: Optional[float] = None
+    for r in range(header_r + 1, len(grid)):
+        row = grid[r]
+        if _hits_stop(row, _STOP_REPO):
+            break
+        open_date = _to_date(_cell(row, cols.get("open_date")))
+        open_amount = _num(_cell(row, cols.get("open_amount")))
+        if open_date is None or open_amount is None:
+            value = _num(_cell(row, cols.get("value")))
+            if _is_total_row(row) or (lines and value is not None and file_total is None):
+                file_total = value if value is not None else file_total
+            continue
+        lines.append({
+            "row": r + 1,
+            "name": str(_cell(row, cols.get("name")) or "").strip() or None,
+            "isin": _isin(_cell(row, cols.get("isin"))) or (str(_cell(row, cols.get("isin")) or "").strip() or None),
+            "quantity": _num(_cell(row, cols.get("quantity"))),
+            "currency": str(_cell(row, cols.get("currency")) or "KZT").strip().upper(),
+            "open_date": _iso(open_date),
+            "close_date": _iso(_to_date(_cell(row, cols.get("close_date")))),
+            "open_price": _num(_cell(row, cols.get("open_price"))),
+            "close_price": _num(_cell(row, cols.get("close_price"))),
+            "open_amount": open_amount,
+            "close_amount": _num(_cell(row, cols.get("close_amount"))),
+            "rate_pct": _rate_pct(_cell(row, cols.get("rate"))),
+            "accrued": _num(_cell(row, cols.get("accrued"))) or 0.0,
+            "value": _num(_cell(row, cols.get("value"))),
+        })
+    return lines, file_total
+
+
+def _parse_receivables(grid: Grid, start: int) -> Tuple[List[Dict[str, Any]], Optional[float]]:
+    hit = _find(grid, "прочие активы", start_row=start)
+    if not hit:
+        return [], None
+    header_r = None
+    for r in range(hit[0], min(hit[0] + 4, len(grid))):
+        if any("остаток в тенге" in t for t in _row_texts(grid[r])):
+            header_r = r
+            break
+    if header_r is None:
+        return [], None
+    cols = _header_map(grid[header_r], AR_SPEC)
+    lines: List[Dict[str, Any]] = []
+    file_total: Optional[float] = None
+    for r in range(header_r + 1, len(grid)):
+        row = grid[r]
+        if _hits_stop(row, ("итого активов", "кредиторская")):
+            break
+        amount = _num(_cell(row, cols.get("amount_kzt")))
+        name = _cell(row, cols.get("name"))
+        if _is_total_row(row):
+            file_total = amount if amount is not None else file_total
+            continue
+        if amount is None or not (isinstance(name, str) and name.strip()):
+            continue
+        lines.append({
+            "row": r + 1, "name": name.strip(),
+            "currency": str(_cell(row, cols.get("currency")) or "KZT").strip().upper(),
+            "record_date": _iso(_to_date(_cell(row, cols.get("record_date")))),
+            "amount_ccy": _num(_cell(row, cols.get("amount_ccy"))),
+            "amount_kzt": amount,
+        })
+    return lines, file_total
+
+
+_LIAB_NEEDLES = ("комиссия", "клиринговый сбор", "кредиторская задолженность", "остаток прочих обязательств")
+
+
+def _parse_liabilities(grid: Grid, start: int) -> Tuple[List[Dict[str, Any]], Optional[float], Optional[float]]:
+    hit = _find(grid, "кредиторская задолженност", start_row=start)
+    if not hit:
+        return [], None, None
+    out: List[Dict[str, Any]] = []
+    total = None
+    for r in range(hit[0] + 1, len(grid)):
+        row = grid[r]
+        for c, value in enumerate(row):
+            if not isinstance(value, str):
+                continue
+            text = _norm(value)
+            if text.startswith("итого") and "чист" not in text:
+                total = _first_number_right(row, c)
+                break
+            if any(text.startswith(n) for n in _LIAB_NEEDLES):
+                amount = _first_number_right(row, c)
+                out.append({"name": value.strip(), "amount": amount or 0.0, "row": r + 1})
+                break
+    net = None
+    hit_net = _find(grid, "итого чистых активов", "чистые активы", start_row=hit[0])
+    if hit_net:
+        net = _first_number_right(grid[hit_net[0]], hit_net[1])
+    return [x for x in out if x["amount"]], total, net
+
+
+def _money(v: float) -> str:
+    return f"{v:,.2f}".replace(",", " ").replace(".", ",")
+
+
+def _iso(d: Optional[date]) -> Optional[str]:
+    return d.isoformat() if d else None
+
+
+# ───────────────────────────── header data ─────────────────────────────
+
+def _report_date(grid: Grid, file_name: str) -> Optional[date]:
+    hit = _find(grid, "отчетная дата", "дата сверки", "на дату", "по состоянию на", end_row=8)
+    if hit:
+        r, c = hit
+        for value in grid[r][c + 1:]:
+            d = _to_date(value)
+            if d:
+                return d
+    for r in range(min(5, len(grid))):
+        for value in grid[r]:
+            d = _to_date(value) if isinstance(value, (datetime, date)) or (
+                isinstance(value, str) and re.match(r"^\d{2}\.\d{2}\.\d{4}$", value.strip())) else None
+            if d:
+                return d
+    m = re.search(r"(\d{2})[.\s_](\d{2})[.\s_](\d{2,4})(?!\d)", file_name)
+    if m:
+        year = int(m.group(3))
+        year = year + 2000 if year < 100 else year
+        try:
+            return date(year, int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return None
+    return None
+
+
 def _cdu_name(grid: Grid, file_name: str) -> Optional[str]:
-    hit = _find(grid, "наименование доверительного управляющего", "доверительный управляющий")
+    hit = _find(grid, "наименование доверительного управляющего", "доверительный управляющий", end_row=5)
     if hit:
         r, c = hit
         for value in grid[r][c + 1:]:
             if isinstance(value, str) and value.strip():
                 return value.strip()
-    canonical = normalize_cdu_name(Path(file_name).stem)
-    return canonical
+    # «Сентрас Секьюритиз | 31.12.2025» in the first cell
+    first = grid[0][0] if grid and grid[0] else None
+    if isinstance(first, str) and normalize_cdu_name(first):
+        return first.strip()
+    return normalize_cdu_name(Path(file_name).stem)
 
+
+# ───────────────────────────── entry points ─────────────────────────────
 
 def parse_reconciliation_grid(grid: Grid, file_name: str = "") -> Dict[str, Any]:
-    totals: Dict[str, float] = {}
     warnings: List[str] = []
+    report_date = _report_date(grid, file_name)
+    securities, sec_file_total, sec_end = _parse_securities(grid, warnings)
+    after_sec = sec_end or 0
+    cash = _parse_cash(grid, after_sec)
+    repos, repo_file_total = _parse_repos(grid, after_sec, warnings)
+    # deals closed on/before the report date are shown by some managers with
+    # the close amount, by others with 0; they are not assets any more
+    for x in repos:
+        x["closed"] = bool(report_date and x["close_date"] and x["close_date"] <= report_date.isoformat())
+        x["value_effective"] = 0.0 if x["closed"] else (x["value"] if x["value"] is not None else
+                                                         x["open_amount"] + (x["accrued"] or 0.0))
+    receivables, ar_file_total = _parse_receivables(grid, after_sec)
+    liabilities, liab_total, net_assets = _parse_liabilities(grid, after_sec)
 
-    # B.2 securities
-    sec_header = _find(grid, "суммарно-текущая рыночная стоимость", "суммарно текущая рыночная стоимость")
-    if sec_header:
-        hr, hc = sec_header
-        isin_col = None
-        for c, value in enumerate(grid[hr]):
-            if isinstance(value, str) and "isin" in value.lower():
-                isin_col = c
-                break
-        total = _column_total(grid, hr, hc, isin_col, ("остатки на инвест", "обратное репо"))
-        if total is not None:
-            totals["securities"] = total
+    total_hit = _find(grid, "итого активов", start_row=after_sec)
+    total_assets = _first_number_right(grid[total_hit[0]], total_hit[1]) if total_hit else None
 
-    # B.1 cash: «KZT» near «Остатки на инвест. счетах»
-    cash_label = _find(grid, "остатки на инвест счетах", "остатки на инвестиционных счетах")
-    if cash_label:
-        lr, lc = cash_label
-        found = None
-        for r in range(lr, min(lr + 3, len(grid))):
-            for c in range(0, min(len(grid[r]), lc + 4)):
-                value = grid[r][c]
-                if isinstance(value, str) and value.strip().upper() == "KZT":
-                    found = _first_number_right(grid, r, c)
-                    if found is not None:
-                        break
-            if found is not None:
-                break
-        if found is not None:
-            totals["cash"] = found
+    sec_sum = sum(x["value"] or 0.0 for x in securities)
+    repo_sum = sum(x["value_effective"] for x in repos)
+    cash_kzt = sum(x["amount"] for x in cash if x["currency"] == "KZT")
+    ar_sum = sum(x["amount_kzt"] for x in receivables)
+    totals: Dict[str, Any] = {
+        "securities": sec_file_total if sec_file_total is not None else sec_sum,
+        "cash": cash_kzt,
+        "repo": repo_file_total if repo_file_total is not None else repo_sum,
+        "ar": ar_file_total if ar_file_total is not None else ar_sum,
+        "securities_lines": sec_sum,
+        "repo_lines": repo_sum,
+    }
+    if total_assets is not None:
+        totals["total"] = total_assets
+    if liab_total is not None:
+        totals["liabilities"] = liab_total
+    if net_assets is not None:
+        totals["net_assets"] = net_assets
 
-    # B.3 reverse REPO
-    repo_header = _find(grid, "суммарная текущая стоимость, в тг", "суммарная текущая стоимость в тг")
-    if repo_header:
-        hr, hc = repo_header
-        isin_col = None
-        for c, value in enumerate(grid[hr]):
-            if isinstance(value, str) and ("isin" in value.lower() or "нин" in value.lower()):
-                isin_col = c
-                break
-        total = _column_total(grid, hr, hc, isin_col, ("прочие активы", "итого активов"))
-        totals["repo"] = total or 0.0
-
-    # B.4 receivables
-    ar_label = _find(grid, "прочие активы")
-    if ar_label:
-        ar_header = _find(grid, "остаток в тенге", start_row=ar_label[0])
-        if ar_header and ar_header[0] - ar_label[0] <= 3:
-            hr, hc = ar_header
-            total = _column_total(grid, hr, hc, None, ("итого активов", "кредиторская"))
-            totals["ar"] = total or 0.0
-        else:
-            totals["ar"] = 0.0
-
-    # B.5 total assets
-    total_label = _find(grid, "итого активов")
-    if total_label:
-        value = _first_number_right(grid, *total_label)
-        if value is not None:
-            totals["total"] = value
-
-    for key in ("cash", "securities", "repo", "ar", "total"):
-        if key not in totals:
-            warnings.append(f"Не найден итог сверки: {key}")
-    if {"cash", "securities", "repo", "ar", "total"} <= totals.keys():
-        components = totals["cash"] + totals["securities"] + totals["repo"] + totals["ar"]
-        if abs(components - totals["total"]) > 1.0:
+    if sec_file_total is not None and abs(sec_file_total - sec_sum) > 1.0:
+        warnings.append(f"В файле итог ЦБ {_money(sec_file_total)} не равен сумме строк {_money(sec_sum)}")
+    if repo_file_total is not None and abs(repo_file_total - repo_sum) > 1.0:
+        warnings.append(f"В файле итог РЕПО {_money(repo_file_total)} не равен сумме строк {_money(repo_sum)}")
+    if total_assets is not None:
+        components = totals["securities"] + totals["cash"] + totals["repo"] + totals["ar"]
+        if abs(components - total_assets) > 1.0:
             warnings.append(
-                f"Итого активов в файле ({totals['total']:,.2f}) не равно сумме составляющих "
-                f"({components:,.2f}) — проверьте файл ЧДУ"
+                f"«Итого активов» в файле ({_money(total_assets)}) не равно сумме разделов ({_money(components)})"
             )
+    else:
+        warnings.append("Не найдено «Итого активов»")
+    if not cash:
+        warnings.append("Не найден остаток денег («Остатки на инвест. счетах»)")
+    empty = sum(1 for x in securities if x["value"] is None or not x["face_value"])
+    if empty:
+        warnings.append(
+            f"В {empty} строках ЦБ пусты номинал или рыночная стоимость — если там формулы, "
+            "откройте файл в Excel, сохраните и загрузите снова"
+        )
+
     return {
         "cdu_name": _cdu_name(grid, file_name),
-        "report_date": _report_date(grid, file_name),
+        "report_date": report_date,
         "totals": totals,
-        "rows_parsed": len(grid),
+        "securities": securities,
+        "cash": cash,
+        "repos": repos,
+        "receivables": receivables,
+        "liabilities": liabilities,
+        "rows_parsed": len(securities) + len(repos) + len(receivables) + len(cash),
         "warnings": warnings,
     }
 
 
+def _pick_sheet(wb) -> Any:
+    """The template sheet («ДУ», «Лист1» …): the first one with the ЦБ table."""
+    for ws in wb.worksheets:
+        if ws.max_row and ws.max_row > 2000:
+            continue                                    # price lists (KASE / risk prices)
+        for row in ws.iter_rows(min_row=1, max_row=15, values_only=True):
+            texts = " ".join(_norm(v) for v in row if isinstance(v, str))
+            if "isin" in texts and ("рыночн" in texts or "количество" in texts):
+                return ws
+    return wb.worksheets[0]
+
+
+def _is_encrypted(path: Path) -> bool:
+    with open(path, "rb") as fh:
+        return fh.read(8) == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" and path.suffix.lower() in (".xlsx", ".xlsm")
+
+
 def parse_reconciliation_xlsx(file_path: Path | str) -> Dict[str, Any]:
     path = Path(file_path)
-    wb = load_workbook(path, data_only=True, read_only=True)
+    if _is_encrypted(path):
+        raise ProtectedWorkbookError(
+            "Файл сверки защищён паролем (зашифрован). Откройте его в Excel, снимите пароль "
+            "(Файл → Сведения → Защита книги → Зашифровать паролем → пусто) и загрузите снова."
+        )
+    wb = load_workbook(path, data_only=True)
     try:
-        ws = wb[wb.sheetnames[0]]
+        ws = _pick_sheet(wb)
         grid: Grid = [list(row or ()) for row in ws.iter_rows(values_only=True)]
     finally:
         wb.close()
-    return parse_reconciliation_grid(grid, path.name)
+    result = parse_reconciliation_grid(grid, path.name)
+    result["sheet"] = ws.title
+    return result

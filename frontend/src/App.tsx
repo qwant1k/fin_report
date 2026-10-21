@@ -16,6 +16,7 @@ import ReconciliationPage from './pages/Reconciliation'
 import PositionsPage from './pages/Positions'
 import KasePage from './pages/Kase'
 import MbmPage from './pages/Mbm'
+import ToniaPage from './pages/Tonia'
 import AlertsPage from './pages/Alerts'
 import SettingsPage from './pages/Settings'
 import AdminPage from './pages/Admin'
@@ -84,6 +85,7 @@ export default function App() {
         <Route path="/history" element={<PermissionRoute permission="page.history"><HistoryPage /></PermissionRoute>} />
         <Route path="/kase" element={<PermissionRoute permission="page.kase"><KasePage /></PermissionRoute>} />
         <Route path="/mbm" element={<PermissionRoute permission="page.mbm"><MbmPage /></PermissionRoute>} />
+        <Route path="/tonia" element={<PermissionRoute permission="page.kase"><ToniaPage /></PermissionRoute>} />
         <Route path="/alerts" element={<PermissionRoute permission="page.alerts"><AlertsPage /></PermissionRoute>} />
         <Route path="/reports" element={<PermissionRoute permission="page.reports"><ReportsPage /></PermissionRoute>} />
         <Route path="/securities" element={<PermissionRoute permission="page.securities"><SecuritiesPage /></PermissionRoute>} />

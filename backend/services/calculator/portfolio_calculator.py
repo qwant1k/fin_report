@@ -34,6 +34,7 @@ from models.db_models import (
     RawTrade,
     ReceivableTransaction,
     RepoLot,
+    SourceDocument,
     Trade,
 )
 
@@ -235,15 +236,42 @@ def _load_rr_snapshot_categories(
 
 
 def _latest_cash_snapshot_total(
-    db: Session, cdu_id: int, report_date: date,
+    db: Session, cdu_id: int, report_date: date, base_date: Optional[date] = None,
 ) -> Tuple[Optional[date], Optional[float]]:
+    """Opening cash of the roll-forward.
+
+    * The cash of the same Risk Report slice as the positions (``base_date``):
+      everything after it comes from the ledger (Trade Reports, statements,
+      manual operations, REPO/deposit closes of the slice), so the movements
+      of a day are visible and are not hidden inside a later RR daily row.
+    * Rows dated after the report date of their Risk Report are ignored —
+      the Cash sheet carries the balance forward to the next day with a zero
+      cash flow (RR 11.06 → row 12.06), which is not a real balance.
+    """
     # Holdings-report cash is the manager's external view (reconciliation
     # input), not the fund's books.
     books = CashSnapshot.source.is_(None) | (CashSnapshot.source != "holdings_report_xlsx")
+    limit = min(report_date, base_date) if base_date is not None else report_date
+    # Bank / NBRK account balances (AC rows of КФГД_ГГГГММДД) are real balances
+    # of their day — the Risk Report limit does not apply to them.
+    in_window = or_(
+        CashSnapshot.snapshot_date <= limit,
+        (CashSnapshot.snapshot_date <= report_date) & CashSnapshot.source.is_not(None)
+        & (CashSnapshot.source != "rr_import"),
+    )
+    not_forward = or_(
+        CashSnapshot.source_doc_id.is_(None),
+        ~select(SourceDocument.id).where(
+            SourceDocument.id == CashSnapshot.source_doc_id,
+            SourceDocument.doc_date.is_not(None),
+            SourceDocument.doc_date < CashSnapshot.snapshot_date,
+        ).exists(),
+    )
     snapshot_date = db.execute(select(CashSnapshot.snapshot_date).where(
         CashSnapshot.cdu_id == cdu_id,
-        CashSnapshot.snapshot_date <= report_date,
+        in_window,
         books,
+        not_forward,
     ).order_by(CashSnapshot.snapshot_date.desc())).scalar()
     if snapshot_date is None:
         return None, None
@@ -304,16 +332,30 @@ def _manual_trade_rows(db: Session, cdu_id: int, report_date: date) -> list[Simp
     return out
 
 
-def _approved_cash_delta(
+def _movement_value_kzt(db: Session, row: CashMovement) -> float:
+    value = row.amount_kzt
+    if value is None:
+        value = row.amount
+        if (row.currency or "KZT").upper() != "KZT":
+            fx = db.execute(select(FXRate).where(
+                FXRate.currency == row.currency.upper(),
+                FXRate.rate_date <= row.operation_date,
+            ).order_by(FXRate.rate_date.desc())).scalars().first()
+            value *= fx.rate if fx else 1.0
+    return float(value or 0.0)
+
+
+def cash_movement_lines(
     db: Session, cdu_id: int, report_date: date, base_date: Optional[date],
-) -> float:
+) -> List[Tuple[CashMovement, float]]:
+    """Approved cash movements that change the balance after the cash snapshot."""
     rows = db.execute(select(CashMovement).where(
         CashMovement.cdu_id == cdu_id,
         CashMovement.operation_date <= report_date,
         CashMovement.workflow_status.in_(EFFECTIVE_STATUSES),
         CashMovement.is_active.is_(True),
-    )).scalars().all()
-    total = 0.0
+    ).order_by(CashMovement.operation_date.asc(), CashMovement.id.asc())).scalars().all()
+    out: List[Tuple[CashMovement, float]] = []
     for row in rows:
         # Imported movements are already contained in an RR/cash snapshot on
         # the same date; manual corrections intentionally apply on that date.
@@ -321,17 +363,38 @@ def _approved_cash_delta(
             continue
         if base_date and row.operation_date == base_date and not row.is_manual:
             continue
-        value = row.amount_kzt
-        if value is None:
-            value = row.amount
-            if (row.currency or "KZT").upper() != "KZT":
-                fx = db.execute(select(FXRate).where(
-                    FXRate.currency == row.currency.upper(),
-                    FXRate.rate_date <= row.operation_date,
-                ).order_by(FXRate.rate_date.desc())).scalars().first()
-                value *= fx.rate if fx else 1.0
-        total += float(value or 0.0)
-    return total
+        out.append((row, _movement_value_kzt(db, row)))
+    return out
+
+
+def _approved_cash_delta(
+    db: Session, cdu_id: int, report_date: date, base_date: Optional[date],
+) -> float:
+    return sum(v for _, v in cash_movement_lines(db, cdu_id, report_date, base_date))
+
+
+def implied_cash_lines(
+    db: Session, cdu_id: int, flows: List[dict], cash_snapshot_date: Optional[date],
+) -> List[dict]:
+    """REPO/deposit closes from the snapshot that happened after the cash snapshot.
+
+    ``counted`` is False when the real movement is already in ``cash_movements``
+    (Trade Report / statement / manual entry) — then it is not added twice.
+    """
+    out: List[dict] = []
+    for flow in flows:
+        if cash_snapshot_date is not None and flow["date"] <= cash_snapshot_date:
+            continue  # the cash snapshot already contains it
+        amount = float(flow["amount"] or 0.0)
+        exists = db.execute(select(CashMovement.id).where(
+            CashMovement.cdu_id == cdu_id,
+            CashMovement.operation_date == flow["date"],
+            CashMovement.is_active.is_(True),
+            CashMovement.workflow_status.in_(EFFECTIVE_STATUSES),
+            CashMovement.amount_kzt.between(amount - 1.0, amount + 1.0),
+        ).limit(1)).scalar()
+        out.append({**flow, "amount": amount, "counted": not exists, "matched_movement_id": exists})
+    return out
 
 
 def _implied_cash(
@@ -348,25 +411,29 @@ def _implied_cash(
     otherwise the money would disappear from the portfolio on the close date.
     """
     total = 0.0
-    for flow in flows:
-        if cash_snapshot_date is not None and flow["date"] <= cash_snapshot_date:
-            continue  # the cash snapshot already contains it
-        amount = float(flow["amount"] or 0.0)
-        exists = db.execute(select(CashMovement.id).where(
-            CashMovement.cdu_id == cdu_id,
-            CashMovement.operation_date == flow["date"],
-            CashMovement.is_active.is_(True),
-            CashMovement.workflow_status.in_(EFFECTIVE_STATUSES),
-            CashMovement.amount_kzt.between(amount - 1.0, amount + 1.0),
-        ).limit(1)).scalar()
-        if exists:
+    for flow in implied_cash_lines(db, cdu_id, flows, cash_snapshot_date):
+        if not flow["counted"]:
             continue
-        total += amount
+        total += flow["amount"]
         warnings.append(
-            f"{flow['kind']} {flow['reference']} {flow['date']:%d.%m.%Y}: поступление {amount:,.2f} "
+            f"{flow['kind']} {flow['reference']} {flow['date']:%d.%m.%Y}: поступление {flow['amount']:,.2f} "
             "учтено по данным Risk Report — подтверждающее движение денег не загружено"
         )
     return total
+
+
+def auto_ar_inside_slice(row: AccountReceivable, base_date: Optional[date]) -> bool:
+    """A coupon / redemption receivable generated by the automation on or before
+    the Risk Report slice: the slice (its «Accounts receivable» sheet and cash)
+    already contains it, so it is not counted a second time."""
+    return (
+        base_date is not None
+        and not row.is_manual
+        and row.source_doc_id is None          # merged with a row of the RR → it is the RR's own
+        and (row.created_by or "") == "SYSTEM"
+        and (row.related_event_type or "") in ("COUPON", "REDEMPTION")
+        and row.record_date <= base_date
+    )
 
 
 def _receivable_balance_as_of(db: Session, row: AccountReceivable, report_date: date) -> float:
@@ -413,7 +480,8 @@ def _has_manual_changes(db: Session, report_date: date) -> bool:
     ).scalar() is not None
 
 
-def calculate_for_date(db: Session, report_date: date, *, recalculate: bool = False) -> dict:
+def calculate_for_date(db: Session, report_date: date, *, recalculate: bool = False,
+                       auto_events: bool = True) -> dict:
     """Build all PortfolioPosition + PortfolioSummary rows for `report_date`.
 
     * If a Risk Report «Report» sheet was imported for the date and there are no
@@ -444,6 +512,17 @@ def calculate_for_date(db: Session, report_date: date, *, recalculate: bool = Fa
             "warnings": 0,
             "source": "risk_report",
         }
+
+    # Coupons / redemptions of past dates that were never generated (data
+    # uploaded after the day) — booked before the portfolio is rolled forward.
+    if auto_events:
+        try:
+            from services.automation.auto_catchup import ensure_auto_events
+            ensure_auto_events(db, report_date)
+        except Exception as exc:  # noqa: BLE001 — the calculation must not fail because of it
+            from loguru import logger
+            db.rollback()
+            logger.warning(f"Auto events catch-up failed before calculation of {report_date}: {exc!r}")
 
     # Idempotent re-run: drop the previously calculated slice of the date.
     db.query(PortfolioPosition).filter(
@@ -522,6 +601,16 @@ def calculate_for_date(db: Session, report_date: date, *, recalculate: bool = Fa
 
     db.commit()
 
+    # user indicators («Формулы → Мои показатели») with a notification rule
+    try:
+        from services.formulas.indicators import raise_alerts
+        raise_alerts(db, report_date)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 — a user formula must never break the calculation
+        db.rollback()
+        from loguru import logger
+        logger.warning(f"Custom indicator alerts skipped: {exc!r}")
+
     if total_breaches:
         _send_breach_digest(db, report_date, total_breaches)
 
@@ -586,7 +675,8 @@ def _calculate_cdu(
     by_cat = state.by_category()
 
     # Cash balance — prefer imported daily snapshots, fallback to legacy balances.
-    cash_snapshot_date, cash_snapshot_total = _latest_cash_snapshot_total(db, cdu.id, report_date)
+    cash_snapshot_date, cash_snapshot_total = _latest_cash_snapshot_total(
+        db, cdu.id, report_date, state.base_date)
     cash = db.execute(select(CashBalance).where(
         CashBalance.cdu_id == cdu.id,
         CashBalance.balance_date <= report_date,
@@ -598,7 +688,8 @@ def _calculate_cdu(
         AccountReceivable.workflow_status.in_(EFFECTIVE_STATUSES),
         AccountReceivable.is_active.is_(True),
     )).scalars().all()
-    receivable_total = sum(_receivable_balance_as_of(db, ar, report_date) for ar in receivables)
+    receivable_total = sum(_receivable_balance_as_of(db, ar, report_date) for ar in receivables
+                           if not auto_ar_inside_slice(ar, state.base_date))
 
     category_rows: Dict[str, PortfolioPosition] = {}
     for cat in CATEGORY_ORDER:

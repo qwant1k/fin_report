@@ -15,6 +15,7 @@ import { api } from '@/lib/api'
 import { formatDate, formatNumber } from '@/lib/format'
 import { CDU } from '@/lib/types'
 import { EmptyState, PageHeader, StatCard } from '@/components/ui'
+import { OPERATION_LABELS, operationLabel } from '@/lib/displayLabels'
 
 interface OperationRow {
   id: number
@@ -73,22 +74,7 @@ interface OperationsResponse {
   }
 }
 
-const OP_LABEL: Record<string, string> = {
-  BUY: 'Покупка',
-  SELL: 'Продажа',
-  REPO: 'REPO',
-  REPO_OPEN: 'Открытие REPO',
-  REPO_CLOSE: 'Закрытие REPO',
-  COUPON: 'Купон',
-  REDEMPTION: 'Погашение',
-  DEPOSIT_OPEN: 'Депозит',
-  DEPOSIT_CLOSE: 'Закрытие депозита',
-  FX_BUY: 'FX покупка',
-  FX_SELL: 'FX продажа',
-  CASH_TOPUP: 'Пополнение',
-  CASH_WITHDRAW: 'Вывод ДС',
-  OTHER: 'Прочее',
-}
+const OP_LABEL = OPERATION_LABELS
 
 const OP_COLOR: Record<string, string> = {
   BUY: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
@@ -210,7 +196,7 @@ export default function OperationsPage() {
           onClick={() => applyQuickFilter('SELL', 'SELL')}
         />
         <StatCard
-          title="REPO"
+          title="РЕПО"
           value={totalRepo}
           format={(n) => formatNumber(n, 0)}
           subtitle={(operations.data?.summary.flagged_prices ?? 0) > 0 ? `${operations.data?.summary.flagged_prices} KASE-флагов` : 'Без ценовых флагов'}
@@ -225,7 +211,7 @@ export default function OperationsPage() {
         <section className="card flex flex-wrap items-center justify-between gap-3 p-4">
           <div>
             <h2 className="section-title">
-              {drilldown === 'all' ? 'Все операции за выбранный период' : `Отбор: ${OP_LABEL[operationType] ?? drilldown}`}
+              {drilldown === 'all' ? 'Все операции за выбранный период' : `Отбор: ${operationLabel(operationType || drilldown)}`}
             </h2>
             <p className="text-sm text-slate-500">
               Период: {formatDate(from)} - {formatDate(to)} · строк: {formatNumber(operations.data?.rows_total ?? 0, 0)}
@@ -322,7 +308,7 @@ export default function OperationsPage() {
                   </td>
                   <td>
                     <span className={`badge ${OP_COLOR[row.operation_type] ?? 'bg-slate-100 text-slate-700 ring-slate-500/20'}`}>
-                      {OP_LABEL[row.operation_type] ?? row.operation_type}
+                      {operationLabel(row.operation_type)}
                     </span>
                     {row.price_flag && (
                       <div className="mt-1 text-xs text-amber-700">цена заменена на KASE</div>
@@ -360,7 +346,7 @@ export default function OperationsPage() {
                     <EmptyState
                       icon={ListChecks}
                       title="Операций не найдено"
-                      description="Измените фильтры или загрузите TradeReport за выбранный период."
+                      description="Измените фильтры или загрузите отчёт о сделках за выбранный период."
                       className="border-0 bg-transparent py-6"
                     />
                   </td>

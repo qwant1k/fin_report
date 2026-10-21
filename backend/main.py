@@ -16,6 +16,7 @@ from api.routes import (
     cdu_formats,
     dashboard,
     export,
+    formulas,
     import_routes,
     automation,
     accounting,
@@ -30,6 +31,7 @@ from api.routes import (
     risk_report,
     securities,
     settings as settings_routes,
+    tonia,
     upload,
     workday,
 )
@@ -105,6 +107,7 @@ def create_app() -> FastAPI:
     app.include_router(positions.router)
     app.include_router(reconciliation.router)
     app.include_router(mbm.router)
+    app.include_router(tonia.router)
     app.include_router(export.router)
     app.include_router(reports.router)
     app.include_router(settings_routes.router)
@@ -112,6 +115,8 @@ def create_app() -> FastAPI:
     app.include_router(securities.router)
     app.include_router(risk_report.router)
     app.include_router(data_editor.router)
+    app.include_router(formulas.values_router)
+    app.include_router(formulas.router)
     app.include_router(admin.router)
 
     return app

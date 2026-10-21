@@ -82,7 +82,7 @@ def run_reconciliation(
 
 _RECON_LABELS = {
     "trade_vs_cert": "Trade Report ↔ биржевые свидетельства",
-    "rr_vs_holdings": "Портфель ↔ файл сверки ЧДУ",
+    "rr_vs_holdings": "Наш расчёт ↔ файл сверки ЧДУ",
     "cash_vs_statement": "Деньги ↔ выписка кастодиана",
     "nbrk_fallback": "Деньги ↔ КФГД_ГГГГММДД",
 }
@@ -260,57 +260,63 @@ def _recon_trade_vs_cert(
 
 # ───────── 2. Report ↔ manager reconciliation file ─────────
 
+def recon_document_for(db: Session, cdu_id: int, recon_date: date) -> Optional[SourceDocument]:
+    """The latest manager reconciliation file for the CDU and the date."""
+    return next((d for d in _docs(db, "RECONCILIATION", cdu_id) if d.doc_date == recon_date), None)
+
+
+def parsed_recon_document(db: Session, doc: SourceDocument) -> Dict[str, Any]:
+    """Parsed content of a reconciliation file; files uploaded before the
+    line-by-line parser existed are parsed again from the stored copy."""
+    meta = _meta(doc)
+    if "securities" not in meta and doc.file_path:
+        from pathlib import Path
+        from services.import_primary.recon_parser import parse_reconciliation_xlsx
+        path = Path(doc.file_path)
+        if path.exists():
+            fresh = json.loads(json.dumps(parse_reconciliation_xlsx(path), default=str))
+            doc.parse_meta_json = json.dumps(fresh, ensure_ascii=False)
+            meta = fresh
+    return meta
+
+
 def _recon_rr_vs_holdings(
     db: Session, result: ReconciliationResult, cdu_id: int, recon_date: date,
 ) -> None:
-    recon_doc = next(
-        (d for d in _docs(db, "RECONCILIATION", cdu_id) if d.doc_date == recon_date),
-        None,
-    )
-    parsed_totals: Dict[str, float] = _meta(recon_doc).get("totals", {}) if recon_doc else {}
-    internal = _internal_portfolio(db, cdu_id, recon_date)
+    """Our portfolio on the date ↔ the manager's reconciliation file, line by line."""
+    from services.reconciliation.cdu_statement import compare
 
-    if internal is None:
-        result.status = "PENDING"
-        result.details_json = json.dumps({"note": "Портфель на дату не рассчитан"}, ensure_ascii=False)
-        return
-    if not parsed_totals:
-        result.expected_value = internal["total"]
+    recon_doc = recon_document_for(db, cdu_id, recon_date)
+    if recon_doc is None:
         result.status = "PENDING"
         result.details_json = json.dumps({
-            "internal": internal,
-            "note": "Файл сверки ЧДУ за дату не загружен или не содержит итогов",
+            "note": "Файл сверки ЧДУ за дату не загружен — загрузите его в «Загрузка документов»",
+        }, ensure_ascii=False)
+        return
+    parsed = parsed_recon_document(db, recon_doc)
+    if not parsed.get("securities") and not parsed.get("repos") and not (parsed.get("totals") or {}).get("total"):
+        result.status = "ERROR"
+        result.source_doc_b_id = recon_doc.id
+        result.details_json = json.dumps({
+            "note": "В файле сверки не найдены таблицы ЦБ / РЕПО / «Итого активов»",
+            "file_warnings": parsed.get("warnings") or [],
         }, ensure_ascii=False)
         return
 
-    items = []
-    all_ok = True
-    for key in ("cash", "securities", "repo", "ar", "total"):
-        expected = internal[key]
-        actual = parsed_totals.get(key)
-        if actual is None:
-            items.append({"field": key, "expected": expected, "actual": None, "status": "MISSING"})
-            all_ok = False
-            continue
-        deviation = expected - float(actual)
-        ok = abs(deviation) <= RECON_TOLERANCE_KZT
-        all_ok = all_ok and ok
-        items.append({
-            "field": key, "expected": expected, "actual": actual,
-            "deviation": deviation, "status": "OK" if ok else "MISMATCH",
-        })
-
-    result.expected_value = internal["total"]
-    result.actual_value = parsed_totals.get("total")
-    result.deviation = (internal["total"] - float(parsed_totals["total"])) if parsed_totals.get("total") is not None else None
-    result.tolerance = RECON_TOLERANCE_KZT
-    result.status = "OK" if all_ok else "MISMATCH"
+    report = compare(db, cdu_id, recon_date, parsed)
+    report["file"] = {
+        "doc_id": recon_doc.id, "file_name": recon_doc.file_name,
+        "uploaded_at": recon_doc.uploaded_at.isoformat() if recon_doc.uploaded_at else None,
+        "uploaded_by": recon_doc.uploaded_by, "sheet": parsed.get("sheet"),
+        "cdu_name_in_file": parsed.get("cdu_name"),
+    }
+    result.expected_value = report["our_total"]
+    result.actual_value = report["cdu_total"]
+    result.deviation = report["delta_total"]
+    result.tolerance = 1.0
+    result.status = report["status"]
     result.source_doc_b_id = recon_doc.id
-    result.details_json = json.dumps({
-        "internal": internal,
-        "external": parsed_totals,
-        "items": items,
-    }, ensure_ascii=False)
+    result.details_json = json.dumps(report, ensure_ascii=False, default=str)
 
 
 # ───────── 3. Cash ↔ custodian statement ─────────
@@ -398,14 +404,38 @@ def _recon_nbrk_fallback(
         result.details_json = json.dumps({"note": f"Нет файла НБ РК с остатками (AC) на {recon_date:%d.%m.%Y}"},
                                          ensure_ascii=False)
         return
-    internal = _internal_portfolio(db, cdu_id, recon_date)
-    if internal is None:
-        result.status = "PENDING"
-        result.details_json = json.dumps({"note": "Портфель на дату не рассчитан"}, ensure_ascii=False)
-        return
+    # Our cash: the previous account balance rolled forward with the movements
+    # of the books (the AC balance of the date itself is the opening cash of
+    # the portfolio, so comparing with it would always match).
+    from services.calculator.portfolio_calculator import cash_movement_lines
+    from models.db_models import CashSnapshot
+    prev_date = db.execute(select(CashSnapshot.snapshot_date).where(
+        CashSnapshot.cdu_id == cdu_id, CashSnapshot.source == "nbrk_ac",
+        CashSnapshot.snapshot_date < recon_date, CashSnapshot.currency == "KZT",
+    ).order_by(CashSnapshot.snapshot_date.desc())).scalar()
+    if prev_date is None:
+        internal = _internal_portfolio(db, cdu_id, recon_date)
+        if internal is None:
+            result.status = "PENDING"
+            result.details_json = json.dumps({"note": "Портфель на дату не рассчитан"}, ensure_ascii=False)
+            return
+        our_cash, basis_note = internal["cash"], "денег портфеля на дату"
+    else:
+        prev_total = sum(float(r.amount_kzt if r.amount_kzt is not None else r.amount or 0.0)
+                         for r in db.execute(select(CashSnapshot).where(
+                             CashSnapshot.cdu_id == cdu_id, CashSnapshot.source == "nbrk_ac",
+                             CashSnapshot.snapshot_date == prev_date, CashSnapshot.currency == "KZT",
+                         )).scalars())
+        moves = [(m, v) for m, v in cash_movement_lines(db, cdu_id, recon_date, prev_date)
+                 if (m.currency or "KZT").upper() == "KZT"]
+        our_cash = prev_total + sum(v for _, v in moves)
+        basis_note = f"остаток {prev_date:%d.%m.%Y} + движения ({len(moves)})"
     statement = float(kzt.get("balance") or 0.0)
+    internal = {"cash": our_cash}
     deviation = internal["cash"] - statement
-    tolerance = max(1.0, abs(statement) * 0.0001)      # БП 7.3: ≤ 1 KZT or ≤ 0.01 %
+    from services.formulas import params              # БП 7.3: ≤ 1 KZT or ≤ 0.01 % (editable)
+    params.refresh(db, force=True)
+    tolerance = max(float(params.get("nbrk_recon_abs")), abs(statement) * float(params.get("nbrk_recon_pct")) / 100.0)
     result.expected_value = internal["cash"]
     result.actual_value = statement
     result.deviation = deviation
@@ -415,6 +445,7 @@ def _recon_nbrk_fallback(
     result.details_json = json.dumps({
         "account": kzt.get("account"), "counterparty": kzt.get("counterparty"),
         "nbrk_balance_kzt": statement, "outflow": kzt.get("outflow"), "inflow": kzt.get("inflow"),
+        "our_basis": basis_note,
         "other_accounts": [b for b in balances if b is not kzt],
     }, ensure_ascii=False, default=str)
 

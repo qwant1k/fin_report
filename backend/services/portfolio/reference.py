@@ -120,6 +120,8 @@ class ReferenceBook:
         self._by_ticker: Dict[str, InstrumentReference] = {}
         self._ticker_to_isin: Dict[str, str] = {}
         self._schedules: Optional[dict] = None
+        self._float_cache: Optional[dict] = None
+        self._tonia = None
         self._loaded = False
 
     def _load(self) -> None:
@@ -160,16 +162,66 @@ class ReferenceBook:
         if self._schedules is None:
             from services.portfolio.coupon_schedule import load_all
             self._schedules = load_all(self.db)
-        if not self._schedules:
-            return []
         key = identifier.strip().upper()
         rows = self._schedules.get(key)
+        ref = self.get(key)
         if rows is None:
-            ref = self.get(key)
             if ref is not None:
                 rows = self._schedules.get((ref.isin or "").strip().upper()) \
                     or self._schedules.get((ref.ticker_kase or "").strip().upper())
-        return rows or []
+        return self._with_float_rates(ref, rows or [])
+
+    def _with_float_rates(self, ref, rows: list) -> list:
+        """Floating coupon (TONIA Compounded): periods without a fixed rate get
+        TCR of the issue on the fixing date + margin.  Without a schedule the
+        regular periods of the issue are generated.  Unchanged when the issue is
+        not floating or no TCR value is known."""
+        if ref is None:
+            return rows
+        from services.market.tonia import ToniaBook, detect_index, float_rate
+        index, margin = ref.float_index, ref.float_margin_pct
+        if not index:
+            index, detected_margin = detect_index(ref.coupon_rate_text)
+            margin = margin if margin is not None else detected_margin
+        if not index:
+            return rows
+        cache_key = (ref.isin or ref.ticker_kase or "").upper()
+        if self._float_cache is None:
+            self._float_cache = {}
+        if cache_key in self._float_cache:
+            return self._float_cache[cache_key]
+        if self._tonia is None:
+            self._tonia = ToniaBook(self.db)
+        from dataclasses import replace
+        from services.formulas import params
+        from services.portfolio import bond_math as bm
+        from services.portfolio.coupon_schedule import ScheduleRow
+        lag = int(params.get("float_fix_lag_days") or 0)
+        base_rows = rows
+        if not base_rows and ref.maturity_date and ref.frequency:
+            try:
+                base_rows = [ScheduleRow(payment_date=d, rate=None)
+                             for d in bm.coupon_schedule(ref.start_date, ref.maturity_date, int(ref.frequency))]
+            except Exception:  # noqa: BLE001
+                base_rows = []
+        generated = not rows
+        fallback = bm.rate_fraction(ref.coupon_rate_pct)
+        out, filled, prev = [], 0, ref.start_date
+        for r in base_rows:
+            start = r.period_start or prev
+            # a coupon amount published by KASE is the fact of the period — kept as is
+            if r.rate is None and r.amount_per_unit is None and start is not None:
+                fr = float_rate(self._tonia, index, margin, start, lag)
+                if fr is not None:
+                    r = replace(r, rate=fr[0], period_start=start)
+                    filled += 1
+                elif generated and fallback is not None:
+                    r = replace(r, rate=fallback, period_start=start)   # no TCR yet: current coupon
+            out.append(r)
+            prev = r.payment_date
+        result = out if (rows or filled) else rows
+        self._float_cache[cache_key] = result
+        return result
 
     def isin_for(self, identifier: Optional[str]) -> Optional[str]:
         """Resolve a ticker (or ISIN) to an ISIN; returns None when unknown."""
