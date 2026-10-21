@@ -150,6 +150,7 @@ def test_standard_cdu_sync_preserves_legacy_ids_and_restores_full_reference(stan
         legacy = db.query(CDU).filter(CDU.participant_code_prefix == "HALFN").one()
         legacy_id = legacy.id
         legacy.name = 'АО "Дочерняя организация Народного Банка Казахстана "Halyk Finance"'
+        legacy.short_name = "Halyk Finance  "
         legacy.participant_code = "HALFN"
         legacy.participant_code_prefix = "HALFN"
         legacy.portfolio_type = "SR_PAM_HALFN"
@@ -181,6 +182,7 @@ def test_standard_cdu_sync_preserves_legacy_ids_and_restores_full_reference(stan
     with Session() as db:
         legacy = db.get(CDU, legacy_id)
         assert legacy.name.startswith("АО ")
+        assert legacy.short_name == "Halyk Finance"
         assert legacy.portfolio_type == "PRIVATE_CDU"
         assert legacy.report_code == "SR_PAM_HALFN"
         assert db.query(CDULimit).filter(

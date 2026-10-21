@@ -79,6 +79,20 @@ def sync_standard_cdus(db: Session) -> dict[str, Any]:
             db.flush()
             created_names.append(cdu.short_name)
         else:
+            for field in (
+                "name", "short_name", "participant_code", "participant_code_prefix",
+                "report_code", "portfolio_code", "contact_email", "contact_manager",
+            ):
+                current = getattr(cdu, field)
+                if not isinstance(current, str):
+                    continue
+                cleaned = current.strip()
+                normalized_value = cleaned or None
+                if field in {"name", "short_name", "participant_code", "participant_code_prefix"}:
+                    normalized_value = cleaned
+                if current != normalized_value:
+                    setattr(cdu, field, normalized_value)
+                    changed = True
             legacy_code = None
             if (cdu.portfolio_type or "").startswith("SR_PAM_"):
                 legacy_code = cdu.portfolio_type
