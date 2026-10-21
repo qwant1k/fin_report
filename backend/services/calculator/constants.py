@@ -71,54 +71,63 @@ RECON_TOLERANCE_USD = 0.01    # ±0.01 USD
 RECON_TOLERANCE_PRICE = 0.000001  # ±0.000001 цены
 RECON_TOLERANCE_PCT = 0.0001  # 0.01% (для процентов)
 
-# 6 ЧДУ + 2 портфеля НБ РК. Доли — округлено до 1/6 ≈ 16.67% по умолчанию,
+# 7 ЧДУ + 2 портфеля НБ РК. Доли — округлено до 1/6 ≈ 16.67% по умолчанию,
 # реальные share_target_pct редактируются в админке.
 DEFAULT_CDU_SEED = [
     # Частные ДУ
     {
         "name": "Halyk Finance", "short_name": "Halyk",
         "participant_code_prefix": "HALFN", "share_target_pct": 0.1667,
+        "report_code": "SR_PAM_HALFN",
         "portfolio_type": PORTFOLIO_TYPE_PRIVATE_CDU, "portfolio_code": None,
     },
     {
         "name": "BCC Invest", "short_name": "BCC",
         "participant_code_prefix": "BCC", "share_target_pct": 0.1667,
+        "report_code": "SR_PAM_BCC",
         "portfolio_type": PORTFOLIO_TYPE_PRIVATE_CDU, "portfolio_code": None,
     },
     {
         "name": "Jusan Invest", "short_name": "Jusan",
         "participant_code_prefix": "JUSAN", "share_target_pct": 0.1667,
+        "report_code": "SR_PAM_JUSAN",
         "portfolio_type": PORTFOLIO_TYPE_PRIVATE_CDU, "portfolio_code": None,
     },
     {
         "name": "Centras Securities", "short_name": "Centras",
         "participant_code_prefix": "CENTR", "share_target_pct": 0.1667,
+        "report_code": "SR_PAM_CESEC",
         "portfolio_type": PORTFOLIO_TYPE_PRIVATE_CDU, "portfolio_code": None,
     },
     {
         "name": "Tansar Capital", "short_name": "Tansar",
         "participant_code_prefix": "TANSR", "share_target_pct": 0.1667,
+        "report_code": "SR_PAM_CAIFC",
         "portfolio_type": PORTFOLIO_TYPE_PRIVATE_CDU, "portfolio_code": None,
     },
     {
         "name": "Alatau City Invest", "short_name": "Alatau",
         "participant_code_prefix": "ALATAU", "share_target_pct": 0.0,
+        "report_code": "SR_PAM_ACI",
         "portfolio_type": PORTFOLIO_TYPE_PRIVATE_CDU, "portfolio_code": None,
     },
     {
         "name": "UD Capital", "short_name": "UD Capital",
         "participant_code_prefix": "UDCAP", "share_target_pct": 0.1667,
+        "report_code": "SR_PAM_UDCAP",
         "portfolio_type": PORTFOLIO_TYPE_PRIVATE_CDU, "portfolio_code": None,
     },
     # Портфели НБ РК
     {
         "name": "НБ РК — Собственные активы", "short_name": "НБ РК (собст)",
         "participant_code_prefix": "NBRK", "share_target_pct": 0.0,
+        "report_code": None,
         "portfolio_type": PORTFOLIO_TYPE_NBRK_OWN, "portfolio_code": "310138-1",
     },
     {
         "name": "НБ РК — Спецрезерв", "short_name": "НБ РК (спец)",
         "participant_code_prefix": "NBRK", "share_target_pct": 0.0,
+        "report_code": None,
         "portfolio_type": PORTFOLIO_TYPE_NBRK_RESERVE, "portfolio_code": "300138-1",
     },
 ]

@@ -114,6 +114,7 @@ export interface CDU {
   short_name: string
   participant_code: string
   participant_code_prefix: string
+  report_code: string | null
   portfolio_type: 'PRIVATE_CDU' | 'NBRK_OWN' | 'NBRK_RESERVE'
   portfolio_code: string | null
   share_target_pct: number

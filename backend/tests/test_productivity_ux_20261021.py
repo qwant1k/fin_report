@@ -5,7 +5,7 @@ from datetime import date
 
 import pytest
 
-from models.db_models import CDU, PortfolioPosition, PortfolioSummary, Trade
+from models.db_models import CDU, CDULimit, PortfolioPosition, PortfolioSummary, Trade
 from services.anomaly_audit import audit_uploaded_trades
 from tests.test_requirements_20260929 import stand  # noqa: F401
 
@@ -142,3 +142,49 @@ def test_cdu_can_be_added_manually_with_validation_and_clear_duplicate_error(sta
 
     with Session() as db:
         assert db.query(CDU).filter(CDU.participant_code == "TEST01").count() == 1
+
+
+def test_standard_cdu_sync_preserves_legacy_ids_and_restores_full_reference(stand):
+    client, Session, _current = stand
+    with Session() as db:
+        legacy = db.query(CDU).filter(CDU.participant_code_prefix == "HALFN").one()
+        legacy_id = legacy.id
+        legacy.name = 'АО "Дочерняя организация Народного Банка Казахстана "Halyk Finance"'
+        legacy.participant_code = "HALFN"
+        legacy.participant_code_prefix = "HALFN"
+        legacy.portfolio_type = "SR_PAM_HALFN"
+        legacy.portfolio_code = "SR_PAM_HALFN"
+        legacy.report_code = None
+
+        sample_limit = db.query(CDULimit).filter(
+            CDULimit.cdu_id == legacy.id,
+            CDULimit.instrument_category == "CASH",
+        ).one()
+        sample_limit.instrument_category = "Cash"
+
+        missing = db.query(CDU).filter(
+            CDU.name.in_(["Jusan Invest", "НБ РК — Собственные активы", "НБ РК — Спецрезерв"])
+        ).all()
+        for cdu in missing:
+            db.query(CDULimit).filter(CDULimit.cdu_id == cdu.id).delete(synchronize_session=False)
+            db.delete(cdu)
+        db.commit()
+
+    synced = client.post("/api/settings/cdus/sync-standard")
+    assert synced.status_code == 200, synced.text
+    assert synced.json()["created"] == 3
+    assert synced.json()["total"] == 9
+
+    listed = client.get("/api/settings/cdus")
+    assert listed.status_code == 200, listed.text
+    assert len(listed.json()) == 9
+    with Session() as db:
+        legacy = db.get(CDU, legacy_id)
+        assert legacy.name.startswith("АО ")
+        assert legacy.portfolio_type == "PRIVATE_CDU"
+        assert legacy.report_code == "SR_PAM_HALFN"
+        assert db.query(CDULimit).filter(
+            CDULimit.cdu_id == legacy_id,
+            CDULimit.instrument_category == "CASH",
+        ).count() == 1
+        assert db.query(CDULimit).filter(CDULimit.cdu_id == legacy_id).count() == 8

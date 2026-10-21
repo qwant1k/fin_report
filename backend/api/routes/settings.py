@@ -21,6 +21,7 @@ from models.db_models import (
     User,
 )
 from services.audit import write_audit
+from services.cdu_registry import sync_standard_cdus
 from models.schemas import (
     CDU,
     CDUCreate,
@@ -83,6 +84,23 @@ def create_cdu(payload: CDUCreate, db: Session = Depends(get_db), user: User = D
     db.commit()
     db.refresh(obj)
     return obj
+
+
+@router.post("/cdus/sync-standard")
+def sync_standard_cdu_reference(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permission("settings.edit")),
+):
+    summary = sync_standard_cdus(db)
+    write_audit(
+        db,
+        user=user.username,
+        action="CDU_REFERENCE_SYNCED",
+        entity="CDU",
+        details=summary,
+    )
+    db.commit()
+    return summary
 
 
 @router.put("/cdus/{cdu_id}", response_model=CDU)

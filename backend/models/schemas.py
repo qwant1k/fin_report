@@ -50,6 +50,7 @@ class CDUBase(BaseModel):
     short_name: str = Field(min_length=1, max_length=40)
     participant_code: str = Field(min_length=1, max_length=40)
     participant_code_prefix: str = Field(min_length=1, max_length=20)
+    report_code: Optional[str] = Field(default=None, max_length=40)
     portfolio_type: PortfolioType = "PRIVATE_CDU"
     portfolio_code: Optional[str] = Field(default=None, max_length=20)
     share_target_pct: float = Field(default=0.0, ge=0.0, le=100.0)
@@ -65,7 +66,7 @@ class CDUBase(BaseModel):
             raise ValueError("поле не может быть пустым")
         return value
 
-    @field_validator("portfolio_code", "contact_email", "contact_manager")
+    @field_validator("report_code", "portfolio_code", "contact_email", "contact_manager")
     @classmethod
     def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -82,6 +83,7 @@ class CDUUpdate(BaseModel):
     short_name: Optional[str] = None
     participant_code: Optional[str] = None
     participant_code_prefix: Optional[str] = None
+    report_code: Optional[str] = None
     portfolio_type: Optional[PortfolioType] = None
     portfolio_code: Optional[str] = None
     share_target_pct: Optional[float] = None

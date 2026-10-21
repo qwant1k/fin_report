@@ -94,6 +94,11 @@ def _apply_dev_migrations() -> None:
             "cdu_registry", "portfolio_type",
             "ALTER TABLE cdu_registry ADD COLUMN portfolio_type VARCHAR(20) DEFAULT 'PRIVATE_CDU'",
         ))
+    if "report_code" not in existing_cols:
+        additions.append((
+            "cdu_registry", "report_code",
+            "ALTER TABLE cdu_registry ADD COLUMN report_code VARCHAR(40)",
+        ))
     if "portfolio_code" not in existing_cols:
         additions.append((
             "cdu_registry", "portfolio_code",
@@ -292,16 +297,54 @@ def _apply_dev_migrations() -> None:
                 "ALTER TABLE cash_movements ADD COLUMN account VARCHAR(40)",
             ))
 
-    if not additions:
-        return
+    if additions:
+        with engine.begin() as conn:
+            for table, col, ddl in additions:
+                try:
+                    conn.execute(text(ddl))
+                    logger.info(f"[migrate] {table}.{col} added")
+                except Exception as exc:
+                    logger.warning(f"[migrate] failed {table}.{col}: {exc!r}")
 
+    # Legacy production databases stored the Risk Report code (SR_PAM_*) in
+    # portfolio_type.  Preserve that code separately and restore the actual
+    # business type so the reference API remains valid without changing CDU IDs.
     with engine.begin() as conn:
-        for table, col, ddl in additions:
-            try:
-                conn.execute(text(ddl))
-                logger.info(f"[migrate] {table}.{col} added")
-            except Exception as exc:
-                logger.warning(f"[migrate] failed {table}.{col}: {exc!r}")
+        fixed_cdus = conn.execute(text("""
+            UPDATE cdu_registry
+               SET report_code = COALESCE(NULLIF(report_code, ''), portfolio_type, portfolio_code),
+                   portfolio_type = 'PRIVATE_CDU'
+             WHERE portfolio_type LIKE 'SR_PAM_%'
+        """)).rowcount
+        if fixed_cdus:
+            logger.info(f"[migrate] normalized {fixed_cdus} legacy CDU registry rows")
+
+        # Old limit imports used the visible Russian caption as the key.  The
+        # calculator and API use stable category codes; values themselves stay
+        # untouched.
+        if "cdu_limits" in inspector.get_table_names():
+            fixed_limits = conn.execute(text("""
+                UPDATE cdu_limits
+                   SET instrument_category = CASE
+                       WHEN TRIM(instrument_category) = 'Cash' THEN 'CASH'
+                       WHEN instrument_category LIKE 'Государственные облигации%' THEN 'GOV_BONDS'
+                       WHEN instrument_category LIKE 'Обратное REP%' THEN 'REVERSE_REPO'
+                       WHEN instrument_category LIKE 'МФО (%' THEN 'MFO_BONDS'
+                       WHEN instrument_category LIKE 'Агентские облигации%' THEN 'AGENCY_BONDS'
+                       WHEN instrument_category LIKE 'Иностранные ЦБ%' THEN 'FOREIGN_BONDS'
+                       WHEN instrument_category LIKE 'Депозит%' THEN 'DEPOSIT'
+                       WHEN instrument_category LIKE 'Дебиторская задолженность%' THEN 'RECEIVABLES'
+                       WHEN instrument_category LIKE 'Прочее%' THEN 'OTHER'
+                       ELSE instrument_category
+                   END
+                 WHERE instrument_category NOT IN (
+                     'CASH', 'GOV_BONDS', 'REVERSE_REPO', 'MFO_BONDS',
+                     'AGENCY_BONDS', 'FOREIGN_BONDS', 'DEPOSIT',
+                     'RECEIVABLES', 'OTHER'
+                 )
+            """)).rowcount
+            if fixed_limits:
+                logger.info(f"[migrate] normalized {fixed_limits} legacy CDU limit categories")
 
 
 def init_db() -> None:

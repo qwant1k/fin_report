@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, Save, X } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, Save, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import { api } from '@/lib/api'
@@ -19,6 +19,7 @@ const EMPTY_CDU: NewCduPayload = {
   short_name: '',
   participant_code: '',
   participant_code_prefix: '',
+  report_code: null,
   portfolio_type: 'PRIVATE_CDU',
   portfolio_code: null,
   share_target_pct: 0,
@@ -62,6 +63,21 @@ export default function SettingsPage() {
       qc.invalidateQueries({ queryKey: ['cdus'] })
     },
     onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось добавить ЧДУ')),
+  })
+
+  const syncCdus = useMutation({
+    mutationFn: async () => (await api.post('/settings/cdus/sync-standard')).data as {
+      created: number
+      updated: number
+      limits_created: number
+      total: number
+    },
+    onSuccess: (result) => {
+      toast.success(`Справочник синхронизирован: ЧДУ — ${result.total}, добавлено — ${result.created}, обновлено — ${result.updated}.`)
+      qc.invalidateQueries({ queryKey: ['cdus'] })
+      qc.invalidateQueries({ queryKey: ['limits'] })
+    },
+    onError: (error: unknown) => toast.error(apiErrorMessage(error, 'Не удалось синхронизировать справочник ЧДУ')),
   })
 
   const delCdu = useMutation({
@@ -116,10 +132,18 @@ export default function SettingsPage() {
               <h2 className="font-semibold text-slate-800">Справочник ЧДУ</h2>
               <p className="text-sm text-slate-500">Добавляйте управляющих вручную и настраивайте их распознавание в загружаемых файлах.</p>
             </div>
-            {canEdit && !showNewCdu && (
-              <button type="button" className="btn-primary" onClick={() => setShowNewCdu(true)}>
-                <Plus className="mr-1 h-4 w-4" /> Добавить ЧДУ
-              </button>
+            {canEdit && (
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className="btn-secondary" onClick={() => syncCdus.mutate()} disabled={syncCdus.isPending}>
+                  <RefreshCw className={`mr-1 h-4 w-4 ${syncCdus.isPending ? 'animate-spin' : ''}`} />
+                  Дополнить стандартный список
+                </button>
+                {!showNewCdu && (
+                  <button type="button" className="btn-primary" onClick={() => setShowNewCdu(true)}>
+                    <Plus className="mr-1 h-4 w-4" /> Добавить ЧДУ
+                  </button>
+                )}
+              </div>
             )}
           </div>
 
@@ -140,6 +164,7 @@ export default function SettingsPage() {
                     <th>Краткое</th>
                     <th>Код участника</th>
                     <th>Префикс</th>
+                    <th>Код отчёта</th>
                     <th>Тип</th>
                     <th>Целевая доля</th>
                     <th>Email</th>
@@ -219,6 +244,7 @@ function NewCduForm({ pending, onCreate, onCancel }: {
       short_name: value.short_name.trim(),
       participant_code: value.participant_code.trim(),
       participant_code_prefix: value.participant_code_prefix.trim(),
+      report_code: value.report_code?.trim() || null,
       portfolio_code: value.portfolio_code?.trim() || null,
       contact_email: value.contact_email?.trim() || null,
       contact_manager: value.contact_manager?.trim() || null,
@@ -249,6 +275,9 @@ function NewCduForm({ pending, onCreate, onCancel }: {
         </Field>
         <Field label="Префикс распознавания *">
           <input className="input font-mono" value={value.participant_code_prefix} onChange={(e) => setValue({ ...value, participant_code_prefix: e.target.value })} placeholder="Первые символы кода" />
+        </Field>
+        <Field label="Код в сводном отчёте">
+          <input className="input font-mono" value={value.report_code ?? ''} onChange={(e) => setValue({ ...value, report_code: e.target.value })} placeholder="Например, SR_PAM_BCC" />
         </Field>
         <Field label="Тип портфеля">
           <select className="input" value={value.portfolio_type} onChange={(e) => setValue({ ...value, portfolio_type: e.target.value as CDU['portfolio_type'], portfolio_code: e.target.value === 'PRIVATE_CDU' ? null : value.portfolio_code })}>
@@ -308,6 +337,7 @@ function CduRow({ cdu, canEdit, onSave, onDelete }: {
       <td><input className="input py-1" value={v.short_name} disabled={!canEdit} onChange={(e) => setV({ ...v, short_name: e.target.value })} /></td>
       <td><input className="input py-1 font-mono" value={v.participant_code} disabled={!canEdit} onChange={(e) => setV({ ...v, participant_code: e.target.value })} /></td>
       <td><input className="input py-1" value={v.participant_code_prefix} disabled={!canEdit} onChange={(e) => setV({ ...v, participant_code_prefix: e.target.value })} /></td>
+      <td><input className="input min-w-36 py-1 font-mono" value={v.report_code ?? ''} disabled={!canEdit} onChange={(e) => setV({ ...v, report_code: e.target.value || null })} /></td>
       <td>
         <select className="input min-w-40 py-1" value={v.portfolio_type} disabled={!canEdit} onChange={(e) => setV({ ...v, portfolio_type: e.target.value as CDU['portfolio_type'] })}>
           <option value="PRIVATE_CDU">Частный ЧДУ</option>

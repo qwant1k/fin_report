@@ -32,6 +32,9 @@ class CDU(Base):
     short_name: Mapped[str] = mapped_column(String(40), nullable=False)
     participant_code: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
     participant_code_prefix: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Внутренний код портфеля в сводном Risk Report (например SR_PAM_BCC).
+    # В старой БД этот код ошибочно хранился в portfolio_type/portfolio_code.
+    report_code: Mapped[Optional[str]] = mapped_column(String(40), index=True)
     # PRIVATE_CDU | NBRK_OWN | NBRK_RESERVE
     portfolio_type: Mapped[str] = mapped_column(String(20), default="PRIVATE_CDU", index=True)
     # Для НБ РК — портфельный код в файле КФГД_ГГГГММДД (PORTFOLIO):
