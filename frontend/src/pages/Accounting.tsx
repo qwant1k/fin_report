@@ -1,4 +1,5 @@
-import { FormEvent, useMemo, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BadgeDollarSign, Check, FilePenLine, Plus, ReceiptText, RotateCcw, X } from 'lucide-react'
 import toast from 'react-hot-toast'
@@ -57,15 +58,23 @@ function StatusBadge({ value }: { value: string }) {
 }
 
 export default function AccountingPage() {
+  const [searchParams] = useSearchParams()
   const qc = useQueryClient()
   const can = useAuthStore((s) => s.can)
   const confirm = useConfirm()
   const reportDate = useWorkContextStore((s) => s.workDate) || today()
-  const [cduId, setCduId] = useState<number | ''>('')
-  const [tab, setTab] = useState<Tab>('trades')
+  const setReportDate = useWorkContextStore((s) => s.setWorkDate)
+  const linkedCdu = Number(searchParams.get('cdu_id')) || ''
+  const [cduId, setCduId] = useState<number | ''>(linkedCdu)
+  const [tab, setTab] = useState<Tab>(searchParams.get('cdu_id') ? 'receivables' : 'trades')
   const [editor, setEditor] = useState<{ kind: EditorKind; row?: Row; parent?: Row } | null>(null)
   const [wizard, setWizard] = useState(false)
   const canCreate = can('manual.cash.manage') || can('manual.trades.manage') || can('manual.receivables.manage')
+
+  useEffect(() => {
+    const linkedDate = searchParams.get('date')
+    if (linkedDate && linkedDate !== reportDate) setReportDate(linkedDate)
+  }, [reportDate, searchParams, setReportDate])
 
   const cdus = useQuery<CDU[]>({ queryKey: ['cdus'], queryFn: async () => (await api.get('/settings/cdus')).data })
   const overview = useQuery<Overview>({

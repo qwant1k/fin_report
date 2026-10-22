@@ -161,8 +161,8 @@ def _breached(ind, value: Optional[float]) -> bool:
 def raise_alerts(db: Session, as_of: date) -> int:
     """Notifications of active indicators with a rule (called after the calculation)."""
     from models.db_models import Alert, CustomIndicator
-    db.query(Alert).filter(Alert.alert_date == as_of, Alert.alert_type == "CUSTOM_INDICATOR").delete(
-        synchronize_session=False)
+    from services.alerts import auto_resolve_alerts
+    auto_resolve_alerts(db, alert_date=as_of, alert_types=("CUSTOM_INDICATOR",))
     inds = db.query(CustomIndicator).filter(
         CustomIndicator.status == "ACTIVE", CustomIndicator.alert_op.is_not(None),
         CustomIndicator.alert_threshold.is_not(None),

@@ -13,6 +13,7 @@ the full nominal could be written off and reports oversold positions
 """
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Dict, Optional
 
@@ -53,6 +54,11 @@ def process_all_sell_fifo(db: Session, target_date: Optional[date] = None) -> Di
             db.add(Alert(
                 alert_date=as_of, cdu_id=cdu_id, alert_type="FIFO_SHORTFALL", severity="CRITICAL",
                 message=f"{cdu.short_name if cdu else cdu_id}: " + "; ".join(relevant[:3]),
+                details_json=json.dumps({
+                    "problems": relevant[:20],
+                    "trade_ids": sorted(trade_ids),
+                    "explanation": "Для продажи недостаточно подтверждённого остатка по методу FIFO.",
+                }, ensure_ascii=False),
             ))
             for w in relevant:
                 logger.warning(f"FIFO: {w}")

@@ -341,7 +341,7 @@ def _write_history_sheet(wb: Workbook, db: Session, report_date: date) -> None:
 
 # ─────── Alerts sheet ───────
 def _write_alerts_sheet(wb: Workbook, db: Session, report_date: date) -> None:
-    ws = wb.create_sheet("Алерты")
+    ws = wb.create_sheet("Журнал контроля")
     headers = ["Дата", "ЧДУ", "Тип", "Severity", "Сообщение", "Решено"]
     for i, h in enumerate(headers, start=1):
         c = ws.cell(1, i, h)

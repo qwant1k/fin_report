@@ -1,14 +1,16 @@
 """Dashboard summary endpoint — full data for the React dashboard."""
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from typing import Any, List, Optional
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from auth import require_permission
+from auth import require_permission, require_user
 
 from database import get_db
 from models.db_models import (
@@ -24,13 +26,16 @@ from models.db_models import (
     RepoLot,
     SourceDocument,
     Trade,
+    User,
 )
 from models.schemas import (
+    AlertActionRequest,
     AlertOut,
     CategoryRow,
     CDUBlock,
     DashboardResponse,
 )
+from services.audit import write_audit
 from services.calculator.limit_checker import LimitSpec, check_limit_spec
 from services.calculator.portfolio_calculator import _benchmark_for, _load_limit_specs
 from services.calculator.constants import (
@@ -746,11 +751,73 @@ def _earliest_data_date(db: Session) -> Optional[date]:
     return min([d for d in dates if d is not None], default=None)
 
 
+def _alert_details(row: Alert) -> dict[str, Any]:
+    if not row.details_json:
+        return {}
+    try:
+        value = json.loads(row.details_json)
+        return value if isinstance(value, dict) else {"value": value}
+    except (TypeError, ValueError):
+        return {"description": row.details_json}
+
+
+def _alert_action(row: Alert, details: dict[str, Any]) -> tuple[str, str]:
+    params = {"date": row.alert_date.isoformat()}
+    if row.cdu_id is not None:
+        params["cdu_id"] = str(row.cdu_id)
+    if row.alert_type.startswith("RECON_"):
+        return f"/reconciliation?{urlencode(params)}", "Открыть сверку"
+    if row.alert_type == "CUSTOM_INDICATOR":
+        params = {"tab": "custom"}
+        if details.get("indicator_id") is not None:
+            params["indicator_id"] = str(details["indicator_id"])
+        return f"/formulas?{urlencode(params)}", "Открыть показатель"
+    if row.alert_type == "FIFO_SHORTFALL":
+        return f"/operations?{urlencode(params)}", "Открыть операции"
+    if row.alert_type == "AR_MISMATCH":
+        return f"/accounting?{urlencode(params)}", "Открыть задолженность"
+    if row.alert_type in {"LIMIT_BREACH", "DURATION_BREACH", "VALUATION_WARNINGS"}:
+        if details.get("category"):
+            params["category"] = str(details["category"])
+        return f"/positions?{urlencode(params)}", "Открыть позиции"
+    return f"/dashboard?{urlencode(params)}", "Открыть сводку"
+
+
+def _alert_out(row: Alert, cdu: Optional[CDU] = None) -> dict[str, Any]:
+    details = _alert_details(row)
+    action_path, action_label = _alert_action(row, details)
+    return {
+        "id": row.id,
+        "alert_date": row.alert_date,
+        "cdu_id": row.cdu_id,
+        "cdu_name": cdu.name if cdu else None,
+        "cdu_short_name": cdu.short_name if cdu else None,
+        "alert_type": row.alert_type,
+        "severity": row.severity,
+        "message": row.message,
+        "details": details,
+        "is_resolved": row.is_resolved,
+        "status": row.status or ("RESOLVED" if row.is_resolved else "NEW"),
+        "assigned_to": row.assigned_to,
+        "taken_at": row.taken_at,
+        "resolution_comment": row.resolution_comment,
+        "resolved_by": row.resolved_by,
+        "resolved_at": row.resolved_at,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+        "action_path": action_path,
+        "action_label": action_label,
+    }
+
+
 @router.get("/alerts", response_model=List[AlertOut])
 def alerts(
     only_unresolved: bool = Query(False),
     cdu_id: Optional[int] = Query(None),
     since_days: int = Query(30),
+    status: Optional[str] = Query(None),
+    severity: Optional[str] = Query(None),
+    alert_type: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     since = date.today() - timedelta(days=since_days)
@@ -759,17 +826,61 @@ def alerts(
         q = q.where(Alert.is_resolved.is_(False))
     if cdu_id:
         q = q.where(Alert.cdu_id == cdu_id)
-    return list(db.execute(q).scalars().all())
+    if status:
+        q = q.where(Alert.status == status.upper())
+    if severity:
+        q = q.where(Alert.severity == severity.upper())
+    if alert_type:
+        q = q.where(Alert.alert_type == alert_type)
+    rows = list(db.execute(q).scalars().all())
+    cdu_ids = {row.cdu_id for row in rows if row.cdu_id is not None}
+    cdus = {
+        row.id: row for row in db.execute(select(CDU).where(CDU.id.in_(cdu_ids))).scalars()
+    } if cdu_ids else {}
+    return [_alert_out(row, cdus.get(row.cdu_id)) for row in rows]
+
+
+@router.put("/alerts/{alert_id}/take-in-work", response_model=AlertOut)
+def take_alert_in_work(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    from services.alerts import take_alert_in_work as _take
+    a = _take(db, alert_id, username=user.username)
+    if not a:
+        raise HTTPException(404, "Уведомление не найдено")
+    write_audit(
+        db, user=user.username, action="ALERT_TAKE_IN_WORK",
+        entity="Alert", entity_id=a.id,
+        details={"status": a.status, "assigned_to": a.assigned_to},
+    )
+    db.commit()
+    return _alert_out(a, db.get(CDU, a.cdu_id) if a.cdu_id else None)
 
 
 @router.put("/alerts/{alert_id}/resolve", response_model=AlertOut)
-def resolve_alert(alert_id: int, db: Session = Depends(get_db)):
+def resolve_alert(
+    alert_id: int,
+    payload: Optional[AlertActionRequest] = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
     from services.alerts import resolve_alert as _resolve
-    a = _resolve(db, alert_id)
-    if not a:
-        from fastapi import HTTPException
-        raise HTTPException(404, "Алерт не найден")
-    return a
+    current = db.get(Alert, alert_id)
+    if not current:
+        raise HTTPException(404, "Уведомление не найдено")
+    comment = (payload.comment if payload else None) or ""
+    if current.severity == "CRITICAL" and not comment.strip():
+        raise HTTPException(400, "Для закрытия критического нарушения укажите комментарий")
+    a = _resolve(db, alert_id, username=user.username, comment=comment)
+    write_audit(
+        db, user=user.username, action="ALERT_RESOLVE",
+        entity="Alert", entity_id=a.id,
+        details={"status": a.status, "comment": a.resolution_comment},
+    )
+    db.commit()
+    return _alert_out(a, db.get(CDU, a.cdu_id) if a.cdu_id else None)
 
 
 @router.get("/history")

@@ -375,7 +375,7 @@ export default function WorkdayPage() {
       },
       {
         id: 'alerts',
-        title: 'Алерты и лимиты',
+        title: 'Контроль и лимиты',
         icon: ShieldAlert,
         status: alertsStatus,
         issuesCount: unresolvedAlerts.length,
@@ -392,7 +392,7 @@ export default function WorkdayPage() {
           : 'Отчёты ещё не выпускались',
         blockedReason:
           reportStatus === 'blocked'
-            ? 'Есть неразрешённые критические нарушения лимитов — сначала закройте их на шаге «Алерты и лимиты».'
+            ? 'Есть неразрешённые критические нарушения лимитов — сначала обработайте их на шаге «Контроль и лимиты».'
             : undefined,
         action: can('reports.export')
           ? { label: 'Сформировать XLSX', onClick: () => exportReport.mutate('xlsx') }
@@ -574,7 +574,7 @@ export default function WorkdayPage() {
                           </div>
                         )}
                         {(cdu.open_alerts ?? 0) > 0 && (
-                          <div className="text-xs text-amber-700">алертов: {cdu.open_alerts}</div>
+                          <div className="text-xs text-amber-700">открытых замечаний: {cdu.open_alerts}</div>
                         )}
                       </td>
                       <td className="text-right">{cdu.market_value == null ? '—' : formatNumber(cdu.market_value, 0)}</td>

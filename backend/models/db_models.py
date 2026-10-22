@@ -356,8 +356,18 @@ class Alert(Base):
     message: Mapped[str] = mapped_column(Text)
     details_json: Mapped[Optional[str]] = mapped_column(Text)
     is_resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+    # NEW -> IN_PROGRESS -> RESOLVED.  ``is_resolved`` is kept for backward
+    # compatibility with existing reports and integrations.
+    status: Mapped[str] = mapped_column(String(20), default="NEW", index=True)
+    assigned_to: Mapped[Optional[str]] = mapped_column(String(80))
+    taken_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    resolution_comment: Mapped[Optional[str]] = mapped_column(Text)
+    resolved_by: Mapped[Optional[str]] = mapped_column(String(80))
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(),
+    )
 
 
 # ─────────────── Сформированные отчёты ───────────────

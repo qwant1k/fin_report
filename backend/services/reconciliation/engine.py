@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -92,12 +92,18 @@ def _sync_alert(db: Session, result: ReconciliationResult) -> None:
     """BP 8.3: a discrepancy raises a notification for ОИиУА (idempotent)."""
     from models.db_models import Alert
     alert_type = f"RECON_{result.recon_type.upper()}"[:40]
-    db.query(Alert).filter(
+    previous = db.query(Alert).filter(
         Alert.alert_date == result.recon_date,
         Alert.cdu_id == result.cdu_id,
         Alert.alert_type == alert_type,
         Alert.is_resolved.is_(False),
-    ).delete(synchronize_session=False)
+    ).all()
+    for row in previous:
+        row.is_resolved = True
+        row.status = "RESOLVED"
+        row.resolved_by = "SYSTEM"
+        row.resolved_at = datetime.utcnow()
+        row.resolution_comment = "Закрыто автоматически при повторной сверке данных."
     if result.status != "MISMATCH":
         return
     cdu = db.get(CDU, result.cdu_id) if result.cdu_id else None

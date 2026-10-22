@@ -530,10 +530,12 @@ def calculate_for_date(db: Session, report_date: date, *, recalculate: bool = Fa
         PortfolioPosition.instrument_code.is_(None),   # keep imported instrument rows (Holdings)
     ).delete(synchronize_session=False)
     db.query(PortfolioSummary).filter_by(summary_date=report_date).delete()
-    db.query(Alert).filter(
-        Alert.alert_date == report_date,
-        Alert.alert_type.in_(("LIMIT_BREACH", "DURATION_BREACH", "VALUATION_WARNINGS")),
-    ).delete(synchronize_session=False)
+    from services.alerts import auto_resolve_alerts
+    auto_resolve_alerts(
+        db,
+        alert_date=report_date,
+        alert_types=("LIMIT_BREACH", "DURATION_BREACH", "VALUATION_WARNINGS"),
+    )
     db.flush()
 
     cdus = db.query(CDU).filter_by(is_active=True).all()
@@ -593,7 +595,11 @@ def calculate_for_date(db: Session, report_date: date, *, recalculate: bool = Fa
                     f"{cdu.short_name}: {len(unique)} предупреждени(й) оценки — "
                     + "; ".join(unique[:3]) + ("…" if len(unique) > 3 else "")
                 ),
-                details_json=json.dumps(unique[:200], ensure_ascii=False),
+                details_json=json.dumps({
+                    "warning_count": len(unique),
+                    "warnings": unique[:200],
+                    "explanation": "Для одной или нескольких позиций не удалось применить приоритетный источник оценки.",
+                }, ensure_ascii=False),
             ))
 
         db.add(summary)
@@ -877,6 +883,19 @@ def _apply_limit_checks(db: Session, cdu: CDU, summary: PortfolioSummary,
                     f"[{spec.min_pct*100:.2f}%; {(spec.hard_pct if hard == 'breach' else spec.soft_pct)*100:.2f}%]"
                     + ("" if spec.source == "reference" else " (лимит по умолчанию: в справочнике нет версии на дату)")
                 ),
+                details_json=json.dumps({
+                    "category": pos.instrument_category,
+                    "category_name": CATEGORY_LABELS.get(pos.instrument_category, pos.instrument_category),
+                    "actual_pct": (pos.pct_of_total or 0.0) * 100,
+                    "minimum_pct": spec.min_pct * 100,
+                    "maximum_pct": (spec.hard_pct if hard == "breach" else spec.soft_pct) * 100,
+                    "deviation_pct_points": max(
+                        0.0,
+                        (pos.pct_of_total or 0.0) * 100
+                        - (spec.hard_pct if hard == "breach" else spec.soft_pct) * 100,
+                    ),
+                    "limit_kind": kind,
+                }, ensure_ascii=False),
             ))
             breaches += 1
 
@@ -896,6 +915,13 @@ def _apply_limit_checks(db: Session, cdu: CDU, summary: PortfolioSummary,
                     f"{cdu.short_name}: дюрация {summary.duration_weighted or 0:.2f} вне диапазона "
                     f"[{lo:.2f}; {hi:.2f}] (MBM ModDuration={summary.benchmark_duration:.2f})"
                 ),
+                details_json=json.dumps({
+                    "actual_duration": summary.duration_weighted or 0.0,
+                    "minimum_duration": lo,
+                    "maximum_duration": hi,
+                    "benchmark_duration": summary.benchmark_duration,
+                    "explanation": "Взвешенная дюрация портфеля вышла за коридор относительно MBM.",
+                }, ensure_ascii=False),
             ))
             breaches += 1
     return breaches
@@ -903,10 +929,12 @@ def _apply_limit_checks(db: Session, cdu: CDU, summary: PortfolioSummary,
 
 def _recheck_imported_slice(db: Session, report_date: date,
                             summaries: List[PortfolioSummary]) -> int:
-    db.query(Alert).filter(
-        Alert.alert_date == report_date,
-        Alert.alert_type.in_(("LIMIT_BREACH", "DURATION_BREACH")),
-    ).delete(synchronize_session=False)
+    from services.alerts import auto_resolve_alerts
+    auto_resolve_alerts(
+        db,
+        alert_date=report_date,
+        alert_types=("LIMIT_BREACH", "DURATION_BREACH"),
+    )
     breaches = 0
     for summary in summaries:
         cdu = db.get(CDU, summary.cdu_id)

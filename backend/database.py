@@ -297,6 +297,24 @@ def _apply_dev_migrations() -> None:
                 "ALTER TABLE cash_movements ADD COLUMN account VARCHAR(40)",
             ))
 
+    alert_status_added = False
+    # Alerts evolved from a flat list into an auditable control workflow.
+    # Keep the legacy is_resolved flag so old exports and integrations remain
+    # compatible while new clients use the explicit status and audit fields.
+    if "alerts" in inspector.get_table_names():
+        alert_cols = {c["name"] for c in inspector.get_columns("alerts")}
+        alert_status_added = "status" not in alert_cols
+        for col, ddl in [
+            ("status", "VARCHAR(20) DEFAULT 'NEW'"),
+            ("assigned_to", "VARCHAR(80)"),
+            ("taken_at", "DATETIME"),
+            ("resolution_comment", "TEXT"),
+            ("resolved_by", "VARCHAR(80)"),
+            ("updated_at", "DATETIME"),
+        ]:
+            if col not in alert_cols:
+                additions.append(("alerts", col, f"ALTER TABLE alerts ADD COLUMN {col} {ddl}"))
+
     if additions:
         with engine.begin() as conn:
             for table, col, ddl in additions:
@@ -305,6 +323,20 @@ def _apply_dev_migrations() -> None:
                     logger.info(f"[migrate] {table}.{col} added")
                 except Exception as exc:
                     logger.warning(f"[migrate] failed {table}.{col}: {exc!r}")
+
+    if "alerts" in inspector.get_table_names():
+        with engine.begin() as conn:
+            if alert_status_added:
+                conn.execute(text("""
+                    UPDATE alerts
+                       SET status = CASE WHEN is_resolved = 1 THEN 'RESOLVED' ELSE 'NEW' END
+                """))
+            else:
+                conn.execute(text("""
+                    UPDATE alerts
+                       SET status = CASE WHEN is_resolved = 1 THEN 'RESOLVED' ELSE 'NEW' END
+                     WHERE status IS NULL OR status = ''
+                """))
 
     # Legacy production databases stored the Risk Report code (SR_PAM_*) in
     # portfolio_type.  Preserve that code separately and restore the actual

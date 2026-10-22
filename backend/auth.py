@@ -28,7 +28,7 @@ def _perm(code: str, group: str, label: str) -> dict[str, str]:
 PERMISSION_CATALOG: tuple[dict[str, str], ...] = (
     _perm("page.dashboard", "Страницы", "Сводка"),
     _perm("page.analytics", "Страницы", "Аналитика"),
-    _perm("page.alerts", "Страницы", "Алерты"),
+    _perm("page.alerts", "Страницы", "Центр контроля"),
     _perm("page.upload", "Страницы", "Загрузка XLSX"),
     _perm("page.primary_data", "Страницы", "Первичка"),
     _perm("page.reconciliation", "Страницы", "Сверка"),

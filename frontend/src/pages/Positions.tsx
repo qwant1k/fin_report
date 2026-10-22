@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { sourceLabel } from '@/lib/displayLabels'
 import { apiErrorMessage } from '@/lib/notifications'
@@ -57,11 +58,12 @@ interface CDUOption {
 }
 
 export default function PositionsPage() {
+  const [searchParams] = useSearchParams()
   // Общая рабочая дата (см. lib/workContext.ts) — синхронизирована с Рабочим днём,
   // KASE, Сверкой и Отчётами, чтобы не пришлось выставлять дату заново на каждом экране.
   const asOfDate = useWorkContextStore((s) => s.workDate)
   const setAsOfDate = useWorkContextStore((s) => s.setWorkDate)
-  const [cduId, setCduId] = useState<string>('')
+  const [cduId, setCduId] = useState<string>(searchParams.get('cdu_id') ?? '')
   const [cdus, setCdus] = useState<CDUOption[]>([])
   const [data, setData] = useState<PositionsResponse | null>(null)
   const [loading, setLoading] = useState(false)
@@ -69,6 +71,13 @@ export default function PositionsPage() {
   useEffect(() => {
     api.get('/settings/cdus').then((r) => setCdus(r.data)).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    const linkedDate = searchParams.get('date')
+    const linkedCdu = searchParams.get('cdu_id')
+    if (linkedDate && linkedDate !== asOfDate) setAsOfDate(linkedDate)
+    if (linkedCdu != null && linkedCdu !== cduId) setCduId(linkedCdu)
+  }, [searchParams])
 
   const fetchPositions = async () => {
     setLoading(true)

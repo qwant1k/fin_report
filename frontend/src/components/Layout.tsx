@@ -3,7 +3,6 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import {
   Activity,
   Percent,
-  AlertCircle,
   BookMarked,
   CalendarCheck,
   CalendarDays,
@@ -38,6 +37,7 @@ import { todayIso, useWorkContextStore } from '@/lib/workContext'
 import { ConfirmDialogHost } from '@/components/ui'
 import UploadIndicator from '@/components/UploadIndicator'
 import QuickApprovalDrawer from '@/components/QuickApprovalDrawer'
+import ControlCenterDrawer from '@/components/ControlCenterDrawer'
 
 interface NavItem {
   to: string
@@ -72,7 +72,6 @@ const navGroups: NavGroup[] = [
       { to: '/analytics', label: 'Аналитика', icon: LineChart, permission: 'page.analytics' },
       { to: '/securities', label: 'Справочник ЦБ', icon: BookMarked, permission: 'page.securities' },
       { to: '/reports', label: 'Отчеты', icon: FileText, permission: 'page.reports' },
-      { to: '/alerts', label: 'Алерты', icon: AlertCircle, permission: 'page.alerts' },
     ],
   },
   {
@@ -279,7 +278,8 @@ function WorkDateBar() {
 
   if (DATE_CONTEXT_HIDDEN_PREFIXES.some((p) => pathname.startsWith(p))) {
     return (
-      <div className="-mx-4 mb-4 flex justify-end border-b border-slate-200/80 bg-white/85 px-4 py-2.5 backdrop-blur-xl sm:-mx-5 sm:px-5 lg:sticky lg:top-0 lg:z-20 lg:-mx-8 lg:px-8">
+      <div className="-mx-4 mb-4 flex justify-end gap-2 border-b border-slate-200/80 bg-white/85 px-4 py-2.5 backdrop-blur-xl sm:-mx-5 sm:px-5 lg:sticky lg:top-0 lg:z-20 lg:-mx-8 lg:px-8">
+        <ControlCenterDrawer />
         <QuickApprovalDrawer />
       </div>
     )
@@ -328,6 +328,7 @@ function WorkDateBar() {
         <span className="hidden text-xs text-slate-400 xl:inline">
           Единый контекст для Рабочего дня, Позиций, KASE, Сверки и Отчётов
         </span>
+        <ControlCenterDrawer />
         <QuickApprovalDrawer />
       </div>
     </div>

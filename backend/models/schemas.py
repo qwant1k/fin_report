@@ -264,7 +264,23 @@ class AlertOut(ORMModel):
     severity: str
     message: str
     is_resolved: bool
+    status: str = "NEW"
+    cdu_name: Optional[str] = None
+    cdu_short_name: Optional[str] = None
+    details: dict = Field(default_factory=dict)
+    assigned_to: Optional[str] = None
+    taken_at: Optional[datetime] = None
+    resolution_comment: Optional[str] = None
+    resolved_by: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    action_path: Optional[str] = None
+    action_label: Optional[str] = None
     created_at: datetime
+
+
+class AlertActionRequest(BaseModel):
+    comment: Optional[str] = Field(default=None, max_length=1000)
 
 
 # ───────── Auth ─────────

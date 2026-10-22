@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from loguru import logger
 from sqlalchemy import select
@@ -72,11 +72,64 @@ def list_alerts(
     return list(db.execute(q).scalars().all())
 
 
-def resolve_alert(db: Session, alert_id: int) -> Optional[Alert]:
+def auto_resolve_alerts(
+    db: Session,
+    *,
+    alert_date: date,
+    alert_types: Iterable[str],
+    comment: str = "Закрыто автоматически при повторной проверке данных.",
+) -> int:
+    """Close the previous active control slice without deleting its audit trail.
+
+    Recalculation then creates the current slice again only for conditions that
+    are still breached.  Disappeared conditions therefore stay auto-resolved,
+    while persistent ones remain visible as fresh current alerts.
+    """
+    rows = db.execute(select(Alert).where(
+        Alert.alert_date == alert_date,
+        Alert.alert_type.in_(tuple(alert_types)),
+        Alert.is_resolved.is_(False),
+    )).scalars().all()
+    now = datetime.utcnow()
+    for row in rows:
+        row.is_resolved = True
+        row.status = "RESOLVED"
+        row.resolved_by = "SYSTEM"
+        row.resolved_at = now
+        row.resolution_comment = comment
+    db.flush()
+    return len(rows)
+
+
+def take_alert_in_work(db: Session, alert_id: int, *, username: str) -> Optional[Alert]:
+    a = db.get(Alert, alert_id)
+    if not a:
+        return None
+    if a.is_resolved:
+        return a
+    a.status = "IN_PROGRESS"
+    a.assigned_to = username
+    a.taken_at = datetime.utcnow()
+    db.commit()
+    db.refresh(a)
+    return a
+
+
+def resolve_alert(
+    db: Session,
+    alert_id: int,
+    *,
+    username: Optional[str] = None,
+    comment: Optional[str] = None,
+) -> Optional[Alert]:
     a = db.get(Alert, alert_id)
     if not a:
         return None
     a.is_resolved = True
+    a.status = "RESOLVED"
+    a.resolution_comment = (comment or "").strip() or None
+    a.resolved_by = username
     a.resolved_at = datetime.utcnow()
     db.commit()
+    db.refresh(a)
     return a

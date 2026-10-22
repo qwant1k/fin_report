@@ -16,6 +16,7 @@ tolerance are not closed automatically — an alert is raised for ОИиУА.
 """
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Dict, Optional
 
@@ -75,6 +76,13 @@ def close_ar_items(db: Session, target_date: Optional[date] = None) -> Dict[str,
                 alert_date=last_date, cdu_id=ar.cdu_id, alert_type="AR_MISMATCH", severity="WARN",
                 message=(f"Дебиторка {ar.isin}: поступило {received:,.2f}, ожидалось {balance:,.2f} — "
                          "требуется ручная проверка ОИиУА"),
+                details_json=json.dumps({
+                    "receivable_id": ar.id,
+                    "isin": ar.isin,
+                    "received": received,
+                    "expected": balance,
+                    "deviation": received - balance,
+                }, ensure_ascii=False),
             ))
             continue
         db.add(ReceivableTransaction(

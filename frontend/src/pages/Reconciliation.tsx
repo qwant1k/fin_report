@@ -1,5 +1,5 @@
-import { Fragment, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle, CheckCircle2, Clock, Download, FileSpreadsheet, GitCompare, Info, Link2, Loader2,
@@ -93,10 +93,15 @@ function Delta({ v }: { v: number | null | undefined }) {
 // ───────────────────────── page ─────────────────────────
 
 export default function ReconciliationPage() {
+  const [searchParams] = useSearchParams()
   const qc = useQueryClient()
   const can = useAuthStore((s) => s.can)
   const workDate = useWorkContextStore((s) => s.workDate)
   const setWorkDate = useWorkContextStore((s) => s.setWorkDate)
+  const linkedDate = searchParams.get('date')
+  useEffect(() => {
+    if (linkedDate && linkedDate !== workDate) setWorkDate(linkedDate)
+  }, [linkedDate, setWorkDate, workDate])
   const [openId, setOpenId] = useState<number | null>(null)
 
   const ov = useQuery<Overview>({

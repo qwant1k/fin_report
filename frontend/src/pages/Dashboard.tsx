@@ -434,7 +434,7 @@ export default function DashboardPage() {
               </div>
               <div className="mt-1 text-2xl font-bold text-red-700">{data.breaches_count}</div>
               <Link to="/alerts" className="text-xs text-red-700/80 hover:underline">
-                Перейти к алертам →
+                Открыть журнал контроля →
               </Link>
             </div>
           )}

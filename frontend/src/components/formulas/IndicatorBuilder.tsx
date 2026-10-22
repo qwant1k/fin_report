@@ -282,7 +282,7 @@ function Editor({ draft, setDraft, canEdit, current, saving, onSave, onStatus, o
                   <option value="BREACH">нарушение</option>
                   <option value="INFO">информация</option>
                 </select>
-                <span className="w-full text-xs text-slate-500">Уведомление появится в «Алертах» после пересчёта сводки.</span>
+                <span className="w-full text-xs text-slate-500">Уведомление появится в Центре контроля после пересчёта сводки.</span>
               </div>
             )}
           </div>

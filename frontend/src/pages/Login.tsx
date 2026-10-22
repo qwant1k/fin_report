@@ -20,7 +20,7 @@ import { apiErrorMessage } from '@/lib/notifications'
 
 const HIGHLIGHTS = [
   { icon: TrendingUp, title: 'Аналитика портфеля', text: 'Динамика, доходность и дюрация в реальном времени' },
-  { icon: ShieldCheck, title: 'Контроль лимитов', text: 'Автоматические алерты по нарушениям и сверка с KASE' },
+  { icon: ShieldCheck, title: 'Контроль лимитов', text: 'Автоматические уведомления о нарушениях и сверка с KASE' },
   { icon: BarChart3, title: 'Сводная отчётность', text: 'Отчёты Фонда с утверждением и экспортом в XLSX/PDF' },
 ]
 

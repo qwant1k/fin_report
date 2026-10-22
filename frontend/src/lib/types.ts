@@ -105,6 +105,18 @@ export interface AlertItem {
   severity: 'INFO' | 'WARN' | 'CRITICAL'
   message: string
   is_resolved: boolean
+  status: 'NEW' | 'IN_PROGRESS' | 'RESOLVED'
+  cdu_name: string | null
+  cdu_short_name: string | null
+  details: Record<string, unknown>
+  assigned_to: string | null
+  taken_at: string | null
+  resolution_comment: string | null
+  resolved_by: string | null
+  resolved_at: string | null
+  updated_at: string | null
+  action_path: string | null
+  action_label: string | null
   created_at: string
 }
 
